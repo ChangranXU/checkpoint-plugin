@@ -78,11 +78,15 @@ def provider_layouts() -> list[ProviderLayout]:
                 SourceGroup("codex", "skills", codex_dir / "skills", ("**/*",)),
                 SourceGroup("codex", "agent_skills", agents_dir / "skills", ("**/*",)),
                 SourceGroup("codex", "admin_skills", Path("/etc/codex/skills"), ("**/*",)),
-                SourceGroup("codex", "hooks", codex_dir, ("hooks.json",)),
+                SourceGroup("codex", "hooks", codex_dir, ("hooks.json",), recursive=False),
                 SourceGroup("codex", "rules", codex_dir / "rules", ("**/*",)),
-                SourceGroup("codex", "profile_configs", codex_dir, ("*.config.toml",)),
+                SourceGroup(
+                    "codex", "profile_configs", codex_dir, ("*.config.toml",), recursive=False
+                ),
                 SourceGroup("codex", "runtime_logs", codex_dir / "log", ("**/*",)),
-                SourceGroup("codex", "runtime_sqlite", codex_dir, ("*.sqlite*",)),
+                SourceGroup(
+                    "codex", "runtime_sqlite", codex_dir, ("*.sqlite*",), recursive=False
+                ),
                 SourceGroup("codex", "runtime_sqlite_dir", codex_dir / "sqlite", ("**/*",)),
                 SourceGroup("codex", "shell_snapshots", codex_dir / "shell_snapshots", ("**/*",)),
                 SourceGroup("codex", "runtime_cache", codex_dir / "cache", ("**/*",)),
@@ -135,7 +139,6 @@ def provider_layouts() -> list[ProviderLayout]:
                 SourceGroup("claude", "commands", claude_dir / "commands", ("**/*",)),
                 SourceGroup("claude", "output_styles", claude_dir / "output-styles", ("**/*",)),
                 SourceGroup("claude", "rules", claude_dir / "rules", ("**/*",)),
-                SourceGroup("claude", "project_memory", claude_dir / "projects", ("**/memory/**/*",)),
                 SourceGroup("claude", "file_history", claude_dir / "file-history", ("**/*",)),
                 SourceGroup("claude", "runtime_cache", claude_dir / "cache", ("**/*",)),
                 SourceGroup("claude", "config_backups", claude_dir / "backups", ("**/*",)),
@@ -225,7 +228,7 @@ def relative_to_root(path: Path, root: Path) -> Path:
     try:
         return path.relative_to(root)
     except ValueError:
-        return Path(path.name)
+        return Path("_external") / absolute_mirror_path(path.resolve())
 
 
 def absolute_mirror_path(path: Path) -> Path:
@@ -274,7 +277,7 @@ def extract_cwds(value: object) -> set[Path]:
 def session_cwds(session_path: Path, manifest: dict, provider: str) -> set[Path]:
     cwds: set[Path] = set()
     try:
-        with session_path.open("r", encoding="utf-8") as handle:
+        with session_path.open("r", encoding="utf-8", errors="replace") as handle:
             for line in handle:
                 line = line.strip()
                 if not line:
@@ -290,7 +293,7 @@ def session_cwds(session_path: Path, manifest: dict, provider: str) -> set[Path]
                             "error": f"invalid jsonl line while reading cwd: {exc}",
                         }
                     )
-                    break
+                    continue
     except OSError as exc:
         manifest["errors"].append(
             {
@@ -747,7 +750,7 @@ def main() -> int:
     verb = "Copied" if args.copy else "Referenced"
     print(f"{verb} {found} raw files in {output_dir}")
     if manifest["errors"]:
-        print(f"Completed with {len(manifest['errors'])} copy errors; see manifest.json")
+        print(f"Completed with {len(manifest['errors'])} errors; see manifest.json")
         return 1
     return 0
 
