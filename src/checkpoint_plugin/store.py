@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, BinaryIO, Iterator
@@ -79,6 +80,7 @@ class CheckpointStore:
             self.index_path,
             json.dumps(ordered, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         )
+        self.write_env_snapshots()
 
     def read_manifest(self, turn_id: int) -> CheckpointManifest:
         return CheckpointManifest.from_json(
@@ -141,6 +143,20 @@ class CheckpointStore:
             handle.seek(ref.start_offset)
             return handle.read(ref.end_offset - ref.start_offset)
 
+    def write_env_snapshots(self) -> None:
+        manifests = self.list_manifests()
+        stale_paths = set(self.env_snapshot_dir.glob("env_*.json"))
+        for index, group in enumerate(_env_groups(manifests)):
+            filename = f"env_{index:04d}_turns_{group[0].turn_id:04d}-{group[-1].turn_id:04d}.json"
+            path = self.env_snapshot_dir / filename
+            stale_paths.discard(path)
+            self._atomic_write(
+                path,
+                json.dumps(_env_snapshot_json(group, self), ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            )
+        for path in stale_paths:
+            path.unlink()
+
     def _manifest_path(self, turn_id: int) -> Path:
         return self.manifest_dir / f"turn_{turn_id:04d}.json"
 
@@ -191,3 +207,41 @@ def _ensure_windows_lock_byte(handle: BinaryIO) -> None:
         handle.write(b"\0")
         handle.flush()
         os.fsync(handle.fileno())
+
+
+def _env_groups(manifests: list[CheckpointManifest]) -> list[list[CheckpointManifest]]:
+    groups: list[list[CheckpointManifest]] = []
+    for manifest in manifests:
+        if not groups or groups[-1][-1].env_ref != manifest.env_ref:
+            groups.append([manifest])
+        else:
+            groups[-1].append(manifest)
+    return groups
+
+
+def _env_snapshot_json(group: list[CheckpointManifest], store: CheckpointStore) -> dict[str, Any]:
+    first = group[0]
+    turns = [
+        {
+            "turn_id": manifest.turn_id,
+            "manifest": f"manifests/turn_{manifest.turn_id:04d}.json",
+            "created_ts": manifest.created_ts,
+            "user_message_preview": manifest.user_message_preview,
+        }
+        for manifest in group
+    ]
+    return {
+        "env_ref": first.env_ref,
+        "turn_start": group[0].turn_id,
+        "turn_end": group[-1].turn_id,
+        "turns": turns,
+        "environment": _load_env_snapshot(first.env_ref, store),
+    }
+
+
+def _load_env_snapshot(env_ref: str, store: CheckpointStore) -> Any:
+    try:
+        return store.load_json_blob(env_ref)
+    except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        print(f"Warning: environment snapshot unavailable for {env_ref}: {exc}", file=sys.stderr)
+        return {"unavailable": True, "error": str(exc)}

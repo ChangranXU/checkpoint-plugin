@@ -24,7 +24,11 @@ class EnvDiff:
     permission_changed: bool
     memory: CategoryDiff
     mcp_changed: bool
+    mcp_configs: CategoryDiff
+    mcp_servers: CategoryDiff
     skills: CategoryDiff
+    skill_status: CategoryDiff
+    plugin_status: CategoryDiff
     settings: CategoryDiff
     project_context: CategoryDiff
 
@@ -36,7 +40,11 @@ class EnvDiff:
                 self.permission_changed,
                 self.memory.has_changes(),
                 self.mcp_changed,
+                self.mcp_configs.has_changes(),
+                self.mcp_servers.has_changes(),
                 self.skills.has_changes(),
+                self.skill_status.has_changes(),
+                self.plugin_status.has_changes(),
                 self.settings.has_changes(),
                 self.project_context.has_changes(),
             ]
@@ -50,7 +58,11 @@ def diff_environments(current: EnvironmentState, target: EnvironmentState) -> En
         permission_changed=current.permission_mode != target.permission_mode,
         memory=_diff_maps(current.memory_files, target.memory_files),
         mcp_changed=current.mcp_config != target.mcp_config,
+        mcp_configs=_diff_maps(current.mcp_configs, target.mcp_configs),
+        mcp_servers=_diff_maps(current.mcp_servers, target.mcp_servers),
         skills=_diff_maps(current.skills, target.skills),
+        skill_status=_diff_maps(current.skill_status, target.skill_status),
+        plugin_status=_diff_maps(current.plugin_status, target.plugin_status),
         settings=_diff_maps(current.settings, target.settings),
         project_context=_diff_maps(current.project_context, target.project_context),
     )
@@ -69,8 +81,12 @@ def render_diff(diff: EnvDiff, current: EnvironmentState, target: EnvironmentSta
         lines.append(f"  Permission: {current.permission_mode or '-'} -> {target.permission_mode or '-'}")
     if diff.mcp_changed:
         lines.append("  MCP config: modified")
+    _append_category(lines, "MCP config files", diff.mcp_configs)
+    _append_category(lines, "MCP servers", diff.mcp_servers)
     _append_category(lines, "Memory", diff.memory)
     _append_category(lines, "Skills", diff.skills)
+    _append_category(lines, "Skill status", diff.skill_status)
+    _append_category(lines, "Plugin status", diff.plugin_status)
     _append_category(lines, "Settings", diff.settings)
     _append_category(lines, "Project context", diff.project_context)
     return "\n".join(lines)

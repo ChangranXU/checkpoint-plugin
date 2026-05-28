@@ -13,8 +13,9 @@ class ProviderLayout:
     home: Path
     memory_dir: Path | None
     mcp_config: Path | None
+    mcp_config_files: list[Path]
     settings_files: list[Path]
-    skills_dir: Path | None
+    skills_dirs: dict[str, Path]
     project_files: list[str]
 
 
@@ -25,19 +26,29 @@ def _home() -> Path:
 def claude_layout() -> ProviderLayout:
     home = _home()
     claude_home = home / ".claude"
+    managed_root = Path("/Library/Application Support/ClaudeCode") if os.name != "nt" else Path.home()
     return ProviderLayout(
         name="claude",
         home=claude_home,
         memory_dir=claude_home / "memories",
         mcp_config=home / ".claude.json",
+        mcp_config_files=[
+            home / ".claude.json",
+            managed_root / "managed-mcp.json",
+        ],
         settings_files=[
+            home / ".claude.json",
+            managed_root / "managed-settings.json",
+            managed_root / "managed-mcp.json",
             claude_home / "settings.json",
             claude_home / "settings.local.json",
             claude_home / "config.json",
             claude_home / "CLAUDE.md",
             claude_home / "rules.json",
         ],
-        skills_dir=claude_home / "skills",
+        skills_dirs={
+            "user": claude_home / "skills",
+        },
         project_files=[
             "CLAUDE.md",
             "CLAUDE.local.md",
@@ -49,6 +60,10 @@ def claude_layout() -> ProviderLayout:
             ".claude/file-history",
             ".claude/shell-snapshots",
             ".claude/todos",
+            ".claude/skills",
+            ".claude/agents",
+            ".claude/commands",
+            ".claude/output-styles",
         ],
     )
 
@@ -56,27 +71,42 @@ def claude_layout() -> ProviderLayout:
 def codex_layout() -> ProviderLayout:
     home = _home()
     codex_home = Path(os.environ.get("CODEX_HOME", str(home / ".codex"))).expanduser()
+    system_codex = Path("/etc/codex") if os.name != "nt" else codex_home
     return ProviderLayout(
         name="codex",
         home=codex_home,
         memory_dir=codex_home / "memories",
-        mcp_config=codex_home / "mcp.json",
+        mcp_config=codex_home / "config.toml",
+        mcp_config_files=[
+            system_codex / "managed_config.toml",
+            system_codex / "requirements.toml",
+            codex_home / "config.toml",
+            home / ".mcp.json",
+        ],
         settings_files=[
+            system_codex / "managed_config.toml",
+            system_codex / "requirements.toml",
             codex_home / "config.toml",
             codex_home / "auth.json",
             codex_home / "AGENTS.md",
             codex_home / "hooks.json",
             codex_home / "rules.json",
         ],
-        skills_dir=codex_home / "skills",
+        skills_dirs={
+            "codex-user": codex_home / "skills",
+            "agent-user": home / ".agents" / "skills",
+            "codex-admin": Path("/etc/codex/skills"),
+        },
         project_files=[
             "AGENTS.override.md",
             "AGENTS.md",
+            ".mcp.json",
             ".codex/config.toml",
             ".codex/hooks.json",
             ".codex/requirements.toml",
             ".codex/rules",
             ".codex/skills",
+            ".agents/skills",
         ],
     )
 
@@ -88,8 +118,9 @@ def generic_layout() -> ProviderLayout:
         home=home,
         memory_dir=None,
         mcp_config=None,
+        mcp_config_files=[],
         settings_files=[],
-        skills_dir=None,
+        skills_dirs={},
         project_files=["AGENTS.md", "CLAUDE.md", ".mcp.json"],
     )
 

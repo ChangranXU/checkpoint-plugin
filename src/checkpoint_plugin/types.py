@@ -13,7 +13,11 @@ class EnvironmentState:
     permission_mode: str | None = None
     memory_files: dict[str, str] = field(default_factory=dict)
     mcp_config: str | None = None
+    mcp_configs: dict[str, str] = field(default_factory=dict)
+    mcp_servers: dict[str, str] = field(default_factory=dict)
     skills: dict[str, str] = field(default_factory=dict)
+    skill_status: dict[str, str] = field(default_factory=dict)
+    plugin_status: dict[str, str] = field(default_factory=dict)
     settings: dict[str, str] = field(default_factory=dict)
     project_context: dict[str, str] = field(default_factory=dict)
     extra: dict[str, Any] = field(default_factory=dict)
@@ -29,7 +33,11 @@ class EnvironmentState:
             permission_mode=data.get("permission_mode"),
             memory_files=dict(data.get("memory_files") or {}),
             mcp_config=data.get("mcp_config"),
+            mcp_configs=dict(data.get("mcp_configs") or {}),
+            mcp_servers=dict(data.get("mcp_servers") or {}),
             skills=dict(data.get("skills") or {}),
+            skill_status=dict(data.get("skill_status") or {}),
+            plugin_status=dict(data.get("plugin_status") or {}),
             settings=dict(data.get("settings") or {}),
             project_context=dict(data.get("project_context") or {}),
             extra=dict(data.get("extra") or {}),

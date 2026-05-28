@@ -88,11 +88,11 @@ class ResumeOrchestrator:
         target_store = CheckpointStore(target_dir)
         if (store.session_dir / "metadata.json").exists():
             shutil.copy2(store.session_dir / "metadata.json", target_dir / "metadata.json")
+        if store.blobs_dir.exists():
+            shutil.copytree(store.blobs_dir, target_store.blobs_dir, dirs_exist_ok=True)
         for manifest in store.list_manifests():
             if manifest.turn_id <= plan.turn_id:
                 target_store.write_manifest(replace(manifest, session_id=new_session_id))
-        if store.blobs_dir.exists():
-            shutil.copytree(store.blobs_dir, target_store.blobs_dir, dirs_exist_ok=True)
         trajectory = _trajectory_prefix(store, plan)
         if trajectory:
             target_store._atomic_write(target_store.trajectory_path, trajectory)

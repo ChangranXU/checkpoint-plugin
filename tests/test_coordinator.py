@@ -35,6 +35,7 @@ def test_metadata_session_title_defaults_to_none(tmp_path):
 
     metadata = json.loads((home / "sessions" / "s1" / "metadata.json").read_text())
     assert metadata["session_title"] is None
+    assert "model" not in metadata
 
 
 def test_codex_session_title_is_read_from_session_index(tmp_path, monkeypatch):
@@ -56,6 +57,7 @@ def test_codex_session_title_is_read_from_session_index(tmp_path, monkeypatch):
 
     metadata = json.loads((home / "sessions" / "s1" / "metadata.json").read_text())
     assert metadata["session_title"] == "Respond to greeting"
+    assert "model" not in metadata
 
 
 def test_claude_session_title_is_read_from_transcript_slug(tmp_path, monkeypatch):

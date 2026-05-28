@@ -1,3 +1,5 @@
+import json
+
 from checkpoint_plugin.store import CheckpointStore
 from checkpoint_plugin.types import CheckpointManifest, TrajectoryReference
 
@@ -60,3 +62,85 @@ def test_read_trajectory_slice_reads_external_transcript_range(tmp_path):
     )
 
     assert store.read_trajectory_slice(ref) == b'{"a":2}\n'
+
+
+def test_write_manifest_creates_human_readable_env_snapshot_groups(tmp_path):
+    store = CheckpointStore(tmp_path / "session")
+    env_ref = store.store_json_blob(
+        {
+            "provider": "codex",
+            "model": "gpt-5",
+            "permission_mode": "workspace-write",
+            "memory_files": {},
+            "mcp_config": None,
+            "skills": {},
+            "settings": {"config.toml": "settings-sha"},
+            "project_context": {},
+            "extra": {"cwd": "/tmp/work"},
+        }
+    )
+    fs_ref = store.store_json_blob({"cwd": "/tmp/work", "files": {}, "git": None})
+
+    store.write_manifest(
+        CheckpointManifest(
+            turn_id=0,
+            session_id="s1",
+            created_ts="2026-05-28T00:00:00Z",
+            env_ref=env_ref,
+            fs_ref=fs_ref,
+            user_message_preview="first",
+        )
+    )
+    store.write_manifest(
+        CheckpointManifest(
+            turn_id=1,
+            session_id="s1",
+            created_ts="2026-05-28T00:01:00Z",
+            env_ref=env_ref,
+            fs_ref=fs_ref,
+            user_message_preview="second",
+            parent_turn_id=0,
+        )
+    )
+
+    paths = sorted((tmp_path / "session" / "env-snapshots").glob("env_*.json"))
+    assert [path.name for path in paths] == ["env_0000_turns_0000-0001.json"]
+
+    snapshot = json.loads(paths[0].read_text(encoding="utf-8"))
+    assert snapshot["env_ref"] == env_ref
+    assert snapshot["environment"]["provider"] == "codex"
+    assert snapshot["environment"]["model"] == "gpt-5"
+    assert [turn["turn_id"] for turn in snapshot["turns"]] == [0, 1]
+    assert [turn["user_message_preview"] for turn in snapshot["turns"]] == ["first", "second"]
+
+
+def test_env_snapshot_groups_split_when_env_ref_changes(tmp_path):
+    store = CheckpointStore(tmp_path / "session")
+    first_env_ref = store.store_json_blob({"provider": "codex", "model": "gpt-5"})
+    second_env_ref = store.store_json_blob({"provider": "codex", "model": "gpt-5-mini"})
+    fs_ref = store.store_json_blob({"cwd": "/tmp/work", "files": {}, "git": None})
+
+    for turn_id, env_ref in enumerate([first_env_ref, first_env_ref, second_env_ref]):
+        store.write_manifest(
+            CheckpointManifest(
+                turn_id=turn_id,
+                session_id="s1",
+                created_ts=f"2026-05-28T00:0{turn_id}:00Z",
+                env_ref=env_ref,
+                fs_ref=fs_ref,
+                user_message_preview=f"turn {turn_id}",
+                parent_turn_id=turn_id - 1 if turn_id else None,
+            )
+        )
+
+    paths = sorted((tmp_path / "session" / "env-snapshots").glob("env_*.json"))
+    assert [path.name for path in paths] == [
+        "env_0000_turns_0000-0001.json",
+        "env_0001_turns_0002-0002.json",
+    ]
+
+    snapshots = [json.loads(path.read_text(encoding="utf-8")) for path in paths]
+    assert snapshots[0]["environment"]["model"] == "gpt-5"
+    assert [turn["turn_id"] for turn in snapshots[0]["turns"]] == [0, 1]
+    assert snapshots[1]["environment"]["model"] == "gpt-5-mini"
+    assert [turn["turn_id"] for turn in snapshots[1]["turns"]] == [2]

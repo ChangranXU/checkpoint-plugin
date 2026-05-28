@@ -8,6 +8,7 @@ from pathlib import Path
 from checkpoint_plugin.store import CheckpointStore
 from checkpoint_plugin.types import EnvironmentState, RestoreReport
 
+from .collector import _nearest_project_root, _plugin_skill_roots
 from .providers import ProviderLayout
 
 
@@ -21,13 +22,73 @@ def restore_environment(
     backed_up: list[str] = []
 
     changed.extend(_restore_tree(target.memory_files, provider.memory_dir, store, backup_dir / "memory", backed_up))
-    changed.extend(_restore_tree(target.skills, provider.skills_dir, store, backup_dir / "skills", backed_up))
+    changed.extend(
+        _restore_named_skill_trees(
+            target.skills,
+            _skill_restore_roots(provider, Path(target.extra.get("cwd") or ".")),
+            store,
+            backup_dir / "skills",
+            backed_up,
+        )
+    )
     if provider.mcp_config is not None:
         changed.extend(_restore_optional_file(target.mcp_config, provider.mcp_config, store, backup_dir / "mcp", backed_up))
     changed.extend(_restore_settings(target.settings, provider.settings_files, store, backup_dir / "settings", backed_up))
     changed.extend(_restore_project_context(target.project_context, store, backup_dir / "project-context", backed_up))
 
     return RestoreReport(changed=changed, backed_up=backed_up, backup_dir=str(backup_dir))
+
+
+def _restore_named_skill_trees(
+    target: dict[str, str],
+    roots: dict[str, Path],
+    store: CheckpointStore,
+    backup_dir: Path,
+    backed_up: list[str],
+) -> list[str]:
+    by_root: dict[str, dict[str, str]] = {}
+    legacy: dict[str, str] = {}
+    for key, sha in target.items():
+        match = _split_skill_root(key, roots)
+        if match is None:
+            legacy[key] = sha
+            continue
+        root_name, rel = match
+        by_root.setdefault(root_name, {})[rel] = sha
+
+    changed: list[str] = []
+    for name, values in by_root.items():
+        changed.extend(_restore_tree(values, roots[name], store, backup_dir / name, backed_up))
+    if legacy:
+        changed.extend(_restore_tree(legacy, roots.get("user"), store, backup_dir / "legacy", backed_up))
+    return changed
+
+
+def _split_skill_root(key: str, roots: dict[str, Path]) -> tuple[str, str] | None:
+    for root_name in sorted(roots, key=len, reverse=True):
+        prefix = f"{root_name}/"
+        if key.startswith(prefix):
+            return root_name, key[len(prefix) :]
+    return None
+
+
+def _skill_restore_roots(provider: ProviderLayout, cwd: Path) -> dict[str, Path]:
+    roots = dict(provider.skills_dirs)
+    roots.update(_plugin_skill_roots(provider))
+    try:
+        cwd = cwd.expanduser().resolve()
+    except OSError:
+        cwd = Path(".").resolve()
+    if provider.name == "claude":
+        for project_root in (cwd, *cwd.parents):
+            if (project_root / ".git").exists() or project_root == _nearest_project_root(cwd):
+                roots[f"project:{project_root}:.claude/skills"] = project_root / ".claude" / "skills"
+    if provider.name == "codex":
+        for project_root in (cwd, *cwd.parents):
+            if (project_root / ".git").exists() or project_root == _nearest_project_root(cwd):
+                roots[f"project:{project_root}:.codex/skills"] = project_root / ".codex" / "skills"
+                roots[f"project:{project_root}:.agents/skills"] = project_root / ".agents" / "skills"
+    return roots
 
 
 def _restore_tree(

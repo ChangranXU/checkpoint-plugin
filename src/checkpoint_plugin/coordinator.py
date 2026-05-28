@@ -44,7 +44,6 @@ class CheckpointCoordinator:
             "provider": provider.name,
             "cwd": str(self.cwd),
             "start_ts": _now(),
-            "model": None,
             "session_title": _session_title(provider.name, provider.home, self.session_id, None),
         }
         self.store._atomic_write(
@@ -156,7 +155,6 @@ class CheckpointCoordinator:
         metadata.setdefault("provider", provider)
         metadata.setdefault("cwd", str(self.cwd))
         metadata.setdefault("start_ts", _now())
-        metadata.setdefault("model", None)
         metadata["session_title"] = title
         self.store._atomic_write(
             metadata_path,
