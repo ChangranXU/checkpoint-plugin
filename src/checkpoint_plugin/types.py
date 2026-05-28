@@ -56,14 +56,37 @@ class FilesystemSnapshot:
 
 
 @dataclass(frozen=True)
+class TrajectoryReference:
+    provider: str
+    transcript_path: str
+    start_offset: int
+    end_offset: int
+    record_count: int
+
+    def to_json(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> "TrajectoryReference":
+        return cls(
+            provider=str(data.get("provider", "generic")),
+            transcript_path=str(data.get("transcript_path", "")),
+            start_offset=int(data.get("start_offset", 0)),
+            end_offset=int(data.get("end_offset", 0)),
+            record_count=int(data.get("record_count", 0)),
+        )
+
+
+@dataclass(frozen=True)
 class CheckpointManifest:
     turn_id: int
     session_id: str
     created_ts: str
     env_ref: str
     fs_ref: str
-    trajectory_offset: int
+    trajectory_offset: int = 0
     trajectory_end_offset: int | None = None
+    trajectory_ref: TrajectoryReference | None = None
     user_message_preview: str = ""
     parent_turn_id: int | None = None
 
@@ -72,6 +95,7 @@ class CheckpointManifest:
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> "CheckpointManifest":
+        trajectory_ref = data.get("trajectory_ref")
         return cls(
             turn_id=int(data["turn_id"]),
             session_id=str(data["session_id"]),
@@ -81,6 +105,11 @@ class CheckpointManifest:
             trajectory_offset=int(data.get("trajectory_offset", 0)),
             trajectory_end_offset=(
                 int(data["trajectory_end_offset"]) if data.get("trajectory_end_offset") is not None else None
+            ),
+            trajectory_ref=(
+                TrajectoryReference.from_json(trajectory_ref)
+                if isinstance(trajectory_ref, dict)
+                else None
             ),
             user_message_preview=str(data.get("user_message_preview", "")),
             parent_turn_id=data.get("parent_turn_id"),

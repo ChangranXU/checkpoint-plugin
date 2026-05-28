@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, BinaryIO, Iterator
 
-from .types import CheckpointManifest
+from .types import CheckpointManifest, TrajectoryReference
 
 
 def canonical_json(data: Any) -> str:
@@ -106,6 +106,7 @@ class CheckpointStore:
         return manifests[-1] if manifests else None
 
     def append_trajectory(self, record: dict[str, Any]) -> tuple[int, int]:
+        """Deprecated compatibility path for pre-reference checkpoints."""
         self.trajectory_path.parent.mkdir(parents=True, exist_ok=True)
         start_offset = self.trajectory_path.stat().st_size if self.trajectory_path.exists() else 0
         line = json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
@@ -117,12 +118,28 @@ class CheckpointStore:
         return start_offset, start_offset + len(encoded)
 
     def slice_trajectory(self, end_offset: int) -> bytes:
+        """Deprecated compatibility path for pre-reference checkpoints."""
         if not self.trajectory_path.exists() or end_offset <= 0:
             return b""
         with self.trajectory_path.open("rb") as handle:
             data = handle.read(end_offset)
         last_newline = data.rfind(b"\n")
         return data[: last_newline + 1] if last_newline >= 0 else b""
+
+    def read_trajectory_slice(self, ref: TrajectoryReference) -> bytes:
+        path = Path(ref.transcript_path).expanduser()
+        if not path.exists():
+            raise FileNotFoundError(f"Missing trajectory transcript {path}")
+        if ref.start_offset < 0 or ref.end_offset < ref.start_offset:
+            raise ValueError("Invalid trajectory byte range")
+        file_size = path.stat().st_size
+        if ref.end_offset > file_size:
+            raise ValueError(
+                f"Trajectory byte range {ref.start_offset}:{ref.end_offset} exceeds {path} size {file_size}"
+            )
+        with path.open("rb") as handle:
+            handle.seek(ref.start_offset)
+            return handle.read(ref.end_offset - ref.start_offset)
 
     def _manifest_path(self, turn_id: int) -> Path:
         return self.manifest_dir / f"turn_{turn_id:04d}.json"

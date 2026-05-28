@@ -12,18 +12,6 @@
         ]
       }
     ],
-    "PostToolUse": [
-      {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python -m checkpoint_plugin.integrations.codex_hook turn_end",
-            "statusMessage": "Saving checkpoint after tool use"
-          }
-        ]
-      }
-    ],
     "Stop": [
       {
         "hooks": [

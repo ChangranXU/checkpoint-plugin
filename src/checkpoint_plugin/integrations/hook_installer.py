@@ -58,7 +58,6 @@ def _claude_spec() -> HookSpec:
         commands=frozenset({command_start, command_turn, *_legacy_commands(module)}),
         events={
             "SessionStart": [_entry("*", command_start)],
-            "PostToolUse": [_entry("*", command_turn)],
             "Stop": [_entry("*", command_turn)],
         },
     )
@@ -76,7 +75,6 @@ def _codex_spec() -> HookSpec:
             "SessionStart": [
                 _entry("startup|resume|clear|compact", command_start, "Creating checkpoint session metadata")
             ],
-            "PostToolUse": [_entry("*", command_turn, "Saving checkpoint after tool use")],
             "Stop": [_entry(None, command_turn, "Saving checkpoint")],
         },
     )
@@ -114,6 +112,7 @@ def _apply(spec: HookSpec, install: bool) -> HookInstallResult:
     if install:
         current_commands = _current_commands(spec)
         _remove_commands(hooks, spec.commands - current_commands)
+        _remove_commands_from_unmanaged_events(hooks, frozenset(spec.events), spec.commands)
         for event, entries in spec.events.items():
             event_entries = hooks.setdefault(event, [])
             if not isinstance(event_entries, list):
@@ -220,6 +219,21 @@ def _remove_commands(hooks: dict[str, Any], commands: frozenset[str]) -> None:
             del hooks[event]
     if not hooks:
         hooks.clear()
+
+
+def _remove_commands_from_unmanaged_events(
+    hooks: dict[str, Any],
+    managed_events: frozenset[str],
+    commands: frozenset[str],
+) -> None:
+    unmanaged = {event: entries for event, entries in hooks.items() if event not in managed_events}
+    _remove_commands(unmanaged, commands)
+    for event in list(hooks):
+        if event not in managed_events:
+            if event in unmanaged:
+                hooks[event] = unmanaged[event]
+            else:
+                del hooks[event]
 
 
 def _base_home() -> Path:

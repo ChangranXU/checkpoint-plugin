@@ -20,6 +20,7 @@ def test_install_and_uninstall_claude_hooks(tmp_path, monkeypatch):
     assert second[0].changed is False
     assert data["theme"] == "dark"
     assert len(data["hooks"]["SessionStart"]) == 1
+    assert "PostToolUse" not in data["hooks"]
     command = data["hooks"]["SessionStart"][0]["hooks"][0]["command"]
     assert command.startswith(sys.executable)
     assert command.endswith("checkpoint_plugin.integrations.claude_code_hook session_start")
@@ -43,6 +44,7 @@ def test_install_and_uninstall_codex_hooks(tmp_path, monkeypatch):
     assert first[0].changed is True
     assert second[0].changed is False
     assert first[0].path == hooks_path
+    assert "PostToolUse" not in data["hooks"]
     command = data["hooks"]["Stop"][0]["hooks"][0]["command"]
     assert command.startswith(sys.executable)
     assert command.endswith("checkpoint_plugin.integrations.codex_hook turn_end")
@@ -92,6 +94,42 @@ def test_reinstall_replaces_legacy_python_hook_command(tmp_path, monkeypatch):
     assert result[0].changed is True
     assert "python -m checkpoint_plugin.integrations.codex_hook turn_end" not in commands
     assert any(command.startswith(sys.executable) for command in commands)
+
+
+def test_reinstall_removes_checkpoint_post_tool_use_hook(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    hooks_path = home / ".codex" / "hooks.json"
+    hooks_path.parent.mkdir(parents=True)
+    command = f"{sys.executable} -m checkpoint_plugin.integrations.codex_hook turn_end"
+    hooks_path.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PostToolUse": [
+                        {
+                            "matcher": "*",
+                            "hooks": [{"type": "command", "command": command}],
+                        }
+                    ],
+                    "Stop": [
+                        {
+                            "hooks": [{"type": "command", "command": command}],
+                        }
+                    ],
+                }
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TEST_HOME", str(home))
+
+    result = install_hooks("codex")
+
+    data = json.loads(hooks_path.read_text(encoding="utf-8"))
+    assert result[0].changed is True
+    assert "PostToolUse" not in data["hooks"]
+    assert "Stop" in data["hooks"]
 
 
 def test_uninstall_keeps_unrelated_hooks_and_settings(tmp_path, monkeypatch):

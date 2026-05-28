@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import sys
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -92,10 +93,9 @@ class ResumeOrchestrator:
                 target_store.write_manifest(replace(manifest, session_id=new_session_id))
         if store.blobs_dir.exists():
             shutil.copytree(store.blobs_dir, target_store.blobs_dir, dirs_exist_ok=True)
-        target_store._atomic_write(
-            target_store.trajectory_path,
-            store.slice_trajectory(_trajectory_resume_offset(plan)),
-        )
+        trajectory = _trajectory_prefix(store, plan)
+        if trajectory:
+            target_store._atomic_write(target_store.trajectory_path, trajectory)
 
 
 def _stamp() -> str:
@@ -106,3 +106,19 @@ def _trajectory_resume_offset(plan: ResumePlan) -> int:
     if plan.target_manifest.trajectory_end_offset is not None:
         return plan.target_manifest.trajectory_end_offset
     return plan.target_manifest.trajectory_offset
+
+
+def _trajectory_prefix(store: CheckpointStore, plan: ResumePlan) -> bytes:
+    chunks: list[bytes] = []
+    for manifest in store.list_manifests():
+        if manifest.turn_id > plan.turn_id:
+            continue
+        if manifest.trajectory_ref is None:
+            continue
+        try:
+            chunks.append(store.read_trajectory_slice(manifest.trajectory_ref))
+        except (FileNotFoundError, ValueError) as exc:
+            print(f"Warning: trajectory unavailable for turn {manifest.turn_id}: {exc}", file=sys.stderr)
+    if chunks:
+        return b"".join(chunks)
+    return store.slice_trajectory(_trajectory_resume_offset(plan))

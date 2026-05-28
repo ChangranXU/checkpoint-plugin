@@ -11,17 +11,6 @@
         ]
       }
     ],
-    "PostToolUse": [
-      {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python -m checkpoint_plugin.integrations.claude_code_hook turn_end"
-          }
-        ]
-      }
-    ],
     "Stop": [
       {
         "matcher": "*",

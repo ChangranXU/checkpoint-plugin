@@ -1,5 +1,5 @@
 from checkpoint_plugin.store import CheckpointStore
-from checkpoint_plugin.types import CheckpointManifest
+from checkpoint_plugin.types import CheckpointManifest, TrajectoryReference
 
 
 def test_blob_dedup_and_manifest_roundtrip(tmp_path):
@@ -18,6 +18,13 @@ def test_blob_dedup_and_manifest_roundtrip(tmp_path):
         fs_ref=second,
         trajectory_offset=12,
         trajectory_end_offset=34,
+        trajectory_ref=TrajectoryReference(
+            provider="codex",
+            transcript_path="/tmp/transcript.jsonl",
+            start_offset=12,
+            end_offset=34,
+            record_count=2,
+        ),
         user_message_preview="hi",
         parent_turn_id=2,
     )
@@ -38,3 +45,18 @@ def test_append_trajectory_returns_start_and_end_offsets(tmp_path):
     assert second_end > second_start
     assert store.slice_trajectory(first_end).count(b"\n") == 1
     assert store.slice_trajectory(second_end).count(b"\n") == 2
+
+
+def test_read_trajectory_slice_reads_external_transcript_range(tmp_path):
+    store = CheckpointStore(tmp_path / "session")
+    transcript = tmp_path / "provider.jsonl"
+    transcript.write_bytes(b'{"a":1}\n{"a":2}\n')
+    ref = TrajectoryReference(
+        provider="codex",
+        transcript_path=str(transcript),
+        start_offset=8,
+        end_offset=16,
+        record_count=1,
+    )
+
+    assert store.read_trajectory_slice(ref) == b'{"a":2}\n'

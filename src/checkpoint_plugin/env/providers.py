@@ -34,6 +34,8 @@ def claude_layout() -> ProviderLayout:
             claude_home / "settings.json",
             claude_home / "settings.local.json",
             claude_home / "config.json",
+            claude_home / "CLAUDE.md",
+            claude_home / "rules.json",
         ],
         skills_dir=claude_home / "skills",
         project_files=[
@@ -43,6 +45,10 @@ def claude_layout() -> ProviderLayout:
             ".claude/CLAUDE.md",
             ".claude/settings.json",
             ".claude/settings.local.json",
+            ".claude/memory",
+            ".claude/file-history",
+            ".claude/shell-snapshots",
+            ".claude/todos",
         ],
     )
 
@@ -59,6 +65,8 @@ def codex_layout() -> ProviderLayout:
             codex_home / "config.toml",
             codex_home / "auth.json",
             codex_home / "AGENTS.md",
+            codex_home / "hooks.json",
+            codex_home / "rules.json",
         ],
         skills_dir=codex_home / "skills",
         project_files=[
@@ -67,6 +75,8 @@ def codex_layout() -> ProviderLayout:
             ".codex/config.toml",
             ".codex/hooks.json",
             ".codex/requirements.toml",
+            ".codex/rules",
+            ".codex/skills",
         ],
     )
 

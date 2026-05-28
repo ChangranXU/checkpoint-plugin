@@ -4,6 +4,11 @@
 
 Automatically saves your agent's state at each turn: environment config, project files, and conversation trajectory. Restore to any previous checkpoint with a diff preview and automatic backups.
 
+## TODO
+
+1. Checkpoint modify-and-resume
+2. Other provider support
+
 ## Quick Start
 
 ```bash
