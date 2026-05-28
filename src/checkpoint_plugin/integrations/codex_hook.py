@@ -1,0 +1,117 @@
+"""Codex hook adapter.
+
+The hook reads the JSON event payload from stdin and writes checkpoints through
+the shared coordinator. It maps Codex hook fields onto the provider-neutral
+checkpoint lifecycle.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+from typing import Any
+
+from checkpoint_plugin.coordinator import CheckpointCoordinator, TurnRecord
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("event", nargs="?", choices=["session_start", "turn_end"])
+    args = parser.parse_args(argv)
+    payload = _read_payload()
+    event = args.event or _event_from_payload(payload)
+    cwd = Path(_first_string(payload, "cwd") or Path.cwd())
+    session_id = os.environ.get("CODEX_SESSION_ID") or _first_string(payload, "session_id") or "codex-session"
+    _seed_codex_env(session_id, payload)
+    coordinator = CheckpointCoordinator(session_id=session_id, cwd=cwd)
+
+    if event == "session_start":
+        coordinator.on_session_start()
+        _write_ok()
+        return 0
+
+    coordinator.on_turn_end(_turn_record(payload))
+    _write_ok()
+    return 0
+
+
+def _read_payload() -> dict[str, Any]:
+    raw = sys.stdin.read().strip()
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        return {"raw": raw}
+    return value if isinstance(value, dict) else {"payload": value}
+
+
+def _event_from_payload(payload: dict[str, Any]) -> str:
+    hook_event_name = _first_string(payload, "hook_event_name", "hookEventName")
+    return "session_start" if hook_event_name == "SessionStart" else "turn_end"
+
+
+def _seed_codex_env(session_id: str, payload: dict[str, Any]) -> None:
+    os.environ.setdefault("CHECKPOINT_PROVIDER", "codex")
+    os.environ.setdefault("CODEX_SESSION_ID", session_id)
+    model = _first_string(payload, "model")
+    if model:
+        os.environ.setdefault("CODEX_MODEL", model)
+    permission_mode = _first_string(payload, "permission_mode", "permissionMode")
+    if permission_mode:
+        os.environ.setdefault("CODEX_SANDBOX_MODE", permission_mode)
+
+
+def _turn_record(payload: dict[str, Any]) -> TurnRecord:
+    user_message = _first_string(payload, "prompt", "user_message", "userMessage", "input")
+    assistant_text = _first_string(
+        payload,
+        "last_assistant_message",
+        "assistant_text",
+        "assistantText",
+        "response",
+        "output",
+    )
+    return TurnRecord(
+        user_message=user_message or "",
+        assistant_text=assistant_text or "",
+        tool_calls=_tool_calls(payload),
+        metadata={"hook_payload": payload},
+    )
+
+
+def _tool_calls(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    tool_name = _first_string(payload, "tool_name", "toolName")
+    if tool_name is None:
+        return []
+    call: dict[str, Any] = {"tool_name": tool_name}
+    for source_key, target_key in (
+        ("tool_use_id", "tool_use_id"),
+        ("toolUseId", "tool_use_id"),
+        ("tool_input", "tool_input"),
+        ("toolInput", "tool_input"),
+        ("tool_response", "tool_response"),
+        ("toolResponse", "tool_response"),
+    ):
+        if source_key in payload:
+            call[target_key] = payload[source_key]
+    return [call]
+
+
+def _first_string(payload: dict[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, str):
+            return value
+    return None
+
+
+def _write_ok() -> None:
+    print("{}")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

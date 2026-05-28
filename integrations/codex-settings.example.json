@@ -1,0 +1,39 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -m checkpoint_plugin.integrations.codex_hook session_start",
+            "statusMessage": "Creating checkpoint session metadata"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -m checkpoint_plugin.integrations.codex_hook turn_end",
+            "statusMessage": "Saving checkpoint after tool use"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -m checkpoint_plugin.integrations.codex_hook turn_end",
+            "statusMessage": "Saving checkpoint"
+          }
+        ]
+      }
+    ]
+  }
+}
