@@ -125,14 +125,19 @@ def generic_layout() -> ProviderLayout:
     )
 
 
+def layout_for_provider(name: str) -> ProviderLayout:
+    normalized = name.strip().lower()
+    if normalized == "claude":
+        return claude_layout()
+    if normalized == "codex":
+        return codex_layout()
+    return generic_layout()
+
+
 def detect_provider(cwd: Path) -> ProviderLayout:
     env_provider = os.environ.get("CHECKPOINT_PROVIDER") or os.environ.get("CLAUDE_PROVIDER")
     if env_provider:
-        lowered = env_provider.strip().lower()
-        if lowered == "claude":
-            return claude_layout()
-        if lowered == "codex":
-            return codex_layout()
+        return layout_for_provider(env_provider)
 
     if os.environ.get("CLAUDE_SESSION_ID") or os.environ.get("CLAUDE_PROJECT_DIR"):
         return claude_layout()

@@ -30,7 +30,7 @@ def main(argv: list[str] | None = None) -> int:
     coordinator = CheckpointCoordinator(session_id=session_id, cwd=cwd)
 
     if event == "session_start":
-        coordinator.on_session_start()
+        coordinator.on_session_start(source=_first_string(payload, "source"))
         _write_ok()
         return 0
 

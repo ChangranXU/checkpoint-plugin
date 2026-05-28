@@ -6,8 +6,9 @@ Automatically saves your agent's state at each turn: environment config, project
 
 ## TODO
 
-1. Checkpoint modify-and-resume
-2. Other provider support
+- [ ] Checkpoint modify-and-resume
+- [ ] Other provider support
+- [ ] Verify on Claude Code (very soon)
 
 ## Quick Start
 
@@ -47,7 +48,7 @@ Checkpoints capture three things at each turn:
 - **Filesystem**: All project files (respects `.gitignore` and excludes `.git`, `node_modules`, `.env`*, etc.)
 - **Trajectory**: Append-only turn history in JSONL format
 
-Restoring a checkpoint shows a diff and creates backups before modifying files.
+Restoring a checkpoint shows a summary diff and creates backups before modifying files. At the resume prompt, enter `d` to inspect detailed environment and filesystem diffs before choosing whether to proceed.
 
 ## Common Commands
 
@@ -55,7 +56,7 @@ Restoring a checkpoint shows a diff and creates backups before modifying files.
 # Manual checkpoint (automatic via hooks in normal use)
 checkpoint save --session <session-id> --note "description"
 
-# List all checkpoints
+# List sessions, then list turns for one session
 checkpoint list
 checkpoint list --session <session-id>
 
@@ -74,6 +75,26 @@ checkpoint clean --keep-last 100
 checkpoint config get .
 checkpoint config set . key value
 ```
+
+`checkpoint list` shows one row per session:
+
+```text
+<session-id>  <session-title>  <source>
+```
+
+Use `checkpoint list --session <session-id>` to list that session's checkpoint turns.
+
+During `checkpoint resume`, the confirmation prompt accepts:
+
+```text
+y = restore checkpoint
+n = cancel
+d = view detailed environment and filesystem diffs
+```
+
+The diff viewer opens a terminal UI grouped like the summary diff: `Environment` changes first, then `Filesystem` changes. Use `j`/`k` or arrow keys to move, `Enter` to open the selected diff in a full-window colored view, and `Esc`/`q` to go back.
+
+After confirming with `y`, choose whether to restore in place or restore into a new folder copy. Copy mode duplicates the current workspace to a sibling folder, applies the checkpoint there, and leaves the original workspace untouched. The resumed provider session and checkpoint metadata point at the copied workspace; the command also prints the copied `Workspace:` path.
 
 ## Troubleshooting
 

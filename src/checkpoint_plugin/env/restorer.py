@@ -143,7 +143,9 @@ def _restore_settings(
         if path is None and settings_files:
             path = settings_files[0].parent / name
         if path is not None:
-            changed.append(str(_restore_blob_to(sha, path, store, backup_dir, backed_up)))
+            restored = _restore_blob_to(sha, path, store, backup_dir, backed_up)
+            if restored is not None:
+                changed.append(str(restored))
     return changed
 
 
@@ -160,7 +162,8 @@ def _restore_optional_file(
             path.unlink()
             return [str(path)]
         return []
-    return [str(_restore_blob_to(sha, path, store, backup_dir, backed_up))]
+    restored = _restore_blob_to(sha, path, store, backup_dir, backed_up)
+    return [str(restored)] if restored is not None else []
 
 
 def _restore_project_context(
@@ -174,7 +177,9 @@ def _restore_project_context(
         path = Path(key)
         if not path.is_absolute():
             continue
-        changed.append(str(_restore_blob_to(sha, path, store, backup_dir / _mirror_path(path), backed_up)))
+        restored = _restore_blob_to(sha, path, store, backup_dir / _mirror_path(path), backed_up)
+        if restored is not None:
+            changed.append(str(restored))
     return changed
 
 
@@ -184,15 +189,16 @@ def _restore_blob_to(
     store: CheckpointStore,
     backup_path_or_dir: Path,
     backed_up: list[str],
-) -> Path:
+) -> Path | None:
     wanted = store.load_blob(sha)
     current = path.read_bytes() if path.exists() and path.is_file() else None
-    if current != wanted:
-        if path.exists():
-            backup_path = backup_path_or_dir if backup_path_or_dir.suffix else backup_path_or_dir / path.name
-            _backup(path, backup_path, backed_up)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(wanted)
+    if current == wanted:
+        return None
+    if path.exists():
+        backup_path = backup_path_or_dir if backup_path_or_dir.suffix else backup_path_or_dir / path.name
+        _backup(path, backup_path, backed_up)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(wanted)
     return path
 
 

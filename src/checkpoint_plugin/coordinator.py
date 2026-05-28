@@ -37,7 +37,7 @@ class CheckpointCoordinator:
         self.session_dir = session_dir(self.session_id, self.home)
         self.store = CheckpointStore(self.session_dir)
 
-    def on_session_start(self) -> None:
+    def on_session_start(self, source: str | None = None) -> None:
         provider = detect_provider(self.cwd)
         metadata = {
             "session_id": self.session_id,
@@ -46,6 +46,8 @@ class CheckpointCoordinator:
             "start_ts": _now(),
             "session_title": _session_title(provider.name, provider.home, self.session_id, None),
         }
+        if source:
+            metadata["source"] = source
         self.store._atomic_write(
             self.session_dir / "metadata.json",
             json.dumps(metadata, ensure_ascii=False, indent=2, sort_keys=True) + "\n",

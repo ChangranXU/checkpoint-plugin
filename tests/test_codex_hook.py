@@ -26,6 +26,7 @@ def test_codex_session_start_writes_metadata(tmp_path, monkeypatch):
     metadata = json.loads((plugin_home / "sessions" / "codex-s1" / "metadata.json").read_text())
     assert metadata["provider"] == "codex"
     assert metadata["cwd"] == str(cwd)
+    assert metadata["source"] == "startup"
 
 
 def test_codex_turn_end_maps_payload_to_checkpoint(tmp_path, monkeypatch):

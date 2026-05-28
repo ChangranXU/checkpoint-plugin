@@ -160,6 +160,8 @@ class ResumeReport:
     backup_dir: str
     env: RestoreReport
     fs: RestoreReport
+    provider_session_path: str | None = None
+    target_cwd: str | None = None
 
     @property
     def changed_files(self) -> list[str]:

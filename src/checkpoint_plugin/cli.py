@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -13,9 +14,11 @@ from .env.collector import environment_from_blob
 from .fs.snapshot import filesystem_from_blob
 from .integrations.hook_installer import install_hooks, uninstall_hooks
 from .paths import config_path, load_config, sessions_dir, write_config
-from .resume import ResumeOrchestrator
+from .resume import ResumeOptions, ResumeOrchestrator
 from .retention import clean_keep_last
 from .store import CheckpointStore
+from .types import ResumePlan
+from .ui.diff_viewer import show_diff_viewer
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -78,8 +81,18 @@ def _dispatch(args: argparse.Namespace) -> int:
         cwd = Path(args.target).expanduser() if args.target else None
         orchestrator = ResumeOrchestrator(cwd=cwd)
         plan = orchestrator.plan(args.session, args.turn)
-        report = orchestrator.execute(plan, _auto_confirm if args.yes else _interactive_confirm)
+        store = CheckpointStore(sessions_dir() / args.session)
+        try:
+            confirm = _auto_confirm if args.yes else lambda text: _interactive_resume_confirm(text, plan, store)
+            report = orchestrator.execute(plan, confirm)
+        except RuntimeError as exc:
+            if str(exc) == "Resume cancelled":
+                print(str(exc), file=sys.stderr)
+                return 1
+            raise
         print(f"Restored into new session {report.new_session_id}")
+        if report.target_cwd is not None:
+            print(f"Workspace: {report.target_cwd}")
         print(f"Backup: {report.backup_dir}")
         print(f"Changed files: {len(report.changed_files)}")
         return 0
@@ -101,7 +114,10 @@ def _cmd_list(session: str | None) -> int:
             return 0
         for child in sorted(root.iterdir()):
             if child.is_dir():
-                print(child.name)
+                metadata = _read_session_metadata(child)
+                title = _display_metadata_value(metadata.get("session_title"))
+                source = _display_metadata_value(metadata.get("source"))
+                print(f"{child.name}  {title}  {source}")
         return 0
 
     store = CheckpointStore(root / session)
@@ -109,6 +125,21 @@ def _cmd_list(session: str | None) -> int:
         preview = manifest.user_message_preview.replace("\n", " ")
         print(f"{manifest.turn_id:04d}  {manifest.created_ts}  {preview}")
     return 0
+
+
+def _read_session_metadata(session_dir: Path) -> dict[str, Any]:
+    path = session_dir / "metadata.json"
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _display_metadata_value(value: Any) -> str:
+    return str(value) if value not in (None, "") else "-"
 
 
 def _cmd_show(session: str, turn: int) -> int:
@@ -154,10 +185,31 @@ def _cmd_hooks(action: str, provider: str) -> int:
     return 0
 
 
-def _interactive_confirm(text: str) -> bool:
+def _interactive_resume_confirm(text: str, plan: ResumePlan, store: CheckpointStore) -> bool | ResumeOptions:
     print(text)
-    answer = input("Proceed? [y/N] ")
-    return answer.lower() in {"y", "yes"}
+    while True:
+        answer = input("Proceed? [y/N/d] ")
+        if answer.lower() in {"y", "yes"}:
+            return _interactive_resume_options(plan)
+        if answer.lower() in {"d", "diff"}:
+            show_diff_viewer(plan, store)
+            continue
+        return False
+
+
+def _interactive_resume_options(plan: ResumePlan) -> ResumeOptions:
+    answer = input("Restore where? [i]n-place/[c]opy (default: in-place) ")
+    if answer.lower() not in {"c", "copy"}:
+        return ResumeOptions(proceed=True)
+    default_path = _default_copy_path(Path(plan.target_fs.cwd), plan.turn_id)
+    raw_path = input(f"Copy folder [{default_path}]: ").strip()
+    target_cwd = Path(raw_path).expanduser() if raw_path else default_path
+    return ResumeOptions(proceed=True, target_cwd=target_cwd)
+
+
+def _default_copy_path(cwd: Path, turn_id: int) -> Path:
+    suffix = f"checkpoint-copy-{turn_id}-{uuid.uuid4().hex[:6]}"
+    return cwd.parent / f"{cwd.name}-{suffix}"
 
 
 def _auto_confirm(text: str) -> bool:

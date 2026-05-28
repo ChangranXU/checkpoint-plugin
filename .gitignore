@@ -2,5 +2,12 @@ __pycache__/
 *.pyc
 *.egg-info/
 .pytest_cache/
+.venv/
+build/
+dist/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
 raw_sessions/
 .DS_Store
