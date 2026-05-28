@@ -17,6 +17,23 @@ checkpoint hooks install
 checkpoint list
 ```
 
+## Configuration
+
+**Storage location**: `~/.checkpoint-plugin/` (override with `CHECKPOINT_PLUGIN_HOME`)
+
+**Hook management**:
+
+```bash
+checkpoint hooks install          # both Claude Code and Codex
+checkpoint hooks install claude   # Claude Code only
+checkpoint hooks install codex    # Codex only
+checkpoint hooks uninstall        # remove all hooks
+checkpoint hooks uninstall claude # remove Claude Code hooks only
+checkpoint hooks uninstall codex  # remove Codex hooks only
+```
+
+**Manual hook setup**: See [integrations/settings.example.json](integrations/settings.example.json) (Claude Code) or [integrations/codex-settings.example.json](integrations/codex-settings.example.json) (Codex)
+
 ## How It Works
 
 Checkpoints capture three things at each turn:
@@ -53,23 +70,6 @@ checkpoint config get .
 checkpoint config set . key value
 ```
 
-## Configuration
-
-**Storage location**: `~/.checkpoint-plugin/` (override with `CHECKPOINT_PLUGIN_HOME`)
-
-**Hook management**:
-
-```bash
-checkpoint hooks install          # both Claude Code and Codex
-checkpoint hooks install claude   # Claude Code only
-checkpoint hooks install codex    # Codex only
-checkpoint hooks uninstall        # remove all hooks
-checkpoint hooks uninstall claude # remove Claude Code hooks only
-checkpoint hooks uninstall codex  # remove Codex hooks only
-```
-
-**Manual hook setup**: See `[integrations/settings.example.json](integrations/settings.example.json)` (Claude Code) or `[integrations/codex-settings.example.json](integrations/codex-settings.example.json)` (Codex)
-
 ## Troubleshooting
 
 **Empty checkpoint list?**
@@ -96,4 +96,4 @@ pip uninstall checkpoint-plugin
 - **New providers**: Add to `src/checkpoint_plugin/env/providers.py`
 - **New integrations**: Create adapter in `src/checkpoint_plugin/integrations/` that calls `CheckpointCoordinator`
 
-See `[src/checkpoint_plugin/](src/checkpoint_plugin/)` for architecture details.
+See [src/checkpoint_plugin/](src/checkpoint_plugin/) for architecture details.

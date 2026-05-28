@@ -94,9 +94,15 @@ class ResumeOrchestrator:
             shutil.copytree(store.blobs_dir, target_store.blobs_dir, dirs_exist_ok=True)
         target_store._atomic_write(
             target_store.trajectory_path,
-            store.slice_trajectory(plan.target_manifest.trajectory_offset),
+            store.slice_trajectory(_trajectory_resume_offset(plan)),
         )
 
 
 def _stamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+
+
+def _trajectory_resume_offset(plan: ResumePlan) -> int:
+    if plan.target_manifest.trajectory_end_offset is not None:
+        return plan.target_manifest.trajectory_end_offset
+    return plan.target_manifest.trajectory_offset

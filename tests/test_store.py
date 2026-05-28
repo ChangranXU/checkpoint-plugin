@@ -17,6 +17,7 @@ def test_blob_dedup_and_manifest_roundtrip(tmp_path):
         env_ref=first,
         fs_ref=second,
         trajectory_offset=12,
+        trajectory_end_offset=34,
         user_message_preview="hi",
         parent_turn_id=2,
     )
@@ -26,12 +27,14 @@ def test_blob_dedup_and_manifest_roundtrip(tmp_path):
     assert store.list_turn_ids() == [3]
 
 
-def test_append_trajectory_returns_start_offset(tmp_path):
+def test_append_trajectory_returns_start_and_end_offsets(tmp_path):
     store = CheckpointStore(tmp_path / "session")
 
-    first = store.append_trajectory({"event": 1})
-    second = store.append_trajectory({"event": 2})
+    first_start, first_end = store.append_trajectory({"event": 1})
+    second_start, second_end = store.append_trajectory({"event": 2})
 
-    assert first == 0
-    assert second > first
-    assert store.slice_trajectory(second).count(b"\n") == 1
+    assert first_start == 0
+    assert first_end == second_start
+    assert second_end > second_start
+    assert store.slice_trajectory(first_end).count(b"\n") == 1
+    assert store.slice_trajectory(second_end).count(b"\n") == 2

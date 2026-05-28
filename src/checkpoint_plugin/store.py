@@ -5,8 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO, Iterator
 
 from .types import CheckpointManifest
 
@@ -23,10 +24,21 @@ class CheckpointStore:
         self.blobs_dir = self.session_dir / "blobs"
         self.trajectory_path = self.session_dir / "trajectory.jsonl"
         self.env_snapshot_dir = self.session_dir / "env-snapshots"
+        self.lock_path = self.session_dir / ".checkpoint.lock"
         self.session_dir.mkdir(parents=True, exist_ok=True)
         self.manifest_dir.mkdir(parents=True, exist_ok=True)
         self.blobs_dir.mkdir(parents=True, exist_ok=True)
         self.env_snapshot_dir.mkdir(parents=True, exist_ok=True)
+
+    @contextmanager
+    def session_lock(self) -> Iterator[None]:
+        self.session_dir.mkdir(parents=True, exist_ok=True)
+        with self.lock_path.open("a+b") as handle:
+            _lock_file(handle)
+            try:
+                yield
+            finally:
+                _unlock_file(handle)
 
     def blob_path(self, sha: str) -> Path:
         return self.blobs_dir / sha[:2] / sha
@@ -93,15 +105,16 @@ class CheckpointStore:
         manifests = self.list_manifests()
         return manifests[-1] if manifests else None
 
-    def append_trajectory(self, record: dict[str, Any]) -> int:
+    def append_trajectory(self, record: dict[str, Any]) -> tuple[int, int]:
         self.trajectory_path.parent.mkdir(parents=True, exist_ok=True)
-        offset = self.trajectory_path.stat().st_size if self.trajectory_path.exists() else 0
+        start_offset = self.trajectory_path.stat().st_size if self.trajectory_path.exists() else 0
         line = json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
+        encoded = line.encode("utf-8")
         with self.trajectory_path.open("ab") as handle:
-            handle.write(line.encode("utf-8"))
+            handle.write(encoded)
             handle.flush()
             os.fsync(handle.fileno())
-        return offset
+        return start_offset, start_offset + len(encoded)
 
     def slice_trajectory(self, end_offset: int) -> bytes:
         if not self.trajectory_path.exists() or end_offset <= 0:
@@ -126,3 +139,38 @@ class CheckpointStore:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp, path)
+
+
+def _lock_file(handle: BinaryIO) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        _ensure_windows_lock_byte(handle)
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        return
+
+    import fcntl
+
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+
+
+def _unlock_file(handle: BinaryIO) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+
+    import fcntl
+
+    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _ensure_windows_lock_byte(handle: BinaryIO) -> None:
+    handle.seek(0, os.SEEK_END)
+    if handle.tell() == 0:
+        handle.write(b"\0")
+        handle.flush()
+        os.fsync(handle.fileno())

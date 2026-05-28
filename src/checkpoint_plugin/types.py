@@ -63,6 +63,7 @@ class CheckpointManifest:
     env_ref: str
     fs_ref: str
     trajectory_offset: int
+    trajectory_end_offset: int | None = None
     user_message_preview: str = ""
     parent_turn_id: int | None = None
 
@@ -78,6 +79,9 @@ class CheckpointManifest:
             env_ref=str(data["env_ref"]),
             fs_ref=str(data["fs_ref"]),
             trajectory_offset=int(data.get("trajectory_offset", 0)),
+            trajectory_end_offset=(
+                int(data["trajectory_end_offset"]) if data.get("trajectory_end_offset") is not None else None
+            ),
             user_message_preview=str(data.get("user_message_preview", "")),
             parent_turn_id=data.get("parent_turn_id"),
         )

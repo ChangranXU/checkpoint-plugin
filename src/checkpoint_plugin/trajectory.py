@@ -9,7 +9,7 @@ from typing import Any
 from .store import CheckpointStore
 
 
-def append_event(store: CheckpointStore, event: dict[str, Any]) -> int:
+def append_event(store: CheckpointStore, event: dict[str, Any]) -> tuple[int, int]:
     return store.append_trajectory(event)
 
 

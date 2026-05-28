@@ -1,6 +1,7 @@
 from checkpoint_plugin.coordinator import CheckpointCoordinator, TurnRecord
 from checkpoint_plugin.resume import ResumeOrchestrator
 from checkpoint_plugin.store import CheckpointStore
+from checkpoint_plugin.trajectory import read_events
 
 
 def test_resume_diff_backup_and_restore(tmp_path, monkeypatch):
@@ -30,3 +31,24 @@ def test_resume_diff_backup_and_restore(tmp_path, monkeypatch):
     resumed_store = CheckpointStore(plugin_home / "sessions" / report.new_session_id)
     assert resumed_store.read_manifest(0).session_id == report.new_session_id
     assert (plugin_home / "backups").exists()
+
+
+def test_resume_copies_trajectory_through_target_turn(tmp_path, monkeypatch):
+    plugin_home = tmp_path / "plugin"
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    (cwd / "file.txt").write_text("v1", encoding="utf-8")
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
+
+    coordinator = CheckpointCoordinator(session_id="s1", cwd=cwd)
+    coordinator.on_session_start()
+    coordinator.on_turn_end(TurnRecord(user_message="first", assistant_text="one"))
+    coordinator.on_turn_end(TurnRecord(user_message="second", assistant_text="two"))
+
+    orchestrator = ResumeOrchestrator(cwd=cwd)
+    report = orchestrator.execute(orchestrator.plan("s1", 1), lambda _text: True)
+
+    resumed_store = CheckpointStore(plugin_home / "sessions" / report.new_session_id)
+    events = read_events(resumed_store.trajectory_path)
+    assert [event["turn_id"] for event in events] == [0, 1]
+    assert [event["user_message"] for event in events] == ["first", "second"]
