@@ -142,6 +142,7 @@ class ResumePlan:
     target_fs: FilesystemSnapshot
     env_diff_text: str
     fs_diff_text: str
+    ignore_plugin_hooks: bool = True
 
     def render(self) -> str:
         parts = [

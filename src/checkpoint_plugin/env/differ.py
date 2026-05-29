@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
+from typing import Callable
 
 from checkpoint_plugin.types import EnvironmentState
+
+from .hook_filter import is_hook_config_basename, is_hook_config_path, strip_plugin_hooks
 
 
 @dataclass(frozen=True)
@@ -51,7 +55,19 @@ class EnvDiff:
         )
 
 
-def diff_environments(current: EnvironmentState, target: EnvironmentState) -> EnvDiff:
+def diff_environments(
+    current: EnvironmentState,
+    target: EnvironmentState,
+    *,
+    blob_loader: Callable[[str], bytes] | None = None,
+    ignore_plugin_hooks: bool = False,
+) -> EnvDiff:
+    settings_normalize = _hook_normalizer(
+        target.provider, blob_loader, ignore_plugin_hooks, by_basename=True
+    )
+    project_normalize = _hook_normalizer(
+        target.provider, blob_loader, ignore_plugin_hooks, by_basename=False
+    )
     return EnvDiff(
         provider_changed=current.provider != target.provider,
         model_changed=current.model != target.model,
@@ -63,8 +79,10 @@ def diff_environments(current: EnvironmentState, target: EnvironmentState) -> En
         skills=_diff_maps(current.skills, target.skills),
         skill_status=_diff_maps(current.skill_status, target.skill_status),
         plugin_status=_diff_maps(current.plugin_status, target.plugin_status),
-        settings=_diff_maps(current.settings, target.settings),
-        project_context=_diff_maps(current.project_context, target.project_context),
+        settings=_diff_maps(current.settings, target.settings, normalize=settings_normalize),
+        project_context=_diff_maps(
+            current.project_context, target.project_context, normalize=project_normalize
+        ),
     )
 
 
@@ -92,15 +110,56 @@ def render_diff(diff: EnvDiff, current: EnvironmentState, target: EnvironmentSta
     return "\n".join(lines)
 
 
-def _diff_maps(current: dict[str, str], target: dict[str, str]) -> CategoryDiff:
+def _diff_maps(
+    current: dict[str, str],
+    target: dict[str, str],
+    *,
+    normalize: Callable[[str, str], str] | None = None,
+) -> CategoryDiff:
     current_keys = set(current)
     target_keys = set(target)
     common = current_keys & target_keys
+    if normalize is None:
+        modified = sorted(key for key in common if current[key] != target[key])
+    else:
+        modified = sorted(
+            key for key in common if normalize(key, current[key]) != normalize(key, target[key])
+        )
     return CategoryDiff(
         added=sorted(target_keys - current_keys),
         removed=sorted(current_keys - target_keys),
-        modified=sorted(key for key in common if current[key] != target[key]),
+        modified=modified,
     )
+
+
+def _hook_normalizer(
+    provider: str,
+    blob_loader: Callable[[str], bytes] | None,
+    ignore_plugin_hooks: bool,
+    *,
+    by_basename: bool,
+) -> Callable[[str, str], str] | None:
+    if not ignore_plugin_hooks or blob_loader is None:
+        return None
+    cache: dict[tuple[str, str], str] = {}
+
+    def normalize(key: str, sha: str) -> str:
+        applies = (
+            is_hook_config_basename(key, provider)
+            if by_basename
+            else is_hook_config_path(key, provider)
+        )
+        if not applies:
+            return sha
+        cache_key = (key, sha)
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached
+        normalized = hashlib.sha256(strip_plugin_hooks(blob_loader(sha))).hexdigest()
+        cache[cache_key] = normalized
+        return normalized
+
+    return normalize
 
 
 def _append_category(lines: list[str], label: str, diff: CategoryDiff) -> None:

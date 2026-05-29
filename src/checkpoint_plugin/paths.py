@@ -20,6 +20,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "max_file_size_mb": 10,
     "retention": {"keep_last": 100, "keep_daily": 7, "keep_weekly": 4},
     "auto_backup_on_resume": True,
+    "ignore_plugin_hook_diffs": True,
 }
 
 

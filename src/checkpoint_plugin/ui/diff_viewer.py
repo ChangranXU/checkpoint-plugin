@@ -45,7 +45,7 @@ def show_diff_viewer(
 ) -> None:
     input_stream = input_stream or sys.stdin
     output_stream = output_stream or sys.stdout
-    entries = diff_entries(plan)
+    entries = diff_entries(plan, store)
     if not entries:
         print("No resume changes to show.", file=output_stream)
         return
@@ -56,8 +56,8 @@ def show_diff_viewer(
         _show_numbered_viewer(plan, store, entries, output_stream)
 
 
-def diff_entries(plan: ResumePlan) -> list[DiffEntry]:
-    entries = _environment_entries(plan)
+def diff_entries(plan: ResumePlan, store: CheckpointStore | None = None) -> list[DiffEntry]:
+    entries = _environment_entries(plan, store)
     diff = diff_filesystems(plan.current_fs, plan.target_fs)
     entries.extend(
         DiffEntry(
@@ -123,8 +123,13 @@ def render_file_diff(plan: ResumePlan, store: CheckpointStore, entry: DiffEntry)
     return rendered or f"No content changes for {entry.path}"
 
 
-def _environment_entries(plan: ResumePlan) -> list[DiffEntry]:
-    diff = diff_environments(plan.current_env, plan.target_env)
+def _environment_entries(plan: ResumePlan, store: CheckpointStore | None = None) -> list[DiffEntry]:
+    diff = diff_environments(
+        plan.current_env,
+        plan.target_env,
+        blob_loader=store.load_blob if store is not None else None,
+        ignore_plugin_hooks=plan.ignore_plugin_hooks,
+    )
     entries: list[DiffEntry] = []
     if diff.provider_changed:
         entries.append(_value_entry("Provider", plan.current_env.provider, plan.target_env.provider))

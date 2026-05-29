@@ -53,7 +53,13 @@ class ResumeOrchestrator:
         config = load_config(self.home)
         ignore = IgnoreMatcher(cwd, config.get("exclude_patterns") or [])
         current_fs = snapshot_cwd(cwd, store, ignore)
-        env_diff = diff_environments(current_env, target_env)
+        ignore_plugin_hooks = bool(config.get("ignore_plugin_hook_diffs", True))
+        env_diff = diff_environments(
+            current_env,
+            target_env,
+            blob_loader=store.load_blob,
+            ignore_plugin_hooks=ignore_plugin_hooks,
+        )
         fs_diff = diff_filesystems(current_fs, target_fs)
         return ResumePlan(
             session_id=session_id,
@@ -65,6 +71,7 @@ class ResumeOrchestrator:
             target_fs=target_fs,
             env_diff_text=render_diff(env_diff, current_env, target_env),
             fs_diff_text=render_fs_diff(fs_diff, target_fs.cwd),
+            ignore_plugin_hooks=ignore_plugin_hooks,
         )
 
     def execute(self, plan: ResumePlan, confirm: Callable[[str], bool | ResumeOptions]) -> ResumeReport:
@@ -82,6 +89,7 @@ class ResumeOrchestrator:
             provider,
             original_store,
             backup_root / "environment",
+            ignore_plugin_hooks=plan.ignore_plugin_hooks,
         )
         config = load_config(self.home)
         ignore = IgnoreMatcher(target_cwd, config.get("exclude_patterns") or [])

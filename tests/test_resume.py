@@ -4,6 +4,7 @@ from pathlib import Path
 
 from checkpoint_plugin.cli import main
 from checkpoint_plugin.coordinator import CheckpointCoordinator, TurnRecord
+from checkpoint_plugin.paths import load_config, write_config
 from checkpoint_plugin.resume import ResumeOptions, ResumeOrchestrator
 from checkpoint_plugin.store import CheckpointStore
 from checkpoint_plugin.types import TrajectoryReference
@@ -686,3 +687,134 @@ def test_resume_skips_missing_referenced_transcript(tmp_path, monkeypatch, capsy
     resumed_store = CheckpointStore(plugin_home / "sessions" / report.new_session_id)
     assert not resumed_store.trajectory_path.exists()
     assert "trajectory unavailable" in capsys.readouterr().err
+
+
+def _settings_without_plugin_hooks() -> str:
+    return json.dumps({"hooks": {}, "model": "sonnet"}, indent=2, sort_keys=True) + "\n"
+
+
+def _settings_with_plugin_hooks() -> str:
+    return (
+        json.dumps(
+            {
+                "hooks": {
+                    "Stop": [
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": "/usr/bin/python3 -m checkpoint_plugin.integrations.claude_code_hook turn_end",
+                                }
+                            ]
+                        }
+                    ]
+                },
+                "model": "sonnet",
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
+
+
+def test_resume_keeps_freshly_installed_plugin_hooks(tmp_path, monkeypatch):
+    plugin_home = tmp_path / "plugin"
+    home = tmp_path / "home"
+    claude_home = home / ".claude"
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    claude_home.mkdir(parents=True)
+    _isolate_provider_env(monkeypatch)
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
+    monkeypatch.setenv("TEST_HOME", str(home))
+    monkeypatch.setenv("CHECKPOINT_PROVIDER", "claude")
+
+    (claude_home / "settings.json").write_text(_settings_without_plugin_hooks(), encoding="utf-8")
+
+    coordinator = CheckpointCoordinator(session_id="s1", cwd=cwd)
+    coordinator.on_session_start()
+    coordinator.on_turn_end(TurnRecord(user_message="checkpoint"))
+
+    (claude_home / "settings.json").write_text(_settings_with_plugin_hooks(), encoding="utf-8")
+
+    orchestrator = ResumeOrchestrator(cwd=cwd)
+    plan = orchestrator.plan("s1", 0)
+    assert "Settings" not in plan.env_diff_text
+
+    orchestrator.execute(plan, lambda _text: True)
+
+    after = (claude_home / "settings.json").read_text(encoding="utf-8")
+    parsed = json.loads(after)
+    assert parsed["model"] == "sonnet"
+    commands = [
+        hook["command"]
+        for entry in parsed["hooks"].get("Stop", [])
+        for hook in entry["hooks"]
+    ]
+    assert any("checkpoint_plugin.integrations" in c for c in commands)
+
+
+def test_resume_does_not_reinstall_uninstalled_plugin_hooks(tmp_path, monkeypatch):
+    plugin_home = tmp_path / "plugin"
+    home = tmp_path / "home"
+    claude_home = home / ".claude"
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    claude_home.mkdir(parents=True)
+    _isolate_provider_env(monkeypatch)
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
+    monkeypatch.setenv("TEST_HOME", str(home))
+    monkeypatch.setenv("CHECKPOINT_PROVIDER", "claude")
+
+    (claude_home / "settings.json").write_text(_settings_with_plugin_hooks(), encoding="utf-8")
+
+    coordinator = CheckpointCoordinator(session_id="s1", cwd=cwd)
+    coordinator.on_session_start()
+    coordinator.on_turn_end(TurnRecord(user_message="checkpoint"))
+
+    (claude_home / "settings.json").write_text(_settings_without_plugin_hooks(), encoding="utf-8")
+
+    orchestrator = ResumeOrchestrator(cwd=cwd)
+    plan = orchestrator.plan("s1", 0)
+    assert "Settings" not in plan.env_diff_text
+
+    orchestrator.execute(plan, lambda _text: True)
+
+    after = json.loads((claude_home / "settings.json").read_text(encoding="utf-8"))
+    assert after["model"] == "sonnet"
+    assert after["hooks"] == {}
+
+
+def test_resume_reverts_plugin_hooks_when_flag_disabled(tmp_path, monkeypatch):
+    plugin_home = tmp_path / "plugin"
+    home = tmp_path / "home"
+    claude_home = home / ".claude"
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    claude_home.mkdir(parents=True)
+    _isolate_provider_env(monkeypatch)
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
+    monkeypatch.setenv("TEST_HOME", str(home))
+    monkeypatch.setenv("CHECKPOINT_PROVIDER", "claude")
+
+    (claude_home / "settings.json").write_text(_settings_without_plugin_hooks(), encoding="utf-8")
+
+    coordinator = CheckpointCoordinator(session_id="s1", cwd=cwd)
+    coordinator.on_session_start()
+    coordinator.on_turn_end(TurnRecord(user_message="checkpoint"))
+
+    (claude_home / "settings.json").write_text(_settings_with_plugin_hooks(), encoding="utf-8")
+
+    config = load_config()
+    config["ignore_plugin_hook_diffs"] = False
+    write_config(config)
+
+    orchestrator = ResumeOrchestrator(cwd=cwd)
+    plan = orchestrator.plan("s1", 0)
+    assert "Settings" in plan.env_diff_text
+
+    orchestrator.execute(plan, lambda _text: True)
+
+    after = json.loads((claude_home / "settings.json").read_text(encoding="utf-8"))
+    assert after["hooks"] == {}

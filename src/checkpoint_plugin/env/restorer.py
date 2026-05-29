@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 
@@ -9,6 +10,12 @@ from checkpoint_plugin.store import CheckpointStore
 from checkpoint_plugin.types import EnvironmentState, RestoreReport
 
 from .collector import _nearest_project_root, _plugin_skill_roots
+from .hook_filter import (
+    is_hook_config_basename,
+    is_hook_config_path,
+    merge_plugin_hooks,
+    strip_plugin_hooks,
+)
 from .providers import ProviderLayout
 
 
@@ -17,6 +24,8 @@ def restore_environment(
     provider: ProviderLayout,
     store: CheckpointStore,
     backup_dir: Path,
+    *,
+    ignore_plugin_hooks: bool = False,
 ) -> RestoreReport:
     changed: list[str] = []
     backed_up: list[str] = []
@@ -33,8 +42,27 @@ def restore_environment(
     )
     if provider.mcp_config is not None:
         changed.extend(_restore_optional_file(target.mcp_config, provider.mcp_config, store, backup_dir / "mcp", backed_up))
-    changed.extend(_restore_settings(target.settings, provider.settings_files, store, backup_dir / "settings", backed_up))
-    changed.extend(_restore_project_context(target.project_context, store, backup_dir / "project-context", backed_up))
+    changed.extend(
+        _restore_settings(
+            target.settings,
+            provider.settings_files,
+            store,
+            backup_dir / "settings",
+            backed_up,
+            provider_name=provider.name,
+            ignore_plugin_hooks=ignore_plugin_hooks,
+        )
+    )
+    changed.extend(
+        _restore_project_context(
+            target.project_context,
+            store,
+            backup_dir / "project-context",
+            backed_up,
+            provider_name=provider.name,
+            ignore_plugin_hooks=ignore_plugin_hooks,
+        )
+    )
 
     return RestoreReport(changed=changed, backed_up=backed_up, backup_dir=str(backup_dir))
 
@@ -130,11 +158,16 @@ def _restore_settings(
     store: CheckpointStore,
     backup_dir: Path,
     backed_up: list[str],
+    *,
+    provider_name: str,
+    ignore_plugin_hooks: bool,
 ) -> list[str]:
     by_name = {path.name: path for path in settings_files}
     changed: list[str] = []
     for name, path in by_name.items():
         if name not in settings and path.exists():
+            if ignore_plugin_hooks and is_hook_config_basename(name, provider_name) and _is_plugin_hooks_only(path):
+                continue
             _backup(path, backup_dir / name, backed_up)
             path.unlink()
             changed.append(str(path))
@@ -143,7 +176,15 @@ def _restore_settings(
         if path is None and settings_files:
             path = settings_files[0].parent / name
         if path is not None:
-            restored = _restore_blob_to(sha, path, store, backup_dir, backed_up)
+            preserve_plugin_hooks = ignore_plugin_hooks and is_hook_config_basename(name, provider_name)
+            restored = _restore_blob_to(
+                sha,
+                path,
+                store,
+                backup_dir,
+                backed_up,
+                preserve_plugin_hooks=preserve_plugin_hooks,
+            )
             if restored is not None:
                 changed.append(str(restored))
     return changed
@@ -171,13 +212,24 @@ def _restore_project_context(
     store: CheckpointStore,
     backup_dir: Path,
     backed_up: list[str],
+    *,
+    provider_name: str,
+    ignore_plugin_hooks: bool,
 ) -> list[str]:
     changed: list[str] = []
     for key, sha in project_context.items():
         path = Path(key)
         if not path.is_absolute():
             continue
-        restored = _restore_blob_to(sha, path, store, backup_dir / _mirror_path(path), backed_up)
+        preserve_plugin_hooks = ignore_plugin_hooks and is_hook_config_path(path, provider_name)
+        restored = _restore_blob_to(
+            sha,
+            path,
+            store,
+            backup_dir / _mirror_path(path),
+            backed_up,
+            preserve_plugin_hooks=preserve_plugin_hooks,
+        )
         if restored is not None:
             changed.append(str(restored))
     return changed
@@ -189,9 +241,13 @@ def _restore_blob_to(
     store: CheckpointStore,
     backup_path_or_dir: Path,
     backed_up: list[str],
+    *,
+    preserve_plugin_hooks: bool = False,
 ) -> Path | None:
     wanted = store.load_blob(sha)
     current = path.read_bytes() if path.exists() and path.is_file() else None
+    if preserve_plugin_hooks:
+        wanted = merge_plugin_hooks(current or b"", wanted)
     if current == wanted:
         return None
     if path.exists():
@@ -200,6 +256,25 @@ def _restore_blob_to(
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(wanted)
     return path
+
+
+def _is_plugin_hooks_only(path: Path) -> bool:
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return False
+    stripped = strip_plugin_hooks(data)
+    try:
+        parsed = json.loads(stripped.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(parsed, dict):
+        return False
+    leftover = {key: value for key, value in parsed.items() if key != "hooks"}
+    if leftover:
+        return False
+    hooks = parsed.get("hooks")
+    return hooks in (None, {}, [])
 
 
 def _backup(path: Path, backup_path: Path, backed_up: list[str]) -> None:
