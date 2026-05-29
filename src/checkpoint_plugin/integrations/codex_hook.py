@@ -17,6 +17,8 @@ from typing import Any
 from checkpoint_plugin.coordinator import CheckpointCoordinator, TurnRecord
 from checkpoint_plugin.types import TrajectoryReference
 
+from ._trajectory_slicer import codex_key, jsonl_ref_for_turn
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
@@ -65,7 +67,7 @@ def _is_stop_event(payload: dict[str, Any]) -> bool:
 
 
 def _seed_codex_env(session_id: str, payload: dict[str, Any]) -> None:
-    os.environ.setdefault("CHECKPOINT_PROVIDER", "codex")
+    os.environ["CHECKPOINT_PROVIDER"] = "codex"
     os.environ.setdefault("CODEX_SESSION_ID", session_id)
     model = _first_string(payload, "model")
     if model:
@@ -116,7 +118,7 @@ def _trajectory_ref(payload: dict[str, Any], provider: str) -> TrajectoryReferen
     if transcript_path is None:
         return None
     turn_id = payload.get("turn_id") or payload.get("turnId")
-    return _jsonl_ref_for_turn(provider, Path(transcript_path), turn_id)
+    return jsonl_ref_for_turn(provider, Path(transcript_path), turn_id, codex_key)
 
 
 def _empty_trajectory_ref(provider: str) -> TrajectoryReference:
@@ -127,76 +129,6 @@ def _empty_trajectory_ref(provider: str) -> TrajectoryReference:
         end_offset=0,
         record_count=0,
     )
-
-
-def _jsonl_ref_for_turn(provider: str, path: Path, turn_id: Any) -> TrajectoryReference | None:
-    try:
-        data = path.expanduser().read_bytes()
-    except OSError:
-        return None
-
-    lines: list[tuple[int, int, Any]] = []
-    offset = 0
-    for line in data.splitlines(keepends=True):
-        end = offset + len(line)
-        if line.strip():
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                record = None
-            lines.append((offset, end, record))
-        offset = end
-
-    matches = [
-        (start, end)
-        for start, end, record in lines
-        if turn_id is None or _turn_ids_match(_record_turn_id(record), turn_id)
-    ]
-    if not matches and turn_id is not None:
-        return _jsonl_ref_for_turn(provider, path, None)
-    if not matches:
-        return None
-    start_offset = matches[0][0]
-    next_turn_start = _next_turn_start(lines, start_offset, turn_id)
-    end_offset = next_turn_start if next_turn_start is not None else len(data)
-    return TrajectoryReference(
-        provider=provider,
-        transcript_path=str(path.expanduser().resolve()),
-        start_offset=start_offset,
-        end_offset=end_offset,
-        record_count=_count_jsonl_records(data[start_offset:end_offset]),
-    )
-
-
-def _next_turn_start(lines: list[tuple[int, int, Any]], start_offset: int, turn_id: Any) -> int | None:
-    if turn_id is None:
-        return None
-    for line_start, _, record in lines:
-        record_turn_id = _record_turn_id(record)
-        if line_start > start_offset and record_turn_id is not None and not _turn_ids_match(record_turn_id, turn_id):
-            return line_start
-    return None
-
-
-def _count_jsonl_records(data: bytes) -> int:
-    return sum(1 for line in data.splitlines() if line.strip())
-
-
-def _record_turn_id(record: Any) -> Any:
-    if not isinstance(record, dict):
-        return None
-    if "turn_id" in record:
-        return record["turn_id"]
-    if "turnId" in record:
-        return record["turnId"]
-    payload = record.get("payload")
-    if isinstance(payload, dict):
-        return payload.get("turn_id") or payload.get("turnId")
-    return None
-
-
-def _turn_ids_match(left: Any, right: Any) -> bool:
-    return left == right or (left is not None and right is not None and str(left) == str(right))
 
 
 def _first_string(payload: dict[str, Any], *keys: str) -> str | None:

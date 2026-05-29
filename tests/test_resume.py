@@ -818,3 +818,185 @@ def test_resume_reverts_plugin_hooks_when_flag_disabled(tmp_path, monkeypatch):
 
     after = json.loads((claude_home / "settings.json").read_text(encoding="utf-8"))
     assert after["hooks"] == {}
+
+
+def _seed_claude_session_for_resume(
+    plugin_home, home, cwd, transcript, *, transcript_text, file_history=None, todos=None
+):
+    claude_home = home / ".claude"
+    cwd.mkdir(exist_ok=True)
+    transcript.write_text(transcript_text, encoding="utf-8")
+    (cwd / "file.txt").write_text("v1", encoding="utf-8")
+    if file_history:
+        history_dir = claude_home / "file-history" / "s1"
+        history_dir.mkdir(parents=True, exist_ok=True)
+        for name, content in file_history.items():
+            (history_dir / name).write_text(content, encoding="utf-8")
+    if todos:
+        todos_dir = claude_home / "todos"
+        todos_dir.mkdir(parents=True, exist_ok=True)
+        for suffix, content in todos.items():
+            (todos_dir / f"s1-{suffix}").write_text(content, encoding="utf-8")
+    coordinator = CheckpointCoordinator(session_id="s1", cwd=cwd)
+    coordinator.on_session_start()
+    coordinator.on_turn_end(
+        TurnRecord(user_message="hi"),
+        TrajectoryReference("claude", str(transcript), 0, transcript.stat().st_size, 0),
+    )
+
+
+def test_resume_extends_latest_turn_to_eof_when_tail_is_complete(tmp_path, monkeypatch):
+    plugin_home = tmp_path / "plugin"
+    home = tmp_path / "home"
+    cwd = tmp_path / "work"
+    transcript = tmp_path / "claude.jsonl"
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
+    monkeypatch.setenv("TEST_HOME", str(home))
+    monkeypatch.setenv("CHECKPOINT_PROVIDER", "claude")
+
+    captured = (
+        json.dumps({"type": "user", "promptId": "p-1", "uuid": "u1", "parentUuid": None,
+                    "message": {"role": "user", "content": "hi"}}) + "\n"
+        + json.dumps({"type": "assistant", "uuid": "a1", "parentUuid": "u1",
+                      "message": {"role": "assistant", "content": []}}) + "\n"
+    )
+    _seed_claude_session_for_resume(plugin_home, home, cwd, transcript, transcript_text=captured)
+
+    # Simulate the trailing flush: same promptId records, complete lines.
+    with transcript.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"type": "system", "subtype": "stop_hook_summary"}) + "\n")
+        handle.write(json.dumps({"type": "system", "subtype": "turn_duration", "durationMs": 12}) + "\n")
+
+    report = ResumeOrchestrator(cwd=cwd).execute(
+        ResumeOrchestrator(cwd=cwd).plan("s1", 0), lambda _text: True
+    )
+    materialized = Path(report.provider_session_path)
+    records = [json.loads(line) for line in materialized.read_text(encoding="utf-8").splitlines()]
+    subtypes = [record.get("subtype") for record in records if record.get("type") == "system"]
+    assert "stop_hook_summary" in subtypes
+    assert "turn_duration" in subtypes
+
+
+def test_resume_does_not_extend_when_tail_starts_new_turn(tmp_path, monkeypatch):
+    plugin_home = tmp_path / "plugin"
+    home = tmp_path / "home"
+    cwd = tmp_path / "work"
+    transcript = tmp_path / "claude.jsonl"
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
+    monkeypatch.setenv("TEST_HOME", str(home))
+    monkeypatch.setenv("CHECKPOINT_PROVIDER", "claude")
+
+    captured = (
+        json.dumps({"type": "user", "promptId": "p-1", "uuid": "u1", "parentUuid": None,
+                    "message": {"role": "user", "content": "hi"}}) + "\n"
+        + json.dumps({"type": "assistant", "uuid": "a1", "parentUuid": "u1",
+                      "message": {"role": "assistant", "content": []}}) + "\n"
+    )
+    _seed_claude_session_for_resume(plugin_home, home, cwd, transcript, transcript_text=captured)
+
+    # User raced ahead and started turn 2 before resume fired.
+    with transcript.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"type": "user", "promptId": "p-2", "uuid": "u2", "parentUuid": "a1",
+                                 "message": {"role": "user", "content": "next"}}) + "\n")
+
+    report = ResumeOrchestrator(cwd=cwd).execute(
+        ResumeOrchestrator(cwd=cwd).plan("s1", 0), lambda _text: True
+    )
+    materialized = Path(report.provider_session_path)
+    prompt_ids = [
+        record.get("promptId")
+        for record in (json.loads(line) for line in materialized.read_text(encoding="utf-8").splitlines())
+        if record.get("promptId") is not None
+    ]
+    assert "p-2" not in prompt_ids
+
+
+def test_resume_hardlinks_file_history_and_todos(tmp_path, monkeypatch):
+    plugin_home = tmp_path / "plugin"
+    home = tmp_path / "home"
+    cwd = tmp_path / "work"
+    transcript = tmp_path / "claude.jsonl"
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
+    monkeypatch.setenv("TEST_HOME", str(home))
+    monkeypatch.setenv("CHECKPOINT_PROVIDER", "claude")
+
+    captured = json.dumps({"type": "user", "promptId": "p-1", "uuid": "u1", "parentUuid": None,
+                           "message": {"role": "user", "content": "hi"}}) + "\n"
+    _seed_claude_session_for_resume(
+        plugin_home,
+        home,
+        cwd,
+        transcript,
+        transcript_text=captured,
+        file_history={"006a1ba@v1": "snapshot-bytes"},
+        todos={"agent-x.json": '{"items": []}'},
+    )
+
+    report = ResumeOrchestrator(cwd=cwd).execute(
+        ResumeOrchestrator(cwd=cwd).plan("s1", 0), lambda _text: True
+    )
+
+    src_history = home / ".claude" / "file-history" / "s1" / "006a1ba@v1"
+    dst_history = home / ".claude" / "file-history" / report.new_session_id / "006a1ba@v1"
+    assert dst_history.exists()
+    assert src_history.stat().st_ino == dst_history.stat().st_ino  # hardlink, not copy
+
+    dst_todo = home / ".claude" / "todos" / f"{report.new_session_id}-agent-x.json"
+    src_todo = home / ".claude" / "todos" / "s1-agent-x.json"
+    assert dst_todo.exists()
+    assert src_todo.stat().st_ino == dst_todo.stat().st_ino
+
+
+def test_resume_command_is_set_in_report(tmp_path, monkeypatch):
+    plugin_home = tmp_path / "plugin"
+    home = tmp_path / "home"
+    cwd = tmp_path / "work"
+    transcript = tmp_path / "claude.jsonl"
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
+    monkeypatch.setenv("TEST_HOME", str(home))
+    monkeypatch.setenv("CHECKPOINT_PROVIDER", "claude")
+
+    captured = json.dumps({"type": "user", "promptId": "p-1", "uuid": "u1", "parentUuid": None,
+                           "message": {"role": "user", "content": "hi"}}) + "\n"
+    _seed_claude_session_for_resume(plugin_home, home, cwd, transcript, transcript_text=captured)
+
+    report = ResumeOrchestrator(cwd=cwd).execute(
+        ResumeOrchestrator(cwd=cwd).plan("s1", 0), lambda _text: True
+    )
+    assert report.resume_command == f"claude --resume {report.new_session_id}"
+
+
+def test_resume_parent_uuid_chain_skips_summary_records(tmp_path, monkeypatch):
+    plugin_home = tmp_path / "plugin"
+    home = tmp_path / "home"
+    cwd = tmp_path / "work"
+    transcript = tmp_path / "claude.jsonl"
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
+    monkeypatch.setenv("TEST_HOME", str(home))
+    monkeypatch.setenv("CHECKPOINT_PROVIDER", "claude")
+
+    transcript_text = (
+        json.dumps({"type": "user", "promptId": "p-1", "uuid": "u1", "parentUuid": None,
+                    "message": {"role": "user", "content": "hi"}}) + "\n"
+        + json.dumps({"type": "assistant", "uuid": "a1", "parentUuid": "u1",
+                      "message": {"role": "assistant", "content": []}}) + "\n"
+        + json.dumps({"type": "summary", "uuid": "sum1", "parentUuid": None}) + "\n"
+        + json.dumps({"type": "user", "promptId": "p-2", "uuid": "u2", "parentUuid": "a1",
+                      "message": {"role": "user", "content": "again"}}) + "\n"
+    )
+    _seed_claude_session_for_resume(plugin_home, home, cwd, transcript, transcript_text=transcript_text)
+
+    report = ResumeOrchestrator(cwd=cwd).execute(
+        ResumeOrchestrator(cwd=cwd).plan("s1", 0), lambda _text: True
+    )
+    records = [
+        json.loads(line)
+        for line in Path(report.provider_session_path).read_text(encoding="utf-8").splitlines()
+    ]
+    by_type = {record["type"]: record for record in records if "uuid" in record}
+    # The second user record's parentUuid must point at the assistant uuid,
+    # NOT at the summary uuid even though summary was written between them.
+    assistant_uuid = by_type["assistant"]["uuid"]
+    second_user = [record for record in records if record.get("type") == "user" and record.get("promptId") == "p-2"][0]
+    assert second_user["parentUuid"] == assistant_uuid
+

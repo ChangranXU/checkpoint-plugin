@@ -17,6 +17,8 @@ from typing import Any
 from checkpoint_plugin.coordinator import CheckpointCoordinator, TurnRecord
 from checkpoint_plugin.types import TrajectoryReference
 
+from ._trajectory_slicer import claude_key, jsonl_ref_for_turn
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
@@ -25,10 +27,11 @@ def main(argv: list[str] | None = None) -> int:
     payload = _read_payload()
     cwd = Path(os.environ.get("CLAUDE_PROJECT_DIR") or payload.get("cwd") or Path.cwd())
     session_id = os.environ.get("CLAUDE_SESSION_ID") or str(payload.get("session_id") or "claude-session")
+    _seed_claude_env(session_id, payload)
     coordinator = CheckpointCoordinator(session_id=session_id, cwd=cwd)
 
     if args.event == "session_start":
-        coordinator.on_session_start()
+        coordinator.on_session_start(source=_first_string(payload, "source"))
         return 0
 
     if not _is_stop_event(payload):
@@ -48,6 +51,37 @@ def _read_payload() -> dict[str, Any]:
     except json.JSONDecodeError:
         return {"raw": raw}
     return value if isinstance(value, dict) else {"payload": value}
+
+
+def _seed_claude_env(session_id: str, payload: dict[str, Any]) -> None:
+    os.environ["CHECKPOINT_PROVIDER"] = "claude"
+    os.environ.setdefault("CLAUDE_SESSION_ID", session_id)
+    model = _first_string(payload, "model")
+    if model:
+        os.environ.setdefault("ANTHROPIC_MODEL", model)
+    permission_mode = _first_string(payload, "permission_mode", "permissionMode")
+    if permission_mode:
+        os.environ.setdefault("CLAUDE_PERMISSION_MODE", permission_mode)
+    effort = _effort_level(payload)
+    if effort:
+        os.environ.setdefault("CLAUDE_EFFORT", effort)
+    agent_type = _first_string(payload, "agent_type", "agentType")
+    if agent_type:
+        os.environ.setdefault("CLAUDE_AGENT_TYPE", agent_type)
+    agent_id = _first_string(payload, "agent_id", "agentId")
+    if agent_id:
+        os.environ.setdefault("CLAUDE_AGENT_ID", agent_id)
+
+
+def _effort_level(payload: dict[str, Any]) -> str | None:
+    effort = payload.get("effort")
+    if isinstance(effort, dict):
+        level = effort.get("level")
+        if isinstance(level, str):
+            return level
+    if isinstance(effort, str):
+        return effort
+    return None
 
 
 def _turn_record(payload: dict[str, Any]) -> TurnRecord:
@@ -73,7 +107,7 @@ def _trajectory_ref(payload: dict[str, Any], provider: str) -> TrajectoryReferen
     if transcript_path is None:
         return None
     turn_id = payload.get("turn_id") or payload.get("turnId")
-    return _jsonl_ref_for_turn(provider, Path(transcript_path), turn_id)
+    return jsonl_ref_for_turn(provider, Path(transcript_path), turn_id, claude_key)
 
 
 def _empty_trajectory_ref(provider: str) -> TrajectoryReference:
@@ -84,76 +118,6 @@ def _empty_trajectory_ref(provider: str) -> TrajectoryReference:
         end_offset=0,
         record_count=0,
     )
-
-
-def _jsonl_ref_for_turn(provider: str, path: Path, turn_id: Any) -> TrajectoryReference | None:
-    try:
-        data = path.expanduser().read_bytes()
-    except OSError:
-        return None
-
-    lines: list[tuple[int, int, Any]] = []
-    offset = 0
-    for line in data.splitlines(keepends=True):
-        end = offset + len(line)
-        if line.strip():
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                record = None
-            lines.append((offset, end, record))
-        offset = end
-
-    matches = [
-        (start, end)
-        for start, end, record in lines
-        if turn_id is None or _turn_ids_match(_record_turn_id(record), turn_id)
-    ]
-    if not matches and turn_id is not None:
-        return _jsonl_ref_for_turn(provider, path, None)
-    if not matches:
-        return None
-    start_offset = matches[0][0]
-    next_turn_start = _next_turn_start(lines, start_offset, turn_id)
-    end_offset = next_turn_start if next_turn_start is not None else len(data)
-    return TrajectoryReference(
-        provider=provider,
-        transcript_path=str(path.expanduser().resolve()),
-        start_offset=start_offset,
-        end_offset=end_offset,
-        record_count=_count_jsonl_records(data[start_offset:end_offset]),
-    )
-
-
-def _next_turn_start(lines: list[tuple[int, int, Any]], start_offset: int, turn_id: Any) -> int | None:
-    if turn_id is None:
-        return None
-    for line_start, _, record in lines:
-        record_turn_id = _record_turn_id(record)
-        if line_start > start_offset and record_turn_id is not None and not _turn_ids_match(record_turn_id, turn_id):
-            return line_start
-    return None
-
-
-def _count_jsonl_records(data: bytes) -> int:
-    return sum(1 for line in data.splitlines() if line.strip())
-
-
-def _record_turn_id(record: Any) -> Any:
-    if not isinstance(record, dict):
-        return None
-    if "turn_id" in record:
-        return record["turn_id"]
-    if "turnId" in record:
-        return record["turnId"]
-    payload = record.get("payload")
-    if isinstance(payload, dict):
-        return payload.get("turn_id") or payload.get("turnId")
-    return None
-
-
-def _turn_ids_match(left: Any, right: Any) -> bool:
-    return left == right or (left is not None and right is not None and str(left) == str(right))
 
 
 def _first_string(payload: dict[str, Any], *keys: str) -> str | None:

@@ -26,6 +26,8 @@ def collect_environment(
         provider=provider.name,
         model=_first_env("ANTHROPIC_MODEL", "CLAUDE_MODEL", "OPENAI_MODEL", "CODEX_MODEL"),
         permission_mode=_first_env("CLAUDE_PERMISSION_MODE", "CODEX_SANDBOX_MODE"),
+        effort=_first_env("CLAUDE_EFFORT"),
+        agent_type=_first_env("CLAUDE_AGENT_TYPE", "CODEX_AGENT_TYPE"),
         memory_files=_collect_tree(provider.memory_dir, store),
         mcp_config=_store_file(provider.mcp_config, store),
         mcp_configs=_collect_named_files(_mcp_config_files(provider, cwd), store),

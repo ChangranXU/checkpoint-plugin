@@ -39,6 +39,10 @@ class CheckpointCoordinator:
 
     def on_session_start(self, source: str | None = None) -> None:
         provider = detect_provider(self.cwd)
+        metadata_path = self.session_dir / "metadata.json"
+        existing = _read_metadata(metadata_path)
+        if existing.get("resumed_from_session_id"):
+            return
         metadata = {
             "session_id": self.session_id,
             "provider": provider.name,
@@ -49,7 +53,7 @@ class CheckpointCoordinator:
         if source:
             metadata["source"] = source
         self.store._atomic_write(
-            self.session_dir / "metadata.json",
+            metadata_path,
             json.dumps(metadata, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         )
 
@@ -166,6 +170,16 @@ class CheckpointCoordinator:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _read_metadata(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _ref_with_end_offset(ref: TrajectoryReference, end_offset: int) -> TrajectoryReference:

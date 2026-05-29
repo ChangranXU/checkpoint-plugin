@@ -57,7 +57,6 @@ def claude_layout() -> ProviderLayout:
             ".claude/settings.json",
             ".claude/settings.local.json",
             ".claude/memory",
-            ".claude/file-history",
             ".claude/shell-snapshots",
             ".claude/todos",
             ".claude/skills",

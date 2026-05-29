@@ -11,6 +11,8 @@ class EnvironmentState:
     provider: str
     model: str | None = None
     permission_mode: str | None = None
+    effort: str | None = None
+    agent_type: str | None = None
     memory_files: dict[str, str] = field(default_factory=dict)
     mcp_config: str | None = None
     mcp_configs: dict[str, str] = field(default_factory=dict)
@@ -31,6 +33,8 @@ class EnvironmentState:
             provider=str(data.get("provider", "generic")),
             model=data.get("model"),
             permission_mode=data.get("permission_mode"),
+            effort=data.get("effort"),
+            agent_type=data.get("agent_type"),
             memory_files=dict(data.get("memory_files") or {}),
             mcp_config=data.get("mcp_config"),
             mcp_configs=dict(data.get("mcp_configs") or {}),
@@ -163,6 +167,7 @@ class ResumeReport:
     fs: RestoreReport
     provider_session_path: str | None = None
     target_cwd: str | None = None
+    resume_command: str | None = None
 
     @property
     def changed_files(self) -> list[str]:

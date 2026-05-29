@@ -19,6 +19,7 @@ from .env.restorer import restore_environment
 from .fs.ignore import IgnoreMatcher
 from .fs.restorer import diff_filesystems, render_fs_diff, restore_cwd
 from .fs.snapshot import filesystem_from_blob, snapshot_cwd
+from .integrations._trajectory_slicer import claude_key, codex_key
 from .paths import backups_dir, ensure_home, load_config, session_dir
 from .store import CheckpointStore
 from .types import CheckpointManifest, ResumePlan, ResumeReport, TrajectoryReference
@@ -113,6 +114,7 @@ class ResumeOrchestrator:
             plan.target_env.permission_mode,
             source_meta,
         )
+        _carry_provider_session_state(provider.name, provider.home, plan.session_id, new_session_id)
         self._copy_session_prefix(original_store, plan, new_session_id, provider_session_path, trajectory, target_cwd)
         return ResumeReport(
             new_session_id=new_session_id,
@@ -121,6 +123,7 @@ class ResumeOrchestrator:
             fs=fs_report,
             provider_session_path=str(provider_session_path) if provider_session_path is not None else None,
             target_cwd=str(target_cwd),
+            resume_command=_resume_command(provider.name, new_session_id),
         )
 
     def _copy_session_prefix(
@@ -212,13 +215,13 @@ def _trajectory_prefix(store: CheckpointStore, plan: ResumePlan) -> TrajectoryPr
     chunks: list[bytes] = []
     spans: dict[int, tuple[int, int, int]] = {}
     offset = 0
-    for manifest in store.list_manifests():
-        if manifest.turn_id > plan.turn_id:
-            continue
+    manifests = [m for m in store.list_manifests() if m.turn_id <= plan.turn_id]
+    for manifest in manifests:
         if manifest.trajectory_ref is None:
             continue
+        is_latest = manifest.turn_id == plan.turn_id
         try:
-            chunk = store.read_trajectory_slice(manifest.trajectory_ref)
+            chunk = _read_trajectory_slice_for_manifest(store, manifest, extend_to_eof=is_latest)
         except (FileNotFoundError, ValueError) as exc:
             print(f"Warning: trajectory unavailable for turn {manifest.turn_id}: {exc}", file=sys.stderr)
             continue
@@ -238,6 +241,88 @@ def _trajectory_prefix(store: CheckpointStore, plan: ResumePlan) -> TrajectoryPr
             _count_jsonl_records(legacy[plan.target_manifest.trajectory_offset :]),
         )
     return TrajectoryPrefix(legacy, spans)
+
+
+def _read_trajectory_slice_for_manifest(
+    store: CheckpointStore,
+    manifest: CheckpointManifest,
+    extend_to_eof: bool,
+) -> bytes:
+    ref = manifest.trajectory_ref
+    if ref is None:
+        return b""
+    base = store.read_trajectory_slice(ref)
+    if not extend_to_eof:
+        return base
+    tail = _recover_trailing_tail(ref)
+    return base + tail
+
+
+def _recover_trailing_tail(ref: TrajectoryReference) -> bytes:
+    """Recover bytes flushed after the hook captured `end_offset`.
+
+    Guarded so we don't pull in records from a new turn or a mid-flush write:
+    - the candidate tail must end with a newline (no truncated JSON line);
+    - no record in the tail may carry a per-turn key distinct from `ref`'s
+      anchor key (no new turn started).
+    """
+    if not ref.transcript_path:
+        return b""
+    path = Path(ref.transcript_path).expanduser()
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return b""
+    if size <= ref.end_offset:
+        return b""
+    try:
+        with path.open("rb") as handle:
+            handle.seek(ref.end_offset)
+            tail = handle.read(size - ref.end_offset)
+    except OSError:
+        return b""
+    if not tail.endswith(b"\n"):
+        return b""
+    extractor = claude_key if ref.provider == "claude" else codex_key if ref.provider == "codex" else None
+    if extractor is None:
+        return tail
+    anchor = _anchor_key(ref, extractor)
+    for line in tail.splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        key = extractor(record)
+        if key is not None and key != anchor:
+            return b""
+    return tail
+
+
+def _anchor_key(ref: TrajectoryReference, extractor: Callable[[dict[str, object]], object]) -> object:
+    path = Path(ref.transcript_path).expanduser()
+    try:
+        with path.open("rb") as handle:
+            handle.seek(ref.start_offset)
+            data = handle.read(ref.end_offset - ref.start_offset)
+    except OSError:
+        return None
+    for line in data.splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        key = extractor(record)
+        if key is not None:
+            return key
+    return None
 
 
 def _write_resumed_metadata(
@@ -457,7 +542,9 @@ def _rewrite_claude_trajectory(
     lines: list[bytes] = []
     last_uuid: str | None = None
     uuid_map: dict[str, str] = {}
-    for record in _jsonl_records(trajectory):
+    records = _jsonl_records(trajectory)
+    records = _ensure_permission_mode_record(records, permission_mode, new_session_id)
+    for record in records:
         record["sessionId"] = new_session_id
         if "cwd" in record:
             record["cwd"] = str(cwd)
@@ -474,10 +561,33 @@ def _rewrite_claude_trajectory(
             record["parentUuid"] = uuid_map.get(str(record["parentUuid"]), last_uuid)
         elif "parentUuid" in record and record.get("type") not in {"summary", "permission-mode"}:
             record["parentUuid"] = last_uuid
-        if isinstance(record.get("uuid"), str):
+        if isinstance(record.get("uuid"), str) and record.get("type") in {"user", "assistant"}:
             last_uuid = str(record["uuid"])
         lines.append(_json_line(record))
     return b"".join(lines)
+
+
+def _ensure_permission_mode_record(
+    records: list[dict[str, object]],
+    permission_mode: str | None,
+    new_session_id: str,
+) -> list[dict[str, object]]:
+    if not permission_mode:
+        return records
+    if any(record.get("type") == "permission-mode" for record in records):
+        return records
+    synthetic = {
+        "type": "permission-mode",
+        "permissionMode": permission_mode,
+        "sessionId": new_session_id,
+    }
+    insert_at = 0
+    for idx, record in enumerate(records):
+        if record.get("type") == "user":
+            insert_at = idx
+            break
+        insert_at = idx + 1
+    return [*records[:insert_at], synthetic, *records[insert_at:]]
 
 
 def _claude_project_dir_name(cwd: Path) -> str:
@@ -518,3 +628,68 @@ def _now() -> str:
 
 def _count_jsonl_records(data: bytes) -> int:
     return sum(1 for line in data.splitlines() if line.strip())
+
+
+def _resume_command(provider_name: str, new_session_id: str) -> str | None:
+    if provider_name == "claude":
+        return f"claude --resume {new_session_id}"
+    if provider_name == "codex":
+        return f"codex resume {new_session_id}"
+    return None
+
+
+def _carry_provider_session_state(
+    provider_name: str,
+    provider_home: Path,
+    old_session_id: str,
+    new_session_id: str,
+) -> None:
+    """Reuse the original session's append-only state under the new session id.
+
+    Hardlinks (not copies) so the resumed session forks cleanly: shared baseline
+    blobs cost zero extra disk, and any new writes by the resumed session land
+    on new inodes without touching the original.
+    """
+    if provider_name != "claude":
+        return
+    _hardlink_tree(
+        provider_home / "file-history" / old_session_id,
+        provider_home / "file-history" / new_session_id,
+    )
+    _hardlink_todos(provider_home / "todos", old_session_id, new_session_id)
+
+
+def _hardlink_tree(src: Path, dst: Path) -> None:
+    if not src.exists() or not src.is_dir():
+        return
+    dst.mkdir(parents=True, exist_ok=True)
+    for entry in src.rglob("*"):
+        rel = entry.relative_to(src)
+        target = dst / rel
+        if entry.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+        if not entry.is_file():
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            continue
+        try:
+            os.link(entry, target)
+        except OSError:
+            shutil.copy2(entry, target)
+
+
+def _hardlink_todos(todos_dir: Path, old_session_id: str, new_session_id: str) -> None:
+    if not todos_dir.exists() or not todos_dir.is_dir():
+        return
+    for entry in todos_dir.glob(f"{old_session_id}-*"):
+        if not entry.is_file():
+            continue
+        target = todos_dir / entry.name.replace(old_session_id, new_session_id, 1)
+        if target.exists():
+            continue
+        try:
+            os.link(entry, target)
+        except OSError:
+            shutil.copy2(entry, target)
