@@ -19,7 +19,7 @@ from .env.restorer import restore_environment
 from .fs.ignore import IgnoreMatcher
 from .fs.restorer import diff_filesystems, render_fs_diff, restore_cwd
 from .fs.snapshot import filesystem_from_blob, snapshot_cwd
-from .integrations._trajectory_slicer import claude_key, codex_key
+from .integrations._trajectory_slicer import claude_key, codex_key, jsonl_count_records
 from .paths import backups_dir, ensure_home, load_config, session_dir
 from .store import CheckpointStore
 from .types import CheckpointManifest, ResumePlan, ResumeReport, TrajectoryReference
@@ -216,6 +216,14 @@ def _trajectory_prefix(store: CheckpointStore, plan: ResumePlan) -> TrajectoryPr
     spans: dict[int, tuple[int, int, int]] = {}
     offset = 0
     manifests = [m for m in store.list_manifests() if m.turn_id <= plan.turn_id]
+    # F3: a forked/resumed session's first captured turn anchors mid-transcript
+    # (the new promptId), but the inherited pre-fork history lives inline in the
+    # SAME transcript at [0:first_start_offset]. Prepend it so the resumed
+    # provider session reproduces the full context rather than starting amnesiac.
+    inherited = _inherited_fork_prefix(manifests)
+    if inherited:
+        chunks.append(inherited)
+        offset = len(inherited)
     for manifest in manifests:
         if manifest.trajectory_ref is None:
             continue
@@ -229,7 +237,7 @@ def _trajectory_prefix(store: CheckpointStore, plan: ResumePlan) -> TrajectoryPr
             continue
         chunks.append(chunk)
         end_offset = offset + len(chunk)
-        spans[manifest.turn_id] = (offset, end_offset, _count_jsonl_records(chunk))
+        spans[manifest.turn_id] = (offset, end_offset, jsonl_count_records(chunk))
         offset = end_offset
     if chunks:
         return TrajectoryPrefix(b"".join(chunks), spans)
@@ -238,9 +246,37 @@ def _trajectory_prefix(store: CheckpointStore, plan: ResumePlan) -> TrajectoryPr
         spans[plan.turn_id] = (
             plan.target_manifest.trajectory_offset,
             len(legacy),
-            _count_jsonl_records(legacy[plan.target_manifest.trajectory_offset :]),
+            jsonl_count_records(legacy[plan.target_manifest.trajectory_offset :]),
         )
     return TrajectoryPrefix(legacy, spans)
+
+
+def _inherited_fork_prefix(manifests: list[CheckpointManifest]) -> bytes:
+    """Bytes of inherited history preceding the first captured turn (F3).
+
+    When the earliest turn's slice begins past byte 0, the records before it are
+    pre-fork context the provider wrote inline into the same transcript. We read
+    `[0:start_offset]` from that transcript so resume restores the full thread.
+    Returns b"" for normal sessions (first turn anchored at byte 0) or when the
+    transcript is gone.
+    """
+    first = next((m for m in manifests if m.trajectory_ref is not None), None)
+    if first is None or first.trajectory_ref is None:
+        return b""
+    ref = first.trajectory_ref
+    if not ref.transcript_path or ref.start_offset <= 0:
+        return b""
+    path = Path(ref.transcript_path).expanduser()
+    try:
+        with path.open("rb") as handle:
+            prefix = handle.read(ref.start_offset)
+    except OSError:
+        return b""
+    # start_offset is a line boundary; guard against a partial trailing line.
+    if prefix and not prefix.endswith(b"\n"):
+        cut = prefix.rfind(b"\n")
+        prefix = prefix[: cut + 1] if cut >= 0 else b""
+    return prefix
 
 
 def _read_trajectory_slice_for_manifest(
@@ -474,7 +510,15 @@ def _rewrite_codex_trajectory(
             if payload.get("type") == "turn_context":
                 if model:
                     payload["model"] = model
-                if permission_mode:
+                # F1: turn_context.permission_profile is a STRUCTURED object
+                # ({type, file_system, network, ...}) and sits alongside
+                # sandbox_policy/approval_policy. The hook-derived permission_mode
+                # is a bare string of a different vocabulary; assigning it here
+                # corrupts the object and breaks Codex load. The captured turn
+                # already holds the exact permission profile, so we preserve it
+                # verbatim and only re-pin a string profile if the original was
+                # itself a string (legacy/simple form).
+                if permission_mode and isinstance(payload.get("permission_profile"), str):
                     payload["permission_profile"] = permission_mode
         if "id" in record:
             record["id"] = new_session_id
@@ -547,8 +591,19 @@ def _rewrite_claude_trajectory(
         record["sessionId"] = new_session_id
         if "cwd" in record:
             record["cwd"] = str(cwd)
-        if model and "model" in record:
-            record["model"] = model
+        # F2: Claude records carry the model at `message.model` on assistant
+        # records, not as a top-level field. Re-pin it there. (The legacy
+        # top-level branch is kept for any record that does carry it.)
+        if model:
+            if "model" in record:
+                record["model"] = model
+            message = record.get("message")
+            if (
+                record.get("type") == "assistant"
+                and isinstance(message, dict)
+                and "model" in message
+            ):
+                message["model"] = model
         if permission_mode and record.get("type") == "permission-mode":
             record["permissionMode"] = permission_mode
         if isinstance(record.get("uuid"), str):
@@ -623,10 +678,6 @@ def _write_bytes_atomic(path: Path, data: bytes) -> None:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def _count_jsonl_records(data: bytes) -> int:
-    return sum(1 for line in data.splitlines() if line.strip())
 
 
 def _resume_command(provider_name: str, new_session_id: str) -> str | None:

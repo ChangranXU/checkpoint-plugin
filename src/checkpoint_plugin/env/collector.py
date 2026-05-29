@@ -5,6 +5,7 @@ from __future__ import annotations
 import fnmatch
 import json
 import os
+import re
 import tomllib
 from pathlib import Path, PurePosixPath
 from typing import Iterable
@@ -28,10 +29,63 @@ SECRET_BASENAME_PATTERNS = (
     "*token*",
 )
 
+# Config files (config.toml, settings.json, .mcp.json, ...) are kept verbatim for
+# faithful restore, but they can embed secret material inline (e.g. Codex
+# `experimental_bearer_token`). We redact the VALUE of any secret-shaped key
+# before storing, gated to structured config so source/markdown is never altered.
+_REDACTABLE_SUFFIXES = (".toml", ".json")
+_SECRET_VALUE_KEY_PATTERNS = (
+    "*token*",
+    "*secret*",
+    "*password*",
+    "*passwd*",
+    "*credential*",
+    "*bearer*",
+    "*api_key*",
+    "*apikey*",
+    "*access_key*",
+    "*private_key*",
+    "trusted_hash",
+)
+_REDACTED = '"***redacted***"'
+# Matches `key = "..."` (TOML) and `"key": "..."` (JSON), preserving the key and
+# separator so only the quoted value is replaced. Bare/numeric values are left
+# alone — inline secrets are quoted strings in practice.
+_SECRET_ASSIGNMENT = re.compile(
+    r'(?P<prefix>(?P<q>["\']?)(?P<key>[\w.-]+)(?P=q)\s*[:=]\s*)'
+    r'(?P<val>"(?:[^"\\]|\\.)*"|\'[^\']*\')'
+)
+
 
 def _is_secret_path(path: Path) -> bool:
     name = path.name.lower()
     return any(fnmatch.fnmatch(name, pattern) for pattern in SECRET_BASENAME_PATTERNS)
+
+
+def _is_secret_key(key: str) -> bool:
+    lowered = key.lower()
+    return any(fnmatch.fnmatch(lowered, pattern) for pattern in _SECRET_VALUE_KEY_PATTERNS)
+
+
+def _redact_secret_values(data: bytes) -> bytes:
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data
+
+    def _replace(match: re.Match[str]) -> str:
+        if _is_secret_key(match.group("key")):
+            return match.group("prefix") + _REDACTED
+        return match.group(0)
+
+    return _SECRET_ASSIGNMENT.sub(_replace, text).encode("utf-8")
+
+
+def _read_blob_bytes(path: Path) -> bytes:
+    data = path.read_bytes()
+    if path.suffix.lower() in _REDACTABLE_SUFFIXES:
+        return _redact_secret_values(data)
+    return data
 
 
 def collect_environment(
@@ -53,7 +107,7 @@ def collect_environment(
         or session_env.get("model"),
         permission_mode=_first_env("CLAUDE_PERMISSION_MODE", "CODEX_PERMISSION_MODE", "CODEX_SANDBOX_MODE")
         or session_env.get("permission_mode"),
-        effort=_first_env("CLAUDE_EFFORT") or session_env.get("effort"),
+        effort=_first_env("CLAUDE_EFFORT") or session_env.get("effort") or _codex_effort(provider, cwd),
         agent_type=_first_env("CLAUDE_AGENT_TYPE", "CODEX_AGENT_TYPE") or session_env.get("agent_type"),
         memory_files=_collect_tree(provider.memory_dir, store),
         mcp_config=_store_file(provider.mcp_config, store),
@@ -68,6 +122,7 @@ def collect_environment(
             "provider_home": str(provider.home),
             "cwd": str(cwd),
             "skill_symlinks": _collect_named_symlinks(skill_roots),
+            **_codex_history_extra(provider, store),
         },
     )
 
@@ -201,6 +256,40 @@ def _codex_configs(provider: ProviderLayout, cwd: Path) -> list[dict[str, object
     return [config for config in configs if config]
 
 
+def _codex_history_extra(provider: ProviderLayout, store: CheckpointStore) -> dict[str, str]:
+    """Capture Codex prompt history (`history.jsonl`) by content hash (G3).
+
+    Cross-session prompt recall lives here; like ~/.claude.json it's global state
+    we record for drift visibility but do NOT restore wholesale (doing so would
+    rewrite unrelated sessions' history). Stored as a deduped blob sha.
+    """
+    if provider.name != "codex":
+        return {}
+    path = provider.home / "history.jsonl"
+    if not path.is_file() or _is_secret_path(path):
+        return {}
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return {}
+    return {"codex_history_ref": store.store_blob(data)}
+
+
+def _codex_effort(provider: ProviderLayout, cwd: Path) -> str | None:
+    """Reasoning effort from Codex config (`model_reasoning_effort`).
+
+    Codex delivers no effort field to hooks; it lives only in config.toml. Pin it
+    on EnvironmentState so a resume can flag a drift, mirroring Claude's effort.
+    Project-level config wins over home (later in the ancestor chain).
+    """
+    effort: str | None = None
+    for config in _codex_configs(provider, cwd):
+        value = config.get("model_reasoning_effort")
+        if isinstance(value, str) and value:
+            effort = value
+    return effort
+
+
 def _mcp_json_configs(provider: ProviderLayout, cwd: Path) -> list[dict[str, object]]:
     configs = [_load_json(path) for path in provider.mcp_config_files if path.name == ".mcp.json"]
     for project_root in _ancestor_chain(_nearest_project_root(cwd), cwd):
@@ -311,7 +400,7 @@ def _load_toml(path: Path) -> dict[str, object]:
 def _store_file(path: Path | None, store: CheckpointStore) -> str | None:
     if path is None or not path.exists() or not path.is_file() or _is_secret_path(path):
         return None
-    return store.store_blob(path.read_bytes())
+    return store.store_blob(_read_blob_bytes(path))
 
 
 def _collect_named_files(paths: dict[str, Path], store: CheckpointStore) -> dict[str, str]:
@@ -349,7 +438,7 @@ def _collect_tree(
         if _is_secret_path(path):
             continue
         rel = path.relative_to(root).as_posix()
-        result[rel] = store.store_blob(path.read_bytes())
+        result[rel] = store.store_blob(_read_blob_bytes(path))
     return result
 
 
@@ -357,7 +446,7 @@ def _collect_settings(paths: Iterable[Path], store: CheckpointStore) -> dict[str
     settings: dict[str, str] = {}
     for path in paths:
         if path.exists() and path.is_file() and not _is_secret_path(path):
-            settings[path.name] = store.store_blob(path.read_bytes())
+            settings[path.name] = store.store_blob(_read_blob_bytes(path))
     return settings
 
 
@@ -368,7 +457,7 @@ def _collect_project_context(cwd: Path, project_files: list[str], store: Checkpo
             path = root / rel_name
             if path.exists() and path.is_file() and not _is_secret_path(path):
                 key = path.relative_to(root).as_posix()
-                context[str(root / key)] = store.store_blob(path.read_bytes())
+                context[str(root / key)] = store.store_blob(_read_blob_bytes(path))
             elif path.exists() and path.is_dir():
                 for rel, sha in _collect_tree(path, store, follow_symlink_dirs=True).items():
                     key = path.relative_to(root).joinpath(rel).as_posix()

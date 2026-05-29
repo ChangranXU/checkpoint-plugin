@@ -173,6 +173,93 @@ def test_claude_subagent_stop_creates_separate_checkpoint(tmp_path, monkeypatch)
     assert metadata["lineage"]["agent_type"] == "Explore"
 
 
+def test_claude_subagent_inherits_parent_model(tmp_path, monkeypatch):
+    """G2: SubagentStop carries no model; inherit the parent's pinned session_env."""
+    plugin_home = tmp_path / "plugin"
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    parent_dir = tmp_path / "proj" / "parent-session"
+    sub_dir = parent_dir / "subagents"
+    sub_dir.mkdir(parents=True)
+    parent_transcript = parent_dir.with_suffix(".jsonl")
+    parent_transcript.write_text(
+        json.dumps({"type": "user", "promptId": "p-1", "message": {"role": "user", "content": "parent"}}) + "\n",
+        encoding="utf-8",
+    )
+    sub_transcript = sub_dir / "agent-abc123.jsonl"
+    sub_transcript.write_text(
+        json.dumps({"type": "user", "promptId": "sp-1", "isSidechain": True, "message": {"role": "user", "content": "sub"}}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
+    monkeypatch.setenv("CLAUDE_SESSION_ID", "parent-session")
+    # Parent SessionStart pins the model (delivered only here).
+    start_payload = {
+        "hook_event_name": "SessionStart",
+        "session_id": "parent-session",
+        "cwd": str(cwd),
+        "source": "startup",
+        "model": "claude-opus-4-8",
+    }
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(start_payload)))
+    assert claude_code_hook.main(["session_start"]) == 0
+
+    # SubagentStop carries no model field, mirroring the real contract.
+    sub_payload = {
+        "hook_event_name": "SubagentStop",
+        "session_id": "parent-session",
+        "cwd": str(cwd),
+        "agent_id": "abc123",
+        "agent_type": "Explore",
+        "transcript_path": str(parent_transcript),
+    }
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(sub_payload)))
+    monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
+    monkeypatch.delenv("CLAUDE_MODEL", raising=False)
+    assert claude_code_hook.main(["subagent_end"]) == 0
+
+    sub_store = CheckpointStore(plugin_home / "sessions" / "parent-session--subagent-abc123")
+    env = environment_from_blob(sub_store.list_manifests()[0].env_ref, sub_store)
+    assert env.model == "claude-opus-4-8"
+
+
+def test_claude_subagent_without_sidechain_file_does_not_slice_parent(tmp_path, monkeypatch):
+    """F4: when no dedicated subagents/agent-*.jsonl exists, the subagent
+    checkpoint must record lineage but NOT a slice of the parent main thread."""
+    plugin_home = tmp_path / "plugin"
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    # Parent transcript exists; NO subagents/ dir is created alongside it.
+    parent_transcript = tmp_path / "proj" / "parent-session.jsonl"
+    parent_transcript.parent.mkdir(parents=True)
+    parent_transcript.write_text(
+        json.dumps({"type": "user", "promptId": "p-1", "isSidechain": False, "message": {"role": "user", "content": "PARENT-MAIN-THREAD"}}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
+    monkeypatch.setenv("CLAUDE_SESSION_ID", "parent-session")
+    payload = {
+        "hook_event_name": "SubagentStop",
+        "session_id": "parent-session",
+        "cwd": str(cwd),
+        "agent_id": "ghost",
+        "agent_type": "Explore",
+        "transcript_path": str(parent_transcript),
+    }
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
+    assert claude_code_hook.main(["subagent_end"]) == 0
+
+    sub_store = CheckpointStore(plugin_home / "sessions" / "parent-session--subagent-ghost")
+    manifest = sub_store.list_manifests()[0]
+    ref = manifest.trajectory_ref
+    # Lineage is still recorded, but the trajectory ref is empty (no parent slice).
+    assert ref is not None
+    assert ref.transcript_path == ""
+    assert ref.record_count == 0
+    metadata = json.loads((sub_store.session_dir / "metadata.json").read_text(encoding="utf-8"))
+    assert metadata["lineage"]["parent_session_id"] == "parent-session"
+
+
 def test_claude_model_captured_from_session_start(tmp_path, monkeypatch):
     """Claude delivers `model` only to SessionStart; Stop must still pin it (B1)."""
     plugin_home = tmp_path / "plugin"

@@ -17,6 +17,7 @@ from checkpoint_plugin.types import TrajectoryReference
 
 from ._hook_common import empty_trajectory_ref as _empty_trajectory_ref
 from ._hook_common import first_string as _first_string
+from ._hook_common import parent_session_env as _parent_session_env
 from ._hook_common import read_payload as _read_payload
 from ._trajectory_slicer import codex_key, jsonl_ref_for_turn
 
@@ -65,22 +66,29 @@ def _on_subagent_end(payload: dict[str, Any], cwd: Path, parent_session_id: str)
     subagent gets its own checkpoint timeline without disturbing the parent.
     """
     agent_id = _first_string(payload, "agent_id", "agentId")
-    transcript_path = _first_string(payload, "transcript_path", "transcriptPath")
+    # Codex SubagentStop carries the subagent's own rollout in `agent_transcript_path`;
+    # the common `transcript_path` is the PARENT rollout. Slice the subagent file.
+    transcript_path = _first_string(payload, "agent_transcript_path", "agentTranscriptPath") or _first_string(
+        payload, "transcript_path", "transcriptPath"
+    )
     if agent_id is None and transcript_path is None:
         return
-    suffix = agent_id or Path(transcript_path).stem if transcript_path else "unknown"
+    suffix = agent_id or (Path(transcript_path).stem if transcript_path else "unknown")
     sub_session_id = f"{parent_session_id}--subagent-{suffix}"
     coordinator = CheckpointCoordinator(session_id=sub_session_id, cwd=cwd)
+    # Inherit the parent's pinned session_env (model/effort) for fields the
+    # subagent Stop payload may omit (G2).
+    sub_env = {**_parent_session_env(parent_session_id), **_session_env(payload)}
     coordinator.on_session_start(
         source="subagent",
-        session_env=_session_env(payload),
+        session_env=sub_env,
         lineage={
             "parent_session_id": parent_session_id,
             "agent_id": agent_id,
             "agent_type": _first_string(payload, "agent_type", "agentType"),
         },
     )
-    ref = _trajectory_ref(payload, provider="codex") or _empty_trajectory_ref("codex")
+    ref = _subagent_trajectory_ref(payload, transcript_path) or _empty_trajectory_ref("codex")
     coordinator.on_turn_end(_turn_record(payload), ref)
 
 
@@ -163,6 +171,13 @@ def _trajectory_ref(payload: dict[str, Any], provider: str) -> TrajectoryReferen
         return None
     turn_id = payload.get("turn_id") or payload.get("turnId")
     return jsonl_ref_for_turn(provider, Path(transcript_path), turn_id, codex_key, claim_leading_keyless=True)
+
+
+def _subagent_trajectory_ref(payload: dict[str, Any], transcript_path: str | None) -> TrajectoryReference | None:
+    if transcript_path is None:
+        return None
+    turn_id = payload.get("turn_id") or payload.get("turnId")
+    return jsonl_ref_for_turn("codex", Path(transcript_path), turn_id, codex_key, claim_leading_keyless=True)
 
 
 def _write_ok() -> None:

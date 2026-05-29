@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 from typing import Any
 
+from checkpoint_plugin.paths import session_dir
 from checkpoint_plugin.types import TrajectoryReference
 
 
@@ -31,6 +33,25 @@ def first_string(payload: dict[str, Any], *keys: str) -> str | None:
         if isinstance(value, str):
             return value
     return None
+
+
+def parent_session_env(parent_session_id: str) -> dict[str, str]:
+    """Read the parent session's recorded session_env (model, effort, ...).
+
+    Subagent Stop payloads omit fields that only arrive at the parent's
+    SessionStart (notably Claude's `model`). The parent persisted them to its
+    metadata.json at session start, so a subagent checkpoint inherits them rather
+    than pinning model=None.
+    """
+    metadata_path = session_dir(parent_session_id) / "metadata.json"
+    try:
+        data = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    session_env = data.get("session_env") if isinstance(data, dict) else None
+    if not isinstance(session_env, dict):
+        return {}
+    return {str(key): str(value) for key, value in session_env.items() if value}
 
 
 def empty_trajectory_ref(provider: str) -> TrajectoryReference:

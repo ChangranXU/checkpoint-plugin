@@ -1005,3 +1005,111 @@ def test_resume_parent_uuid_chain_skips_summary_records(tmp_path, monkeypatch):
     second_user = [record for record in records if record.get("type") == "user" and record.get("promptId") == "p-2"][0]
     assert second_user["parentUuid"] == assistant_uuid
 
+
+def test_codex_rewrite_preserves_structured_permission_profile():
+    """F1: a real turn_context.permission_profile is an object; resume must not
+    overwrite it with the bare permission_mode string."""
+    from checkpoint_plugin.resume import _rewrite_codex_trajectory
+
+    profile = {"type": "managed", "file_system": {"type": "restricted"}, "network": "restricted"}
+    trajectory = (
+        json.dumps({"type": "session_meta", "payload": {"id": "old", "cwd": "/old"}}) + "\n"
+        + json.dumps(
+            {
+                "type": "turn_context",
+                "payload": {
+                    "type": "turn_context",
+                    "turn_id": "t-1",
+                    "model": "old-model",
+                    "permission_profile": profile,
+                    "sandbox_policy": {"type": "workspace-write"},
+                    "approval_policy": "on-request",
+                },
+            }
+        )
+        + "\n"
+    ).encode("utf-8")
+
+    out = _rewrite_codex_trajectory(trajectory, "NEW", Path("/new"), "gpt-target", "acceptEdits", None)
+    records = [json.loads(line) for line in out.splitlines()]
+    turn_context = next(r["payload"] for r in records if r.get("type") == "turn_context")
+    # Structured profile is preserved verbatim; model is re-pinned; sandbox/approval untouched.
+    assert turn_context["permission_profile"] == profile
+    assert turn_context["model"] == "gpt-target"
+    assert turn_context["sandbox_policy"] == {"type": "workspace-write"}
+    assert turn_context["approval_policy"] == "on-request"
+
+
+def test_codex_rewrite_repins_string_permission_profile():
+    """Legacy/simple string permission_profile is still re-pinned for back-compat."""
+    from checkpoint_plugin.resume import _rewrite_codex_trajectory
+
+    trajectory = (
+        json.dumps({"type": "session_meta", "payload": {"id": "old", "cwd": "/old"}}) + "\n"
+        + json.dumps(
+            {"type": "turn_context", "payload": {"type": "turn_context", "permission_profile": "old", "sandbox_policy": "workspace-write"}}
+        )
+        + "\n"
+    ).encode("utf-8")
+    out = _rewrite_codex_trajectory(trajectory, "NEW", Path("/new"), None, "acceptEdits", None)
+    tc = next(json.loads(l)["payload"] for l in out.splitlines() if json.loads(l).get("type") == "turn_context")
+    assert tc["permission_profile"] == "acceptEdits"
+    assert tc["sandbox_policy"] == "workspace-write"
+
+
+def test_claude_rewrite_repins_model_on_assistant_message():
+    """F2: Claude model lives at message.model on assistant records, not top-level."""
+    from checkpoint_plugin.resume import _rewrite_claude_trajectory
+
+    trajectory = (
+        json.dumps({"type": "user", "uuid": "u1", "parentUuid": None, "promptId": "p", "message": {"role": "user", "content": "hi"}}) + "\n"
+        + json.dumps({"type": "assistant", "uuid": "a1", "parentUuid": "u1", "message": {"role": "assistant", "model": "claude-opus-4-8", "content": []}}) + "\n"
+    ).encode("utf-8")
+    out = _rewrite_claude_trajectory(trajectory, "NEW", Path("/new"), "claude-sonnet-4-6", None)
+    records = [json.loads(line) for line in out.splitlines()]
+    assistant = next(r for r in records if r.get("type") == "assistant")
+    assert assistant["message"]["model"] == "claude-sonnet-4-6"
+    # sessionId rewritten across the board.
+    assert {r["sessionId"] for r in records} == {"NEW"}
+
+
+def test_resume_forked_session_includes_inherited_prefix(tmp_path, monkeypatch):
+    """F3: resuming a forked session (first turn anchored mid-transcript) must
+    materialize the inherited pre-fork records, not start amnesiac."""
+    plugin_home = tmp_path / "plugin"
+    home = tmp_path / "home"
+    claude_home = home / ".claude"
+    cwd = tmp_path / "work"
+    transcript = tmp_path / "claude.jsonl"
+    cwd.mkdir()
+    # Inherited pre-fork history, then the forked turn (new promptId).
+    inherited = (
+        json.dumps({"type": "mode", "mode": "normal", "sessionId": "old"}) + "\n"
+        + json.dumps({"type": "user", "sessionId": "old", "uuid": "iu", "parentUuid": None, "promptId": "old-p", "cwd": "/old", "message": {"role": "user", "content": "INHERITED-PROMPT"}}) + "\n"
+        + json.dumps({"type": "assistant", "sessionId": "old", "uuid": "ia", "parentUuid": "iu", "cwd": "/old", "message": {"role": "assistant", "content": []}}) + "\n"
+    )
+    fork_offset = len(inherited.encode("utf-8"))
+    forked_turn = json.dumps({"type": "user", "sessionId": "old", "uuid": "fu", "parentUuid": "ia", "promptId": "fork-p", "cwd": "/old", "message": {"role": "user", "content": "FORKED-PROMPT"}}) + "\n"
+    transcript.write_text(inherited + forked_turn, encoding="utf-8")
+    (cwd / "file.txt").write_text("v1", encoding="utf-8")
+    _isolate_provider_env(monkeypatch)
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
+    monkeypatch.setenv("TEST_HOME", str(home))
+    monkeypatch.setenv("CHECKPOINT_PROVIDER", "claude")
+
+    coordinator = CheckpointCoordinator(session_id="forked", cwd=cwd)
+    coordinator.on_session_start(source="resume", source_transcript_path=str(transcript))
+    # The captured turn anchors at the fork offset, mirroring real on-disk forks.
+    coordinator.on_turn_end(
+        TurnRecord(user_message="forked"),
+        TrajectoryReference("claude", str(transcript), fork_offset, transcript.stat().st_size, 1),
+    )
+
+    report = ResumeOrchestrator(cwd=cwd).execute(ResumeOrchestrator(cwd=cwd).plan("forked", 0), lambda _text: True)
+    materialized = Path(report.provider_session_path).read_text(encoding="utf-8")
+    # Both the inherited history AND the forked turn are present in the resume.
+    assert "INHERITED-PROMPT" in materialized
+    assert "FORKED-PROMPT" in materialized
+    records = [json.loads(line) for line in materialized.splitlines()]
+    assert {r["sessionId"] for r in records} == {report.new_session_id}
+

@@ -60,8 +60,14 @@ class CheckpointCoordinator:
             metadata["source"] = source
         # A native fork (resume/compact) starts a fresh plugin session; record the
         # provider transcript it forked from so lineage can be traced later (B5).
+        # Capture the byte offset + record count at fork time as the anchor point
+        # in the parent's history where this session branched (F5).
         if source in {"resume", "compact"} and source_transcript_path:
             metadata["forked_from_transcript"] = source_transcript_path
+            anchor = _fork_anchor(source_transcript_path)
+            if anchor is not None:
+                metadata["forked_at_offset"] = anchor[0]
+                metadata["forked_at_record_count"] = anchor[1]
         clean_env = {key: value for key, value in (session_env or {}).items() if value}
         if clean_env:
             metadata["session_env"] = clean_env
@@ -196,6 +202,22 @@ def _read_metadata(path: Path) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def _fork_anchor(transcript_path: str) -> tuple[int, int] | None:
+    """(byte offset, record count) of a forked-from transcript at fork time (F5).
+
+    The byte size is the point in the parent's history this session branched from;
+    pairing it with a record count lets lineage be traced to an exact turn later.
+    Returns None when the transcript is absent/unreadable.
+    """
+    path = Path(transcript_path).expanduser()
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    record_count = sum(1 for line in data.splitlines() if line.strip())
+    return len(data), record_count
 
 
 def _ref_with_end_offset(ref: TrajectoryReference, end_offset: int) -> TrajectoryReference:

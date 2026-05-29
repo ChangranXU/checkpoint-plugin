@@ -17,6 +17,7 @@ from checkpoint_plugin.types import TrajectoryReference
 
 from ._hook_common import empty_trajectory_ref as _empty_trajectory_ref
 from ._hook_common import first_string as _first_string
+from ._hook_common import parent_session_env as _parent_session_env
 from ._hook_common import read_payload as _read_payload
 from ._trajectory_slicer import claude_key, jsonl_ref_for_turn
 
@@ -65,9 +66,12 @@ def _on_subagent_end(payload: dict[str, Any], cwd: Path, parent_session_id: str)
         return 0  # Not enough to attribute this subagent; skip rather than guess.
     sub_session_id = f"{parent_session_id}--subagent-{agent_id or _stem(transcript_path)}"
     coordinator = CheckpointCoordinator(session_id=sub_session_id, cwd=cwd)
+    # SubagentStop omits `model` (SessionStart-only); inherit the parent's pinned
+    # session_env so the subagent checkpoint records the same model/effort (G2).
+    sub_env = {**_parent_session_env(parent_session_id), **_session_env(payload)}
     coordinator.on_session_start(
         source="subagent",
-        session_env=_session_env(payload),
+        session_env=sub_env,
         lineage={"parent_session_id": parent_session_id, "agent_id": agent_id, "agent_type": _first_string(payload, "agent_type", "agentType")},
     )
     ref = _subagent_trajectory_ref(payload, transcript_path) or _empty_trajectory_ref("claude")
@@ -144,33 +148,46 @@ def _trajectory_ref(payload: dict[str, Any], provider: str) -> TrajectoryReferen
 
 
 def _subagent_transcript_path(payload: dict[str, Any], agent_id: str | None) -> Path | None:
-    """Resolve the subagent's own transcript file.
+    """Resolve the subagent's OWN transcript file (never the parent's).
 
-    Prefer an explicit path in the payload. Otherwise derive it from the parent
-    transcript: Claude stores subagents at `<parent-dir>/subagents/agent-<id>.jsonl`
-    (or a flat sibling). We probe both rather than assume one layout.
+    Claude writes a subagent to a dedicated sidechain file
+    `<parent-dir>/<session>/subagents/agent-<id>.jsonl` (or a flat sibling). The
+    Stop payload's `transcript_path`, however, is often the PARENT main
+    transcript. Slicing that would mislabel the parent's own thread as the
+    subagent's work (F4), so we only ever return a path that is genuinely a
+    subagent transcript; if we can't find one we return None and the caller
+    records lineage without a (misleading) trajectory slice.
     """
     explicit = _first_string(payload, "transcript_path", "transcriptPath")
     parent = _first_string(payload, "parent_transcript_path", "parentTranscriptPath")
     if explicit:
         path = Path(explicit)
-        # If the explicit path is the parent transcript and we have an agent id,
-        # prefer the nested subagent file when it exists.
-        if agent_id:
-            nested = path.parent / path.stem / "subagents" / f"agent-{agent_id}.jsonl"
-            if nested.exists():
-                return nested
-        return path
+        if _is_subagent_transcript(path):
+            return path
+        # `explicit` is the parent main transcript: locate the real sidechain.
+        nested = _existing_nested_subagent(path, agent_id)
+        return nested  # None if no dedicated subagent file exists (don't slice parent).
     if parent and agent_id:
-        base = Path(parent)
-        candidates = [
-            base.parent / base.stem / "subagents" / f"agent-{agent_id}.jsonl",
-            base.parent / "subagents" / f"agent-{agent_id}.jsonl",
-        ]
-        for candidate in candidates:
-            if candidate.exists():
-                return candidate
-        return candidates[0]
+        return _existing_nested_subagent(Path(parent), agent_id)
+    return None
+
+
+def _is_subagent_transcript(path: Path) -> bool:
+    """A subagent transcript lives in a `subagents/` dir or is named `agent-*`."""
+    return path.parent.name == "subagents" or path.stem.startswith("agent-")
+
+
+def _existing_nested_subagent(parent_transcript: Path, agent_id: str | None) -> Path | None:
+    """First existing `subagents/agent-<id>.jsonl` derived from a parent path."""
+    if not agent_id:
+        return None
+    candidates = [
+        parent_transcript.parent / parent_transcript.stem / "subagents" / f"agent-{agent_id}.jsonl",
+        parent_transcript.parent / "subagents" / f"agent-{agent_id}.jsonl",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
     return None
 
 

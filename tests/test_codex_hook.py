@@ -50,6 +50,34 @@ def test_codex_resume_session_records_fork_lineage(tmp_path, monkeypatch):
     assert metadata["forked_from_transcript"] == "/prior/rollout.jsonl"
 
 
+def test_codex_resume_records_fork_anchor_offset(tmp_path, monkeypatch):
+    """F5: a native fork records the byte offset + record count it branched at."""
+    plugin_home = tmp_path / "plugin"
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    prior = tmp_path / "prior-rollout.jsonl"
+    prior.write_text(
+        json.dumps({"type": "session_meta", "payload": {"id": "old"}}) + "\n"
+        + json.dumps({"type": "event_msg", "payload": {"type": "user_message"}}) + "\n",
+        encoding="utf-8",
+    )
+    payload = {
+        "hook_event_name": "SessionStart",
+        "session_id": "codex-forked2",
+        "cwd": str(cwd),
+        "source": "resume",
+        "transcript_path": str(prior),
+    }
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
+    assert codex_hook.main([]) == 0
+
+    metadata = json.loads((plugin_home / "sessions" / "codex-forked2" / "metadata.json").read_text())
+    assert metadata["forked_from_transcript"] == str(prior)
+    assert metadata["forked_at_offset"] == prior.stat().st_size
+    assert metadata["forked_at_record_count"] == 2
+
+
 def test_codex_turn_end_maps_payload_to_checkpoint(tmp_path, monkeypatch):
     plugin_home = tmp_path / "plugin"
     codex_home = tmp_path / "home" / ".codex"
@@ -200,6 +228,49 @@ def test_codex_subagent_stop_creates_separate_checkpoint(tmp_path, monkeypatch):
     metadata = json.loads((sub_store.session_dir / "metadata.json").read_text(encoding="utf-8"))
     assert metadata["lineage"]["parent_session_id"] == "codex-parent"
     assert metadata["lineage"]["agent_type"] == "Plan"
+
+
+def test_codex_subagent_slices_agent_transcript_not_parent(tmp_path, monkeypatch):
+    """C1: SubagentStop must slice `agent_transcript_path`, not the parent rollout."""
+    plugin_home = tmp_path / "plugin"
+    cwd = tmp_path / "work"
+    parent_transcript = tmp_path / "parent-rollout.jsonl"
+    agent_transcript = tmp_path / "agent-rollout.jsonl"
+    cwd.mkdir()
+    (cwd / "AGENTS.md").write_text("agent", encoding="utf-8")
+    parent_transcript.write_text(
+        json.dumps({"type": "response_item", "payload": {"type": "message", "role": "user", "content": "PARENT-ONLY"}}) + "\n",
+        encoding="utf-8",
+    )
+    agent_transcript.write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "event_msg", "payload": {"turn_id": "t-1", "type": "task_started"}}),
+                json.dumps({"type": "response_item", "payload": {"type": "message", "role": "user", "content": "SUBAGENT-ONLY"}}),
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
+    payload = {
+        "hook_event_name": "SubagentStop",
+        "session_id": "codex-parent",
+        "cwd": str(cwd),
+        "agent_id": "agent-9",
+        "turn_id": "t-1",
+        "transcript_path": str(parent_transcript),
+        "agent_transcript_path": str(agent_transcript),
+    }
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
+    assert codex_hook.main([]) == 0
+
+    sub_store = CheckpointStore(plugin_home / "sessions" / "codex-parent--subagent-agent-9")
+    manifest = sub_store.list_manifests()[0]
+    assert manifest.trajectory_ref.transcript_path == str(agent_transcript.resolve())
+    sliced = sub_store.read_trajectory_slice(manifest.trajectory_ref)
+    assert b"SUBAGENT-ONLY" in sliced
+    assert b"PARENT-ONLY" not in sliced
 
 
 def test_codex_tool_events_do_not_create_checkpoint(tmp_path, monkeypatch):

@@ -269,3 +269,78 @@ def test_collect_environment_never_stores_secret_files(tmp_path, monkeypatch):
     # Defense in depth: the secret bytes never reached the blob store.
     secret_sha = hashlib.sha256(secret).hexdigest()
     assert not store.blob_path(secret_sha).exists()
+
+
+def test_codex_config_secret_values_redacted_before_storage(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    cwd = tmp_path / "project"
+    codex = home / ".codex"
+    codex.mkdir(parents=True)
+    cwd.mkdir()
+    monkeypatch.setenv("TEST_HOME", str(home))
+    monkeypatch.setenv("CODEX_HOME", str(codex))
+
+    config = (
+        'model = "gpt-test"\n'
+        'experimental_bearer_token = "sk-leak-me"\n'
+        'trusted_hash = "deadbeef"\n'
+        'base_url = "https://api.example.com"\n'
+        "\n"
+        "[mcp_servers.context7.env]\n"
+        'API_KEY = "super-secret-value"\n'
+    )
+    (codex / "config.toml").write_text(config, encoding="utf-8")
+
+    store = CheckpointStore(tmp_path / "session")
+    env = collect_environment(cwd, codex_layout(), store)
+
+    assert "config.toml" in env.settings
+    stored = store.load_blob(env.settings["config.toml"]).decode("utf-8")
+    # Secret-shaped values are redacted; non-secret keys are preserved verbatim.
+    assert "sk-leak-me" not in stored
+    assert "deadbeef" not in stored
+    assert "super-secret-value" not in stored
+    assert "***redacted***" in stored
+    assert 'model = "gpt-test"' in stored
+    assert 'base_url = "https://api.example.com"' in stored
+    # The verbatim (secret-bearing) bytes never landed in the blob store.
+    raw_sha = hashlib.sha256(config.encode("utf-8")).hexdigest()
+    assert not store.blob_path(raw_sha).exists()
+
+
+def test_codex_effort_pinned_from_config(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    cwd = tmp_path / "project"
+    codex = home / ".codex"
+    codex.mkdir(parents=True)
+    cwd.mkdir()
+    monkeypatch.setenv("TEST_HOME", str(home))
+    monkeypatch.setenv("CODEX_HOME", str(codex))
+    monkeypatch.delenv("CLAUDE_EFFORT", raising=False)
+    (codex / "config.toml").write_text(
+        'model = "gpt-test"\nmodel_reasoning_effort = "high"\n', encoding="utf-8"
+    )
+
+    store = CheckpointStore(tmp_path / "session")
+    env = collect_environment(cwd, codex_layout(), store)
+
+    assert env.effort == "high"
+
+
+def test_codex_history_captured_as_blob_ref(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    cwd = tmp_path / "project"
+    codex = home / ".codex"
+    codex.mkdir(parents=True)
+    cwd.mkdir()
+    monkeypatch.setenv("TEST_HOME", str(home))
+    monkeypatch.setenv("CODEX_HOME", str(codex))
+    history = b'{"session_id":"s","ts":1,"text":"hi"}\n'
+    (codex / "history.jsonl").write_bytes(history)
+
+    store = CheckpointStore(tmp_path / "session")
+    env = collect_environment(cwd, codex_layout(), store)
+
+    ref = env.extra.get("codex_history_ref")
+    assert ref is not None
+    assert store.load_blob(ref) == history
