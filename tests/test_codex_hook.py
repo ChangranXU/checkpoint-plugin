@@ -29,6 +29,27 @@ def test_codex_session_start_writes_metadata(tmp_path, monkeypatch):
     assert metadata["source"] == "startup"
 
 
+def test_codex_resume_session_records_fork_lineage(tmp_path, monkeypatch):
+    """B5: a native resume/compact fork records the transcript it forked from."""
+    plugin_home = tmp_path / "plugin"
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    payload = {
+        "hook_event_name": "SessionStart",
+        "session_id": "codex-forked",
+        "cwd": str(cwd),
+        "source": "resume",
+        "transcript_path": "/prior/rollout.jsonl",
+    }
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
+    assert codex_hook.main([]) == 0
+
+    metadata = json.loads((plugin_home / "sessions" / "codex-forked" / "metadata.json").read_text())
+    assert metadata["source"] == "resume"
+    assert metadata["forked_from_transcript"] == "/prior/rollout.jsonl"
+
+
 def test_codex_turn_end_maps_payload_to_checkpoint(tmp_path, monkeypatch):
     plugin_home = tmp_path / "plugin"
     codex_home = tmp_path / "home" / ".codex"
@@ -102,6 +123,83 @@ def test_codex_reference_includes_intervening_records_until_next_turn(tmp_path):
     assert ref is not None
     assert ref.record_count == 3
     assert transcript.read_bytes()[ref.start_offset : ref.end_offset].count(b"\n") == 3
+
+
+def test_codex_turn_claims_leading_keyless_user_prompt(tmp_path):
+    """B3: a turn's user prompt is a key-less response_item emitted *before* its
+    task_started. It must be attributed to that turn, not the previous one."""
+    transcript = tmp_path / "rollout.jsonl"
+    transcript.write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "event_msg", "payload": {"turn_id": "turn-1", "type": "task_started"}}),
+                json.dumps({"type": "response_item", "payload": {"type": "message", "role": "assistant", "content": "answer-1"}}),
+                json.dumps({"type": "event_msg", "payload": {"turn_id": "turn-1", "type": "task_complete"}}),
+                # turn-2's user prompt carries no turn_id and precedes task_started.
+                json.dumps({"type": "response_item", "payload": {"type": "message", "role": "user", "content": "prompt-2"}}),
+                json.dumps({"type": "event_msg", "payload": {"turn_id": "turn-2", "type": "task_started"}}),
+                json.dumps({"type": "turn_context", "payload": {"type": "turn_context", "turn_id": "turn-2"}}),
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    turn1 = codex_hook._trajectory_ref(
+        {"transcript_path": str(transcript), "turn_id": "turn-1"}, provider="codex"
+    )
+    turn2 = codex_hook._trajectory_ref(
+        {"transcript_path": str(transcript), "turn_id": "turn-2"}, provider="codex"
+    )
+
+    assert turn1 is not None and turn2 is not None
+    data = transcript.read_bytes()
+    turn1_bytes = data[turn1.start_offset : turn1.end_offset]
+    turn2_bytes = data[turn2.start_offset : turn2.end_offset]
+    # The prompt belongs to turn-2, not the tail of turn-1.
+    assert b"prompt-2" not in turn1_bytes
+    assert b"prompt-2" in turn2_bytes
+    # Slices are contiguous and non-overlapping.
+    assert turn1.end_offset == turn2.start_offset
+
+
+def test_codex_subagent_stop_creates_separate_checkpoint(tmp_path, monkeypatch):
+    """B4: Codex subagent end checkpoints under a derived session, not the parent."""
+    plugin_home = tmp_path / "plugin"
+    cwd = tmp_path / "work"
+    transcript = tmp_path / "sub-rollout.jsonl"
+    cwd.mkdir()
+    (cwd / "AGENTS.md").write_text("agent", encoding="utf-8")
+    transcript.write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "event_msg", "payload": {"turn_id": "t-1", "type": "task_started"}}),
+                json.dumps({"type": "response_item", "payload": {"type": "message", "role": "user", "content": "sub-task"}}),
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
+    payload = {
+        "hook_event_name": "SubagentStop",
+        "session_id": "codex-parent",
+        "cwd": str(cwd),
+        "agent_id": "agent-9",
+        "agent_type": "Plan",
+        "turn_id": "t-1",
+        "transcript_path": str(transcript),
+    }
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
+    assert codex_hook.main([]) == 0
+
+    assert CheckpointStore(plugin_home / "sessions" / "codex-parent").list_manifests() == []
+    sub_store = CheckpointStore(plugin_home / "sessions" / "codex-parent--subagent-agent-9")
+    manifests = sub_store.list_manifests()
+    assert len(manifests) == 1
+    metadata = json.loads((sub_store.session_dir / "metadata.json").read_text(encoding="utf-8"))
+    assert metadata["lineage"]["parent_session_id"] == "codex-parent"
+    assert metadata["lineage"]["agent_type"] == "Plan"
 
 
 def test_codex_tool_events_do_not_create_checkpoint(tmp_path, monkeypatch):

@@ -116,6 +116,104 @@ def test_claude_slices_by_prompt_id(tmp_path, monkeypatch):
     assert second_ref.record_count == 2
 
 
+def test_claude_subagent_stop_creates_separate_checkpoint(tmp_path, monkeypatch):
+    """B4: a subagent is checkpointed as its own session, not on the parent."""
+    plugin_home = tmp_path / "plugin"
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    # Claude stores subagents under <project>/<parent-session>/subagents/agent-<id>.jsonl
+    parent_dir = tmp_path / "proj" / "parent-session"
+    sub_dir = parent_dir / "subagents"
+    sub_dir.mkdir(parents=True)
+    parent_transcript = parent_dir.with_suffix(".jsonl")
+    parent_transcript.write_text(
+        json.dumps({"type": "user", "promptId": "p-1", "message": {"role": "user", "content": "parent"}}) + "\n",
+        encoding="utf-8",
+    )
+    sub_transcript = sub_dir / "agent-abc123.jsonl"
+    sub_transcript.write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "user", "promptId": "sp-1", "isSidechain": True, "agentId": "abc123", "message": {"role": "user", "content": "sub-task"}}),
+                json.dumps({"type": "assistant", "isSidechain": True, "agentId": "abc123", "message": {"role": "assistant", "content": "sub-done"}}),
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
+    monkeypatch.setenv("CLAUDE_SESSION_ID", "parent-session")
+    payload = {
+        "hook_event_name": "SubagentStop",
+        "session_id": "parent-session",
+        "cwd": str(cwd),
+        "agent_id": "abc123",
+        "agent_type": "Explore",
+        "transcript_path": str(parent_transcript),
+    }
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
+    assert claude_code_hook.main(["subagent_end"]) == 0
+
+    # Parent session got no checkpoint from the subagent event.
+    parent_store = CheckpointStore(plugin_home / "sessions" / "parent-session")
+    assert parent_store.list_manifests() == []
+
+    # Subagent has its own session, referencing its own transcript file.
+    sub_store = CheckpointStore(plugin_home / "sessions" / "parent-session--subagent-abc123")
+    manifests = sub_store.list_manifests()
+    assert len(manifests) == 1
+    ref = manifests[0].trajectory_ref
+    assert ref is not None
+    assert ref.transcript_path == str(sub_transcript.resolve())
+    assert b"sub-task" in sub_store.read_trajectory_slice(ref)
+
+    metadata = json.loads((sub_store.session_dir / "metadata.json").read_text(encoding="utf-8"))
+    assert metadata["lineage"]["parent_session_id"] == "parent-session"
+    assert metadata["lineage"]["agent_id"] == "abc123"
+    assert metadata["lineage"]["agent_type"] == "Explore"
+
+
+def test_claude_model_captured_from_session_start(tmp_path, monkeypatch):
+    """Claude delivers `model` only to SessionStart; Stop must still pin it (B1)."""
+    plugin_home = tmp_path / "plugin"
+    cwd = tmp_path / "work"
+    transcript = tmp_path / "claude.jsonl"
+    cwd.mkdir()
+    transcript.write_text(
+        json.dumps({"type": "user", "promptId": "p-1", "message": {"role": "user", "content": "hi"}}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
+    monkeypatch.setenv("CLAUDE_SESSION_ID", "claude-model")
+    for name in ("ANTHROPIC_MODEL", "CLAUDE_MODEL", "OPENAI_MODEL", "CODEX_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+
+    start_payload = {
+        "hook_event_name": "SessionStart",
+        "session_id": "claude-model",
+        "cwd": str(cwd),
+        "source": "startup",
+        "model": "claude-sonnet-4-6",
+    }
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(start_payload)))
+    assert claude_code_hook.main(["session_start"]) == 0
+
+    # Stop payload carries no model field, mirroring the real hook contract.
+    stop_payload = {
+        "hook_event_name": "Stop",
+        "session_id": "claude-model",
+        "cwd": str(cwd),
+        "transcript_path": str(transcript),
+    }
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(stop_payload)))
+    assert claude_code_hook.main(["turn_end"]) == 0
+
+    store = CheckpointStore(plugin_home / "sessions" / "claude-model")
+    manifest = store.list_manifests()[0]
+    env = environment_from_blob(manifest.env_ref, store)
+    assert env.model == "claude-sonnet-4-6"
+
+
 def test_claude_seeds_payload_fields(tmp_path, monkeypatch):
     plugin_home = tmp_path / "plugin"
     cwd = tmp_path / "work"

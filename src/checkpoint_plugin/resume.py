@@ -476,7 +476,6 @@ def _rewrite_codex_trajectory(
                     payload["model"] = model
                 if permission_mode:
                     payload["permission_profile"] = permission_mode
-                    payload["sandbox_policy"] = permission_mode
         if "id" in record:
             record["id"] = new_session_id
         if "session_id" in record:
@@ -657,6 +656,25 @@ def _carry_provider_session_state(
         provider_home / "file-history" / new_session_id,
     )
     _hardlink_todos(provider_home / "todos", old_session_id, new_session_id)
+    _carry_claude_subagents(provider_home, old_session_id, new_session_id)
+
+
+def _carry_claude_subagents(provider_home: Path, old_session_id: str, new_session_id: str) -> None:
+    """Carry a session's subagent transcripts to the resumed session (B4).
+
+    Claude stores subagents under `projects/<project>/<session>/subagents/`.
+    Hardlinking them under the new session id lets a resumed run still see the
+    subagent context that the parent turn depended on.
+    """
+    projects_root = provider_home / "projects"
+    if not projects_root.exists() or not projects_root.is_dir():
+        return
+    for project_dir in projects_root.iterdir():
+        if not project_dir.is_dir():
+            continue
+        src = project_dir / old_session_id / "subagents"
+        if src.exists() and src.is_dir():
+            _hardlink_tree(src, project_dir / new_session_id / "subagents")
 
 
 def _hardlink_tree(src: Path, dst: Path) -> None:

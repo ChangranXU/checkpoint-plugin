@@ -37,7 +37,13 @@ class CheckpointCoordinator:
         self.session_dir = session_dir(self.session_id, self.home)
         self.store = CheckpointStore(self.session_dir)
 
-    def on_session_start(self, source: str | None = None) -> None:
+    def on_session_start(
+        self,
+        source: str | None = None,
+        session_env: dict[str, str] | None = None,
+        lineage: dict[str, Any] | None = None,
+        source_transcript_path: str | None = None,
+    ) -> None:
         provider = detect_provider(self.cwd)
         metadata_path = self.session_dir / "metadata.json"
         existing = _read_metadata(metadata_path)
@@ -52,6 +58,16 @@ class CheckpointCoordinator:
         }
         if source:
             metadata["source"] = source
+        # A native fork (resume/compact) starts a fresh plugin session; record the
+        # provider transcript it forked from so lineage can be traced later (B5).
+        if source in {"resume", "compact"} and source_transcript_path:
+            metadata["forked_from_transcript"] = source_transcript_path
+        clean_env = {key: value for key, value in (session_env or {}).items() if value}
+        if clean_env:
+            metadata["session_env"] = clean_env
+        clean_lineage = {key: value for key, value in (lineage or {}).items() if value}
+        if clean_lineage:
+            metadata["lineage"] = clean_lineage
         self.store._atomic_write(
             metadata_path,
             json.dumps(metadata, ensure_ascii=False, indent=2, sort_keys=True) + "\n",

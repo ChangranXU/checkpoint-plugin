@@ -1,6 +1,7 @@
 from checkpoint_plugin.env.collector import collect_environment
 from checkpoint_plugin.env.providers import claude_layout, codex_layout
 from checkpoint_plugin.store import CheckpointStore
+import hashlib
 
 
 def test_collect_environment_with_mock_claude_home(tmp_path, monkeypatch):
@@ -16,7 +17,7 @@ def test_collect_environment_with_mock_claude_home(tmp_path, monkeypatch):
     (claude / "memories" / "note.md").write_text("memory", encoding="utf-8")
     (claude / "settings.json").write_text('{"permissions": {}}', encoding="utf-8")
     (claude / "skills" / "skill-a" / "SKILL.md").write_text("skill", encoding="utf-8")
-    (home / ".claude.json").write_text('{"mcpServers": {}}', encoding="utf-8")
+    (home / ".claude.json").write_text('{"mcpServers": {"ctx": {"command": "x"}}}', encoding="utf-8")
     (cwd / "CLAUDE.md").write_text("project", encoding="utf-8")
 
     store = CheckpointStore(tmp_path / "session")
@@ -25,7 +26,9 @@ def test_collect_environment_with_mock_claude_home(tmp_path, monkeypatch):
     assert env.provider == "claude"
     assert env.model == "sonnet-test"
     assert "note.md" in env.memory_files
-    assert env.mcp_config is not None
+    # ~/.claude.json is captured structurally (R2), never as a raw blob.
+    assert env.mcp_config is None
+    assert env.mcp_servers == {"ctx": "active"}
     assert "settings.json" in env.settings
     assert "user/skill-a/SKILL.md" in env.skills
     assert str(cwd / "CLAUDE.md") in env.project_context
@@ -238,3 +241,31 @@ def test_collect_claude_structured_env_status(tmp_path, monkeypatch):
         "code-review": "active",
         "context7": "present",
     }
+
+
+def test_collect_environment_never_stores_secret_files(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    cwd = tmp_path / "project"
+    codex = home / ".codex"
+    codex.mkdir(parents=True)
+    cwd.mkdir()
+    monkeypatch.setenv("TEST_HOME", str(home))
+    monkeypatch.setenv("CODEX_HOME", str(codex))
+
+    secret = b'{"OPENAI_API_KEY": "sk-must-not-be-stored"}'
+    (codex / "auth.json").write_bytes(secret)
+    (codex / "config.toml").write_text('model = "gpt-test"\n', encoding="utf-8")
+    (cwd / ".env").write_bytes(b"TOKEN=must-not-be-stored\n")
+    (cwd / "AGENTS.md").write_text("project rules", encoding="utf-8")
+
+    store = CheckpointStore(tmp_path / "session")
+    env = collect_environment(cwd, codex_layout(), store)
+
+    # config.toml is still captured; auth.json/.env are filtered out entirely.
+    assert "config.toml" in env.settings
+    assert "auth.json" not in env.settings
+    assert not any(key.endswith(".env") for key in env.project_context)
+
+    # Defense in depth: the secret bytes never reached the blob store.
+    secret_sha = hashlib.sha256(secret).hexdigest()
+    assert not store.blob_path(secret_sha).exists()

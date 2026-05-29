@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import tomllib
@@ -13,6 +14,25 @@ from checkpoint_plugin.types import EnvironmentState
 
 from .providers import ProviderLayout
 
+# Credential-shaped files are never copied into checkpoint blobs. Re-auth is the
+# correct resume path; a checkpoint must not become a secrets store. Mirrors the
+# fs-snapshot SECRET_PATTERNS but applied to the basename of every env file.
+SECRET_BASENAME_PATTERNS = (
+    "auth.json",
+    ".env",
+    ".env*",
+    "*credential*",
+    "*.pem",
+    "*.key",
+    "*.secret",
+    "*token*",
+)
+
+
+def _is_secret_path(path: Path) -> bool:
+    name = path.name.lower()
+    return any(fnmatch.fnmatch(name, pattern) for pattern in SECRET_BASENAME_PATTERNS)
+
 
 def collect_environment(
     cwd: Path,
@@ -22,12 +42,19 @@ def collect_environment(
     cwd = cwd.expanduser().resolve()
     skill_roots = _skill_roots(provider, cwd)
     skills = _collect_named_trees(skill_roots, store, follow_symlink_dirs=True)
+    # Some provider fields (notably Claude's model) are only delivered to the
+    # SessionStart hook, which runs in a separate process from Stop. on_session_start
+    # persists them to metadata.json; we fall back to that when the live env var is
+    # absent so the captured state still pins the model/agent/effort.
+    session_env = _session_env_fallback(store)
     return EnvironmentState(
         provider=provider.name,
-        model=_first_env("ANTHROPIC_MODEL", "CLAUDE_MODEL", "OPENAI_MODEL", "CODEX_MODEL"),
-        permission_mode=_first_env("CLAUDE_PERMISSION_MODE", "CODEX_SANDBOX_MODE"),
-        effort=_first_env("CLAUDE_EFFORT"),
-        agent_type=_first_env("CLAUDE_AGENT_TYPE", "CODEX_AGENT_TYPE"),
+        model=_first_env("ANTHROPIC_MODEL", "CLAUDE_MODEL", "OPENAI_MODEL", "CODEX_MODEL")
+        or session_env.get("model"),
+        permission_mode=_first_env("CLAUDE_PERMISSION_MODE", "CODEX_PERMISSION_MODE", "CODEX_SANDBOX_MODE")
+        or session_env.get("permission_mode"),
+        effort=_first_env("CLAUDE_EFFORT") or session_env.get("effort"),
+        agent_type=_first_env("CLAUDE_AGENT_TYPE", "CODEX_AGENT_TYPE") or session_env.get("agent_type"),
         memory_files=_collect_tree(provider.memory_dir, store),
         mcp_config=_store_file(provider.mcp_config, store),
         mcp_configs=_collect_named_files(_mcp_config_files(provider, cwd), store),
@@ -51,6 +78,19 @@ def _first_env(*names: str) -> str | None:
         if value:
             return value
     return None
+
+
+def _session_env_fallback(store: CheckpointStore) -> dict[str, str]:
+    """Provider hints captured at SessionStart (e.g. Claude's model)."""
+    metadata_path = store.session_dir / "metadata.json"
+    try:
+        data = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    session_env = data.get("session_env") if isinstance(data, dict) else None
+    if not isinstance(session_env, dict):
+        return {}
+    return {str(key): str(value) for key, value in session_env.items() if value}
 
 
 def _collect_mcp_servers(provider: ProviderLayout, cwd: Path) -> dict[str, str]:
@@ -269,7 +309,7 @@ def _load_toml(path: Path) -> dict[str, object]:
 
 
 def _store_file(path: Path | None, store: CheckpointStore) -> str | None:
-    if path is None or not path.exists() or not path.is_file():
+    if path is None or not path.exists() or not path.is_file() or _is_secret_path(path):
         return None
     return store.store_blob(path.read_bytes())
 
@@ -306,6 +346,8 @@ def _collect_tree(
         return {}
     result: dict[str, str] = {}
     for path in _iter_files(root, follow_symlink_dirs=follow_symlink_dirs):
+        if _is_secret_path(path):
+            continue
         rel = path.relative_to(root).as_posix()
         result[rel] = store.store_blob(path.read_bytes())
     return result
@@ -314,7 +356,7 @@ def _collect_tree(
 def _collect_settings(paths: Iterable[Path], store: CheckpointStore) -> dict[str, str]:
     settings: dict[str, str] = {}
     for path in paths:
-        if path.exists() and path.is_file():
+        if path.exists() and path.is_file() and not _is_secret_path(path):
             settings[path.name] = store.store_blob(path.read_bytes())
     return settings
 
@@ -324,7 +366,7 @@ def _collect_project_context(cwd: Path, project_files: list[str], store: Checkpo
     for root in _ancestor_chain(_nearest_project_root(cwd), cwd):
         for rel_name in project_files:
             path = root / rel_name
-            if path.exists() and path.is_file():
+            if path.exists() and path.is_file() and not _is_secret_path(path):
                 key = path.relative_to(root).as_posix()
                 context[str(root / key)] = store.store_blob(path.read_bytes())
             elif path.exists() and path.is_dir():

@@ -39,7 +39,19 @@ def jsonl_ref_for_turn(
     path: Path,
     turn_id: Any,
     key_extractor: KeyExtractor,
+    *,
+    claim_leading_keyless: bool = False,
 ) -> TrajectoryReference | None:
+    """Slice the transcript into the byte range covering one turn.
+
+    `claim_leading_keyless` (Codex): the per-turn key (`turn_id`) only appears on
+    a turn's `turn_context`/`task_*` records, never on the user prompt or other
+    `response_item` content, and the prompt is emitted *before* `task_started`.
+    Anchoring boundaries at the end of the last keyed record before each
+    reference point pulls those leading key-less records into the turn they
+    belong to. Claude does not need this: its `promptId` is carried on the first
+    (`user`) record of the turn.
+    """
     try:
         data = path.expanduser().read_bytes()
     except OSError:
@@ -52,7 +64,7 @@ def jsonl_ref_for_turn(
     keyed = [(start, end, key_extractor(record) if isinstance(record, dict) else None) for start, end, record in lines]
 
     if turn_id is not None:
-        match = _slice_for_turn_id(keyed, turn_id, len(data))
+        match = _slice_for_turn_id(keyed, turn_id, len(data), claim_leading_keyless)
         if match is not None:
             start, end = match
             return _build_ref(provider, path, data, start, end)
@@ -60,6 +72,13 @@ def jsonl_ref_for_turn(
     latest_key = _latest_distinct_key(keyed)
     if latest_key is None:
         return _build_ref(provider, path, data, 0, len(data))
+
+    if claim_leading_keyless:
+        first_start = _first_offset_for_key(keyed, latest_key, len(data))
+        start_offset = _last_keyed_end_before(keyed, first_start)
+        if start_offset is None or _no_prior_keys(keyed, latest_key):
+            return _build_ref(provider, path, data, 0, len(data))
+        return _build_ref(provider, path, data, start_offset, len(data))
 
     start_offset = _first_offset_for_key(keyed, latest_key, len(data))
     if start_offset == 0 or _no_prior_keys(keyed, latest_key):
@@ -100,16 +119,42 @@ def _slice_for_turn_id(
     keyed: list[tuple[int, int, Any]],
     turn_id: Any,
     file_size: int,
+    claim_leading_keyless: bool = False,
 ) -> tuple[int, int] | None:
     matches = [(start, end) for start, end, key in keyed if _keys_match(key, turn_id)]
     if not matches:
         return None
-    start_offset = matches[0][0]
-    next_start = _next_distinct_key_offset(keyed, start_offset, turn_id)
+    keyed_start = matches[0][0]
+    next_start = _next_distinct_key_offset(keyed, keyed_start, turn_id)
+    if claim_leading_keyless:
+        start_offset = _last_keyed_end_before(keyed, keyed_start)
+        start_offset = 0 if start_offset is None else start_offset
+        if next_start is None:
+            return start_offset, file_size
+        # End where the *next* turn's claimed region begins: the end of this
+        # turn's last keyed record. Key-less records between here and the next
+        # turn's first keyed record are that turn's leading prompt.
+        prior_end = _last_keyed_end_before(keyed, next_start)
+        return start_offset, prior_end if prior_end is not None else next_start
     end_offset = next_start if next_start is not None else file_size
-    if start_offset == 0 or _no_prior_keys_before(keyed, start_offset):
+    if keyed_start == 0 or _no_prior_keys_before(keyed, keyed_start):
         return 0, end_offset
-    return start_offset, end_offset
+    return keyed_start, end_offset
+
+
+def _last_keyed_end_before(keyed: list[tuple[int, int, Any]], offset: int) -> int | None:
+    """End byte of the last keyed record strictly before `offset`.
+
+    None means no keyed record precedes `offset` (the turn is the first one, so
+    its leading key-less records start at byte 0).
+    """
+    result: int | None = None
+    for start, end, key in keyed:
+        if start >= offset:
+            break
+        if key is not None:
+            result = end
+    return result
 
 
 def _next_distinct_key_offset(

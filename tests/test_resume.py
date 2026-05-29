@@ -23,6 +23,7 @@ def _isolate_provider_env(monkeypatch):
         "OPENAI_MODEL",
         "CODEX_MODEL",
         "CLAUDE_PERMISSION_MODE",
+        "CODEX_PERMISSION_MODE",
         "CODEX_SANDBOX_MODE",
     ):
         monkeypatch.delenv(name, raising=False)
@@ -198,6 +199,7 @@ def test_resume_materializes_codex_native_session(tmp_path, monkeypatch):
                             "turn_id": "turn-1",
                             "model": "old-model",
                             "permission_profile": "old-permission",
+                            "sandbox_policy": "workspace-write",
                         },
                     }
                 ),
@@ -213,7 +215,7 @@ def test_resume_materializes_codex_native_session(tmp_path, monkeypatch):
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
     monkeypatch.setenv("CHECKPOINT_PROVIDER", "codex")
     monkeypatch.setenv("CODEX_MODEL", "gpt-target")
-    monkeypatch.setenv("CODEX_SANDBOX_MODE", "workspace-write")
+    monkeypatch.setenv("CODEX_PERMISSION_MODE", "acceptEdits")
 
     coordinator = CheckpointCoordinator(session_id="s1", cwd=cwd)
     coordinator.on_session_start()
@@ -237,7 +239,10 @@ def test_resume_materializes_codex_native_session(tmp_path, monkeypatch):
     assert records[0]["payload"]["model_provider"] == "test-provider"
     assert records[0]["payload"]["base_instructions"] == {"text": "be helpful"}
     assert records[2]["payload"]["model"] == "gpt-target"
-    assert records[2]["payload"]["permission_profile"] == "workspace-write"
+    assert records[2]["payload"]["permission_profile"] == "acceptEdits"
+    # Permission mode must not bleed into the sandbox policy (B2): it stays as
+    # whatever the original transcript recorded.
+    assert records[2]["payload"]["sandbox_policy"] == "workspace-write"
     assert not (codex_home / "session_index.jsonl").exists()
 
     resumed_store = CheckpointStore(plugin_home / "sessions" / report.new_session_id)

@@ -31,13 +31,16 @@ def claude_layout() -> ProviderLayout:
         name="claude",
         home=claude_home,
         memory_dir=claude_home / "memories",
-        mcp_config=home / ".claude.json",
+        # NOTE: ~/.claude.json is deliberately NOT blob-stored or restored. It is
+        # global cross-project state (every project's history, identity, oauth,
+        # onboarding); restoring it wholesale on resume would revert unrelated
+        # projects. Its behavior-relevant subset (mcpServers, skill/plugin
+        # enablement) is captured structurally in EnvironmentState instead.
+        mcp_config=None,
         mcp_config_files=[
-            home / ".claude.json",
             managed_root / "managed-mcp.json",
         ],
         settings_files=[
-            home / ".claude.json",
             managed_root / "managed-settings.json",
             managed_root / "managed-mcp.json",
             claude_home / "settings.json",
@@ -57,8 +60,6 @@ def claude_layout() -> ProviderLayout:
             ".claude/settings.json",
             ".claude/settings.local.json",
             ".claude/memory",
-            ".claude/shell-snapshots",
-            ".claude/todos",
             ".claude/skills",
             ".claude/agents",
             ".claude/commands",
@@ -86,7 +87,6 @@ def codex_layout() -> ProviderLayout:
             system_codex / "managed_config.toml",
             system_codex / "requirements.toml",
             codex_home / "config.toml",
-            codex_home / "auth.json",
             codex_home / "AGENTS.md",
             codex_home / "hooks.json",
             codex_home / "rules.json",

@@ -22,6 +22,17 @@
           }
         ]
       }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -m checkpoint_plugin.integrations.codex_hook subagent_end",
+            "statusMessage": "Saving subagent checkpoint"
+          }
+        ]
+      }
     ]
   }
 }

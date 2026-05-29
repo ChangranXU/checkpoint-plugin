@@ -52,13 +52,15 @@ def _claude_spec() -> HookSpec:
     module = "checkpoint_plugin.integrations.claude_code_hook"
     command_start = _module_command(module, "session_start")
     command_turn = _module_command(module, "turn_end")
+    command_subagent = _module_command(module, "subagent_end")
     return HookSpec(
         provider="claude",
         path=_base_home() / ".claude" / "settings.json",
-        commands=frozenset({command_start, command_turn, *_legacy_commands(module)}),
+        commands=frozenset({command_start, command_turn, command_subagent, *_legacy_commands(module)}),
         events={
             "SessionStart": [_entry("*", command_start)],
             "Stop": [_entry("*", command_turn)],
+            "SubagentStop": [_entry("*", command_subagent)],
         },
     )
 
@@ -67,15 +69,17 @@ def _codex_spec() -> HookSpec:
     module = "checkpoint_plugin.integrations.codex_hook"
     command_start = _module_command(module, "session_start")
     command_turn = _module_command(module, "turn_end")
+    command_subagent = _module_command(module, "subagent_end")
     return HookSpec(
         provider="codex",
         path=Path(os.environ.get("CODEX_HOME", str(_base_home() / ".codex"))).expanduser() / "hooks.json",
-        commands=frozenset({command_start, command_turn, *_legacy_commands(module)}),
+        commands=frozenset({command_start, command_turn, command_subagent, *_legacy_commands(module)}),
         events={
             "SessionStart": [
                 _entry("startup|resume|clear|compact", command_start, "Creating checkpoint session metadata")
             ],
             "Stop": [_entry(None, command_turn, "Saving checkpoint")],
+            "SubagentStop": [_entry(None, command_subagent, "Saving subagent checkpoint")],
         },
     )
 
@@ -84,10 +88,11 @@ def _module_command(module: str, event: str) -> str:
     return f"{shlex.quote(sys.executable)} -m {module} {event}"
 
 
-def _legacy_commands(module: str) -> tuple[str, str]:
+def _legacy_commands(module: str) -> tuple[str, ...]:
     return (
         f"python -m {module} session_start",
         f"python -m {module} turn_end",
+        f"python -m {module} subagent_end",
     )
 
 

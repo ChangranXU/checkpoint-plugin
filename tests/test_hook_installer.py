@@ -21,6 +21,9 @@ def test_install_and_uninstall_claude_hooks(tmp_path, monkeypatch):
     assert data["theme"] == "dark"
     assert len(data["hooks"]["SessionStart"]) == 1
     assert "PostToolUse" not in data["hooks"]
+    assert len(data["hooks"]["SubagentStop"]) == 1
+    subagent_command = data["hooks"]["SubagentStop"][0]["hooks"][0]["command"]
+    assert subagent_command.endswith("checkpoint_plugin.integrations.claude_code_hook subagent_end")
     command = data["hooks"]["SessionStart"][0]["hooks"][0]["command"]
     assert command.startswith(sys.executable)
     assert command.endswith("checkpoint_plugin.integrations.claude_code_hook session_start")
