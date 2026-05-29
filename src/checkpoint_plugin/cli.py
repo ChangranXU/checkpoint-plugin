@@ -75,26 +75,34 @@ def _dispatch(args: argparse.Namespace) -> int:
         return _cmd_show(args.session, args.turn)
     if args.command == "diff":
         orchestrator = ResumeOrchestrator()
-        print(orchestrator.plan(args.session, args.turn).render())
+        try:
+            print(orchestrator.plan(args.session, args.turn).render())
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
         return 0
     if args.command == "resume":
         cwd = Path(args.target).expanduser() if args.target else None
         orchestrator = ResumeOrchestrator(cwd=cwd)
-        plan = orchestrator.plan(args.session, args.turn)
         store = CheckpointStore(sessions_dir() / args.session)
         try:
+            plan = orchestrator.plan(args.session, args.turn)
             confirm = _auto_confirm if args.yes else lambda text: _interactive_resume_confirm(text, plan, store)
             report = orchestrator.execute(plan, confirm)
         except RuntimeError as exc:
-            if str(exc) == "Resume cancelled":
-                print(str(exc), file=sys.stderr)
-                return 1
-            raise
+            print(str(exc), file=sys.stderr)
+            return 1
         print(f"Restored into new session {report.new_session_id}")
         if report.target_cwd is not None:
             print(f"Workspace: {report.target_cwd}")
         print(f"Backup: {report.backup_dir}")
         print(f"Changed files: {len(report.changed_files)}")
+        # Surface the provider session + the command to resume it (P4-6): the
+        # report carries this but it was previously never shown to the user.
+        if report.provider_session_path is not None:
+            print(f"Provider session: {report.provider_session_path}")
+        if report.resume_command is not None:
+            print(f"Resume with: {report.resume_command}")
         return 0
     if args.command == "clean":
         removed = clean_keep_last(args.keep_last)

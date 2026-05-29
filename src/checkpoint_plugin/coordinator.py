@@ -68,6 +68,18 @@ class CheckpointCoordinator:
             if anchor is not None:
                 metadata["forked_at_offset"] = anchor[0]
                 metadata["forked_at_record_count"] = anchor[1]
+        # M2: Codex forks ("fork chat") arrive with source="startup" (or a
+        # structured subagent source), so the resume/compact guard never fires.
+        # Detect the fork structurally from the new rollout's first session_meta
+        # `forked_from_id` and record the lineage + anchor anyway.
+        if provider.name == "codex" and "forked_from_transcript" not in metadata:
+            fork = _codex_fork_lineage(provider.home, source_transcript_path)
+            if fork is not None:
+                parent_transcript, anchor = fork
+                metadata["forked_from_transcript"] = parent_transcript
+                if anchor is not None:
+                    metadata["forked_at_offset"] = anchor[0]
+                    metadata["forked_at_record_count"] = anchor[1]
         clean_env = {key: value for key, value in (session_env or {}).items() if value}
         if clean_env:
             metadata["session_env"] = clean_env
@@ -218,6 +230,49 @@ def _fork_anchor(transcript_path: str) -> tuple[int, int] | None:
         return None
     record_count = sum(1 for line in data.splitlines() if line.strip())
     return len(data), record_count
+
+
+def _codex_fork_lineage(
+    codex_home: Path,
+    own_transcript_path: str | None,
+) -> tuple[str, tuple[int, int] | None] | None:
+    """Lineage for a Codex fork detected via its own session_meta (M2).
+
+    Codex "fork chat" sessions arrive at SessionStart with source="startup", so
+    the resume/compact path misses them. The fork link lives in the NEW rollout's
+    first `session_meta.forked_from_id`. We read that, discover the parent rollout
+    by the `rollout-<ts>-<id>.jsonl` filename convention, and return
+    `(parent_transcript_path, anchor)` where anchor is `_fork_anchor(parent)`.
+
+    Returns None when this is not a fork (no forked_from_id) or the rollout can't
+    be read. When the parent file can't be found we still return the bare
+    forked_from_id as the transcript reference (no anchor) so lineage isn't lost.
+    """
+    if not own_transcript_path:
+        return None
+    path = Path(own_transcript_path).expanduser()
+    try:
+        with path.open("rb") as handle:
+            first_line = handle.readline()
+    except OSError:
+        return None
+    if not first_line.strip():
+        return None
+    try:
+        record = json.loads(first_line.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(record, dict) or record.get("type") != "session_meta":
+        return None
+    payload = record.get("payload")
+    forked_from_id = payload.get("forked_from_id") if isinstance(payload, dict) else None
+    if not isinstance(forked_from_id, str) or not forked_from_id:
+        return None
+    matches = sorted(codex_home.glob(f"sessions/**/rollout-*-{forked_from_id}.jsonl"))
+    if not matches:
+        return forked_from_id, None
+    parent_path = matches[0]
+    return str(parent_path), _fork_anchor(str(parent_path))
 
 
 def _ref_with_end_offset(ref: TrajectoryReference, end_offset: int) -> TrajectoryReference:

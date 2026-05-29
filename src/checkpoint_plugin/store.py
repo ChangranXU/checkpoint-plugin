@@ -129,8 +129,13 @@ class CheckpointStore:
         return data[: last_newline + 1] if last_newline >= 0 else b""
 
     def read_trajectory_slice(self, ref: TrajectoryReference) -> bytes:
+        # An empty path resolves to "." (a directory), so guard on the raw string
+        # and require a regular file — otherwise open("rb") raises IsADirectoryError
+        # for empty-ref checkpoints (e.g. a subagent with no sidechain transcript).
+        if not ref.transcript_path:
+            raise FileNotFoundError("Trajectory reference has no transcript path")
         path = Path(ref.transcript_path).expanduser()
-        if not path.exists():
+        if not path.is_file():
             raise FileNotFoundError(f"Missing trajectory transcript {path}")
         if ref.start_offset < 0 or ref.end_offset < ref.start_offset:
             raise ValueError("Invalid trajectory byte range")

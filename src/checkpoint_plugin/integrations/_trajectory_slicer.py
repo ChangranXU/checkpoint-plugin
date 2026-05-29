@@ -90,6 +90,40 @@ def jsonl_count_records(data: bytes) -> int:
     return sum(1 for line in data.splitlines() if line.strip())
 
 
+def jsonl_after_leading_metas(
+    provider: str,
+    path: Path,
+    *,
+    is_leading_meta: KeyExtractor,
+) -> TrajectoryReference | None:
+    """Slice from the end of the leading meta block to EOF (H4).
+
+    A subagent's dedicated rollout begins with a run of inherited ancestor
+    `session_meta` records (e.g. subagent<-parent<-grandparent), then the
+    subagent's OWN turns. Slicing on the SubagentStop turn_id captured only the
+    LAST turn, dropping the subagent's earlier own turns. We instead capture the
+    subagent's full own conversation: everything after the leading meta block.
+
+    Consistent with resume: `_inherited_fork_prefix` reads `[0:start_offset]`, so
+    the inherited metas are still reproduced (then collapsed to one by H1). Zero
+    leading metas -> start=0 (whole file), a safe fallback.
+    """
+    try:
+        data = path.expanduser().read_bytes()
+    except OSError:
+        return None
+    lines = _parse_jsonl_lines(data)
+    if not lines:
+        return None
+    start = 0
+    for line_start, line_end, record in lines:
+        if isinstance(record, dict) and is_leading_meta(record):
+            start = line_end
+            continue
+        break
+    return _build_ref(provider, path, data, start, len(data))
+
+
 def _parse_jsonl_lines(data: bytes) -> list[tuple[int, int, Any]]:
     lines: list[tuple[int, int, Any]] = []
     offset = 0

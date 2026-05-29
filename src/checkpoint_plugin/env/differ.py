@@ -26,6 +26,7 @@ class EnvDiff:
     provider_changed: bool
     model_changed: bool
     permission_changed: bool
+    effort_changed: bool
     memory: CategoryDiff
     mcp_changed: bool
     mcp_configs: CategoryDiff
@@ -42,6 +43,7 @@ class EnvDiff:
                 self.provider_changed,
                 self.model_changed,
                 self.permission_changed,
+                self.effort_changed,
                 self.memory.has_changes(),
                 self.mcp_changed,
                 self.mcp_configs.has_changes(),
@@ -72,6 +74,7 @@ def diff_environments(
         provider_changed=current.provider != target.provider,
         model_changed=current.model != target.model,
         permission_changed=current.permission_mode != target.permission_mode,
+        effort_changed=current.effort != target.effort,
         memory=_diff_maps(current.memory_files, target.memory_files),
         mcp_changed=current.mcp_config != target.mcp_config,
         mcp_configs=_diff_maps(current.mcp_configs, target.mcp_configs),
@@ -97,6 +100,8 @@ def render_diff(diff: EnvDiff, current: EnvironmentState, target: EnvironmentSta
         lines.append(f"  Model: {current.model or '-'} -> {target.model or '-'}")
     if diff.permission_changed:
         lines.append(f"  Permission: {current.permission_mode or '-'} -> {target.permission_mode or '-'}")
+    if diff.effort_changed:
+        lines.append(f"  Effort: {current.effort or '-'} -> {target.effort or '-'}")
     if diff.mcp_changed:
         lines.append("  MCP config: modified")
     _append_category(lines, "MCP config files", diff.mcp_configs)

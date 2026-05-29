@@ -318,3 +318,74 @@ def test_codex_stop_without_transcript_does_not_copy_trajectory(tmp_path, monkey
     assert manifest.trajectory_ref is not None
     assert manifest.trajectory_ref.record_count == 0
     assert not store.trajectory_path.exists()
+
+
+def test_subagent_ref_captures_full_conversation_after_leading_metas(tmp_path):
+    """H4: a subagent's dedicated rollout has stacked inherited session_meta at
+    the head, then the subagent's OWN turns. The capture must start right after
+    the leading meta block and cover all own turns through EOF — not just the
+    last turn."""
+    from checkpoint_plugin.integrations.codex_hook import _subagent_trajectory_ref
+
+    rollout = tmp_path / "rollout-sub.jsonl"
+    lines = [
+        json.dumps({"type": "session_meta", "payload": {"id": "SUB", "forked_from_id": "PARENT"}}),
+        json.dumps({"type": "session_meta", "payload": {"id": "PARENT", "forked_from_id": "GRAND"}}),
+        json.dumps({"type": "session_meta", "payload": {"id": "GRAND"}}),
+        json.dumps({"type": "event_msg", "payload": {"type": "task_started", "turn_id": "own-1"}}),
+        json.dumps({"type": "response_item", "payload": {"role": "user", "type": "message"}}),
+        json.dumps({"type": "event_msg", "payload": {"type": "task_started", "turn_id": "own-2"}}),
+        json.dumps({"type": "response_item", "payload": {"role": "user", "type": "message"}}),
+    ]
+    data = ("\n".join(lines) + "\n").encode("utf-8")
+    rollout.write_bytes(data)
+    # SubagentStop reports only the LAST turn id; the old code would slice from there.
+    payload = {"turn_id": "own-2"}
+    ref = _subagent_trajectory_ref(payload, str(rollout))
+    assert ref is not None
+    # Slice starts after the 3 leading metas (their combined byte length).
+    meta_bytes = sum(len((lines[i] + "\n").encode("utf-8")) for i in range(3))
+    assert ref.start_offset == meta_bytes
+    assert ref.end_offset == len(data)
+    # Covers BOTH own turns (4 records: 2 task_started + 2 user messages).
+    assert ref.record_count == 4
+
+
+def test_codex_startup_fork_records_lineage_from_session_meta(tmp_path, monkeypatch):
+    """M2: a Codex fork arrives source=startup; lineage must still be recorded by
+    reading the new rollout's session_meta.forked_from_id and discovering the
+    parent rollout."""
+    plugin_home = tmp_path / "plugin"
+    codex_home = tmp_path / "codex"
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    # Parent rollout discoverable by the rollout-<ts>-<id>.jsonl convention.
+    parent_dir = codex_home / "sessions" / "2026" / "05" / "30"
+    parent_dir.mkdir(parents=True)
+    parent = parent_dir / "rollout-2026-05-30T00-00-00-PARENTID.jsonl"
+    parent.write_bytes(
+        (json.dumps({"type": "session_meta", "payload": {"id": "PARENTID"}}) + "\n"
+         + json.dumps({"type": "event_msg", "payload": {"type": "task_started"}}) + "\n").encode("utf-8")
+    )
+    # The new forked session's own rollout points at the parent via forked_from_id.
+    own = tmp_path / "rollout-2026-05-30T01-00-00-FORKED.jsonl"
+    own.write_bytes(
+        (json.dumps({"type": "session_meta", "payload": {"id": "FORKED", "forked_from_id": "PARENTID"}}) + "\n").encode("utf-8")
+    )
+    payload = {
+        "hook_event_name": "SessionStart",
+        "session_id": "FORKED",
+        "cwd": str(cwd),
+        "source": "startup",
+        "transcript_path": str(own),
+    }
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
+    assert codex_hook.main([]) == 0
+
+    metadata = json.loads((plugin_home / "sessions" / "FORKED" / "metadata.json").read_text())
+    assert metadata["source"] == "startup"
+    assert metadata["forked_from_transcript"] == str(parent)
+    assert metadata["forked_at_offset"] == parent.stat().st_size
+    assert metadata["forked_at_record_count"] == 2

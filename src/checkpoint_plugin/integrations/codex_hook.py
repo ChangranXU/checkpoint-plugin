@@ -19,7 +19,7 @@ from ._hook_common import empty_trajectory_ref as _empty_trajectory_ref
 from ._hook_common import first_string as _first_string
 from ._hook_common import parent_session_env as _parent_session_env
 from ._hook_common import read_payload as _read_payload
-from ._trajectory_slicer import codex_key, jsonl_ref_for_turn
+from ._trajectory_slicer import codex_key, jsonl_after_leading_metas, jsonl_ref_for_turn
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -176,8 +176,15 @@ def _trajectory_ref(payload: dict[str, Any], provider: str) -> TrajectoryReferen
 def _subagent_trajectory_ref(payload: dict[str, Any], transcript_path: str | None) -> TrajectoryReference | None:
     if transcript_path is None:
         return None
-    turn_id = payload.get("turn_id") or payload.get("turnId")
-    return jsonl_ref_for_turn("codex", Path(transcript_path), turn_id, codex_key, claim_leading_keyless=True)
+    # H4: a subagent's dedicated rollout carries inherited ancestor session_meta
+    # records at the head, then the subagent's OWN turns. Capture everything
+    # after the leading meta block (the full subagent conversation), not just the
+    # SubagentStop turn — slicing on that turn_id dropped earlier own turns.
+    return jsonl_after_leading_metas(
+        "codex",
+        Path(transcript_path),
+        is_leading_meta=lambda record: record.get("type") == "session_meta",
+    )
 
 
 def _write_ok() -> None:
