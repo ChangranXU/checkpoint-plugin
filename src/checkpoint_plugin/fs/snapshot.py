@@ -33,7 +33,14 @@ def filesystem_from_blob(sha: str, store: CheckpointStore) -> FilesystemSnapshot
 
 
 def _walk_files(cwd: Path, ignore: IgnoreMatcher) -> Iterable[Path]:
-    for path in sorted(cwd.rglob("*")):
+    # P7-8: plan() may snapshot a --target cwd that does not exist yet (execute()
+    # creates it later), so rglob would raise FileNotFoundError. A missing or
+    # not-yet-created cwd simply has no files to snapshot.
+    try:
+        entries = sorted(cwd.rglob("*"))
+    except (FileNotFoundError, NotADirectoryError):
+        return
+    for path in entries:
         if path.is_dir():
             continue
         if ignore.matches(path):
@@ -47,11 +54,14 @@ def _walk_files(cwd: Path, ignore: IgnoreMatcher) -> Iterable[Path]:
 
 
 def _git_state(cwd: Path) -> dict[str, str] | None:
+    # P7-8: a missing/not-yet-created cwd (or one with no git on PATH) makes the
+    # subprocess raise FileNotFoundError/NotADirectoryError rather than exit
+    # non-zero; treat all of these as "no git state" instead of crashing plan().
     try:
         head = _git(cwd, ["rev-parse", "HEAD"])
         branch = _git(cwd, ["rev-parse", "--abbrev-ref", "HEAD"])
         dirty = _git(cwd, ["status", "--porcelain"])
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, FileNotFoundError, NotADirectoryError):
         return None
     return {
         "head": head,

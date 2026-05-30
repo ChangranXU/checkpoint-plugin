@@ -168,6 +168,34 @@ def test_resume_can_restore_into_new_folder_copy(tmp_path, monkeypatch):
     assert metadata["cwd"] == str(copy_cwd)
 
 
+def test_resume_plan_tolerates_nonexistent_target_dir(tmp_path, monkeypatch):
+    """P7-8: planning a resume into a --target dir that does not exist yet must not
+    crash. plan() snapshots the target cwd (for the diff) before execute() creates
+    it, so a missing dir previously raised FileNotFoundError from git/rglob."""
+    plugin_home = tmp_path / "plugin"
+    cwd = tmp_path / "work"
+    missing_target = tmp_path / "does-not-exist-yet"
+    cwd.mkdir()
+    (cwd / "file.txt").write_text("v1\n", encoding="utf-8")
+    _isolate_provider_env(monkeypatch)
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
+
+    coordinator = CheckpointCoordinator(session_id="s1", cwd=cwd)
+    coordinator.on_session_start()
+    coordinator.on_turn_end(TurnRecord(user_message="checkpoint"))
+
+    assert not missing_target.exists()
+    orchestrator = ResumeOrchestrator(cwd=missing_target)
+    # plan() must not raise even though the target cwd does not exist.
+    plan = orchestrator.plan("s1", 0)
+    report = orchestrator.execute(plan, lambda _text: True)
+
+    # execute() creates the target and restores into it.
+    assert missing_target.exists()
+    assert (missing_target / "file.txt").read_text(encoding="utf-8") == "v1\n"
+    assert report.target_cwd == str(missing_target)
+
+
 def test_resume_materializes_codex_native_session(tmp_path, monkeypatch):
     plugin_home = tmp_path / "plugin"
     home = tmp_path / "home"
@@ -1323,6 +1351,79 @@ def test_resume_of_a_resume_preserves_all_records(tmp_path, monkeypatch):
             seen.add(r["uuid"])
 
 
+def test_fork_resume_of_resume_does_not_reinject_permission_mode(tmp_path, monkeypatch):
+    """P7-3: resuming a fork-prefix resume must not re-inject a synthetic
+    permission-mode on the second hop. The byte-offset inherited-prefix signal is
+    lost after a round-trip (the prefix folds into turn 0 at byte 0), but the
+    `forkedFrom` stamp on the inherited records persists, so the verdict stays True
+    and no synthetic permission-mode is added gen-over-gen."""
+    plugin_home = tmp_path / "plugin"
+    home = tmp_path / "home"
+    cwd = tmp_path / "work"
+    transcript = tmp_path / "claude.jsonl"
+    cwd.mkdir()
+    # Inherited pre-fork history carrying forkedFrom (as a captured native/plugin
+    # fork would), then the forked turn (new promptId) anchored past byte 0.
+    inherited = (
+        json.dumps({"type": "user", "sessionId": "old", "uuid": "iu", "parentUuid": None, "promptId": "old-p", "cwd": "/old", "forkedFrom": {"sessionId": "anc", "messageUuid": "iu"}, "message": {"role": "user", "content": "INHERITED"}}) + "\n"
+        + json.dumps({"type": "assistant", "sessionId": "old", "uuid": "ia", "parentUuid": "iu", "cwd": "/old", "forkedFrom": {"sessionId": "anc", "messageUuid": "ia"}, "message": {"role": "assistant", "model": "m", "content": []}}) + "\n"
+    )
+    fork_offset = len(inherited.encode("utf-8"))
+    forked_turn = json.dumps({"type": "user", "sessionId": "old", "uuid": "fu", "parentUuid": "ia", "promptId": "fork-p", "cwd": "/old", "message": {"role": "user", "content": "FORKED"}}) + "\n"
+    transcript.write_text(inherited + forked_turn, encoding="utf-8")
+    (cwd / "file.txt").write_text("v1", encoding="utf-8")
+    _isolate_provider_env(monkeypatch)
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
+    monkeypatch.setenv("TEST_HOME", str(home))
+    monkeypatch.setenv("CHECKPOINT_PROVIDER", "claude")
+    monkeypatch.setenv("CLAUDE_PERMISSION_MODE", "acceptEdits")
+
+    coordinator = CheckpointCoordinator(session_id="forked", cwd=cwd)
+    coordinator.on_session_start(source="resume", source_transcript_path=str(transcript))
+    coordinator.on_turn_end(
+        TurnRecord(user_message="forked"),
+        TrajectoryReference("claude", str(transcript), fork_offset, transcript.stat().st_size, 1),
+    )
+
+    def _counts(path):
+        recs = [json.loads(line) for line in Path(path).read_text(encoding="utf-8").splitlines() if line.strip()]
+        return len(recs), sum(1 for r in recs if r.get("type") == "permission-mode")
+
+    gen1 = ResumeOrchestrator(cwd=cwd).execute(ResumeOrchestrator(cwd=cwd).plan("forked", 0), lambda _t: True)
+    n1, pm1 = _counts(gen1.provider_session_path)
+    gen2 = ResumeOrchestrator(cwd=cwd).execute(ResumeOrchestrator(cwd=cwd).plan(gen1.new_session_id, 0), lambda _t: True)
+    n2, pm2 = _counts(gen2.provider_session_path)
+
+    # A fork-prefix resume never carries a synthetic permission-mode, and that holds
+    # across the second hop (no drift).
+    assert pm1 == 0, "fork-prefix resume should not inject a synthetic permission-mode"
+    assert pm2 == 0, f"resume-of-resume re-injected a permission-mode: {pm1} -> {pm2}"
+    assert n2 == n1, f"resume-of-resume drifted record count: {n1} -> {n2}"
+
+
+def test_has_inherited_prefix_survives_resume_round_trip():
+    """P7-3: the inherited-prefix verdict must be idempotent across resume hops.
+
+    The byte-offset signal (earliest span start > 0) is lost when a resumed
+    session is captured and resumed again — realign folds the inherited prefix
+    back into turn 0 at byte 0. The `forkedFrom` stamp persists in the bytes, so
+    it keeps the verdict True and prevents re-injecting a synthetic permission-mode
+    every generation.
+    """
+    from checkpoint_plugin.resume import _has_inherited_prefix
+
+    # Fresh native fork: earliest turn anchors past byte 0 -> True via offset.
+    assert _has_inherited_prefix({0: (512, 1024, 3)}) is True
+    # Normal new session: turn 0 at byte 0, no forkedFrom -> False.
+    assert _has_inherited_prefix({0: (0, 1024, 3)}) is False
+    assert _has_inherited_prefix({0: (0, 1024, 3)}, b'{"type":"user"}\n') is False
+    # Resume-of-resume: prefix folded to byte 0 BUT forkedFrom in the bytes -> True.
+    folded = b'{"type":"user","forkedFrom":{"sessionId":"anc","messageUuid":"u"}}\n'
+    assert _has_inherited_prefix({0: (0, 1024, 3)}, folded) is True
+    # No spans at all but forkedFrom present -> still True.
+    assert _has_inherited_prefix({}, folded) is True
+    assert _has_inherited_prefix({}) is False
+
 
 def test_codex_rewrite_collapses_session_meta_chain():
     """H1: a forked/subagent codex transcript carries a CHAIN of stacked
@@ -1343,6 +1444,37 @@ def test_codex_rewrite_collapses_session_meta_chain():
     assert metas[0]["payload"]["id"] == "NEW"
     assert metas[0]["payload"]["forked_from_id"] == "SUB"
     assert records[0]["type"] == "session_meta"
+
+
+def test_rewrite_preserves_source_key_order_not_alphabetical():
+    """P7-1: resumed provider records must keep native (insertion) key order, not
+    be alphabetized. sort_keys re-serialization was a 100%-vs-0% fingerprint
+    distinguishing every resumed record from a native one."""
+    from collections import OrderedDict
+    from checkpoint_plugin.resume import _rewrite_claude_trajectory, _rewrite_codex_trajectory
+
+    def _key_order(line: bytes) -> list[str]:
+        return list(json.loads(line, object_pairs_hook=OrderedDict).keys())
+
+    # Claude: a deliberately non-alphabetical native key order must round-trip as-is.
+    claude_src = (
+        json.dumps({"type": "user", "sessionId": "old", "uuid": "u1", "parentUuid": None, "promptId": "p1", "cwd": "/old", "message": {"role": "user", "content": "hi"}}) + "\n"
+    ).encode("utf-8")
+    claude_out = _rewrite_claude_trajectory(claude_src, "NEW", Path("/new"), "m", None)
+    claude_keys = _key_order(claude_out.splitlines()[0])
+    assert claude_keys == ["type", "sessionId", "uuid", "parentUuid", "promptId", "cwd", "message"]
+    assert claude_keys != sorted(claude_keys), "claude record must NOT be alphabetized"
+
+    # Codex: synthetic + rewritten meta keeps native payload order (id, timestamp, cwd, ...).
+    codex_src = (
+        json.dumps({"timestamp": "t", "type": "session_meta", "payload": {"id": "old", "timestamp": "t", "cwd": "/old", "originator": "X"}}) + "\n"
+        + json.dumps({"type": "turn_context", "payload": {"turn_id": "t-1", "model": "m"}}) + "\n"
+    ).encode("utf-8")
+    codex_out = _rewrite_codex_trajectory(codex_src, "NEW", Path("/new"), "m", None, None)
+    codex_top = _key_order(codex_out.splitlines()[0])
+    assert codex_top == ["timestamp", "type", "payload"]
+    assert codex_top != sorted(codex_top), "codex meta must NOT be alphabetized"
+
 
 
 def test_codex_rewrite_keeps_same_id_metas_drops_ancestor_metas():
@@ -1797,39 +1929,90 @@ def test_no_synthetic_permission_mode_for_fork_resume():
 
 
 def test_claude_resume_stamps_forkedfrom_on_inherited_records():
-    """P6-12: inherited-prefix records (before the first captured turn) get a
+    """P6-12/P7-2: inherited-prefix records (before the first captured turn) get a
     forkedFrom={sessionId, messageUuid} stamp mirroring native forks; the captured
-    turn's own records do NOT."""
+    turn's own records do NOT. P7-2: the native invariant is messageUuid == the
+    record's OWN (remapped) uuid — one distinct anchor per record, NOT a single
+    shared anchor."""
     from checkpoint_plugin.resume import _rewrite_claude_trajectory
 
     traj = (
         # inherited prefix: a user record from BEFORE the fork (no promptId match yet)
         json.dumps({"type": "user", "uuid": "old-u", "parentUuid": None, "message": {"role": "user", "content": "old"}}) + "\n"
-        + json.dumps({"type": "assistant", "uuid": "old-a", "parentUuid": "old-u", "message": {"role": "assistant", "content": []}}) + "\n"
+        + json.dumps({"type": "assistant", "uuid": "old-a", "parentUuid": "old-u", "message": {"role": "assistant", "content": "old-resp"}}) + "\n"
         # first captured turn: user record WITH promptId = the boundary
         + json.dumps({"type": "user", "uuid": "new-u", "parentUuid": "old-a", "promptId": "P", "message": {"role": "user", "content": "new"}}) + "\n"
-        + json.dumps({"type": "assistant", "uuid": "new-a", "parentUuid": "new-u", "message": {"role": "assistant", "content": []}}) + "\n"
+        + json.dumps({"type": "assistant", "uuid": "new-a", "parentUuid": "new-u", "message": {"role": "assistant", "content": "new-resp"}}) + "\n"
     ).encode("utf-8")
 
     out = _rewrite_claude_trajectory(
         traj, "NEW", Path("/new"), None, None,
         has_inherited_prefix=True, source_session_id="SOURCE",
+        inherited_record_count=2,
     )
     recs = [json.loads(l) for l in out.splitlines()]
     by_old = {}
-    # Match records back by content since uuids were remapped.
+    # Match records back by content since uuids were remapped (contents are distinct).
     for r in recs:
         content = r.get("message", {}).get("content")
         by_old[r.get("type"), str(content)] = r
     inherited_user = by_old[("user", "old")]
-    inherited_asst = by_old[("assistant", "[]")] if ("assistant", "[]") in by_old else None
+    inherited_asst = by_old[("assistant", "old-resp")]
     captured_user = by_old[("user", "new")]
 
-    # Inherited records carry forkedFrom pointing at SOURCE with a remapped anchor uuid.
+    # P7-2: each inherited record's forkedFrom points at SOURCE with messageUuid ==
+    # its OWN remapped uuid (mirroring native: own_uuid == messageUuid per record).
     assert inherited_user["forkedFrom"]["sessionId"] == "SOURCE"
-    assert inherited_user["forkedFrom"]["messageUuid"] == captured_user["parentUuid"]
+    assert inherited_user["forkedFrom"]["messageUuid"] == inherited_user["uuid"]
+    assert inherited_asst["forkedFrom"]["messageUuid"] == inherited_asst["uuid"]
+    # Distinct anchor per record (NOT a single shared anchor).
+    assert inherited_user["forkedFrom"]["messageUuid"] != inherited_asst["forkedFrom"]["messageUuid"]
     # The captured turn's user record does NOT get a forkedFrom stamp.
     assert "forkedFrom" not in captured_user
+
+
+def test_claude_resume_of_resume_remaps_existing_forkedfrom():
+    """P7-2: a forkedFrom carried over from a prior resume generation points at an
+    old uuid; the rewrite remaps its messageUuid so the own-uuid invariant survives
+    the round-trip instead of dangling to a dead uuid."""
+    from checkpoint_plugin.resume import _rewrite_claude_trajectory
+
+    # An inherited record already stamped (gen1): forkedFrom.messageUuid == own uuid.
+    traj = (
+        json.dumps({"type": "user", "uuid": "g1-u", "parentUuid": None, "promptId": "old-p", "forkedFrom": {"sessionId": "ANC", "messageUuid": "g1-u"}, "message": {"role": "user", "content": "inh"}}) + "\n"
+        + json.dumps({"type": "user", "uuid": "cap-u", "parentUuid": "g1-u", "promptId": "P", "message": {"role": "user", "content": "cap"}}) + "\n"
+    ).encode("utf-8")
+
+    out = _rewrite_claude_trajectory(
+        traj, "NEW", Path("/new"), None, None,
+        has_inherited_prefix=True, source_session_id="ANC",
+        inherited_record_count=1,
+    )
+    recs = [json.loads(l) for l in out.splitlines()]
+    inh = next(r for r in recs if r["message"]["content"] == "inh")
+    # messageUuid was remapped along with the record's own uuid; invariant holds.
+    assert inh["forkedFrom"]["messageUuid"] == inh["uuid"]
+    assert inh["forkedFrom"]["messageUuid"] != "g1-u", "stale uuid must be remapped"
+    assert inh["uuid"] != "g1-u"
+
+
+def test_claude_resume_repins_version_uniform_to_latest():
+    """P7-6: a resumed transcript carries one uniform CLI version like a native
+    session. An inherited prefix written by an older client is re-pinned to the
+    most recent version present, instead of mixing versions."""
+    from checkpoint_plugin.resume import _rewrite_claude_trajectory, _latest_claude_version
+
+    traj = (
+        json.dumps({"type": "user", "uuid": "u1", "parentUuid": None, "promptId": "p1", "version": "2.1.150", "message": {"role": "user", "content": "inherited"}}) + "\n"
+        + json.dumps({"type": "assistant", "uuid": "a1", "parentUuid": "u1", "version": "2.1.156", "message": {"role": "assistant", "content": "resp"}}) + "\n"
+    ).encode("utf-8")
+    assert _latest_claude_version([{"version": "2.1.150"}, {"version": "2.1.156"}]) == "2.1.156"
+    assert _latest_claude_version([{"type": "x"}]) is None
+
+    out = _rewrite_claude_trajectory(traj, "NEW", Path("/new"), None, None)
+    recs = [json.loads(line) for line in out.splitlines()]
+    versions = {r["version"] for r in recs if "version" in r}
+    assert versions == {"2.1.156"}, f"expected uniform latest version, got {versions}"
 
 
 def test_claude_resume_no_forkedfrom_without_inherited_prefix():

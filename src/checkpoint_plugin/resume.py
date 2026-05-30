@@ -33,6 +33,12 @@ class TrajectoryPrefix:
     # manifest turn_id, so realign can re-tile the rewritten file by matching
     # record keys instead of trusting pre-rewrite record counts.
     turn_keys: dict[int, object] = field(default_factory=dict)
+    # P7-5: number of leading inherited (pre-fork) records prepended before the
+    # first captured turn. This is the inherited/captured boundary; deriving it by
+    # scanning for the first promptId-bearing user record is wrong once the
+    # inherited prefix itself contains forked turns (resume-of-resume), where
+    # record 0 already carries a promptId.
+    inherited_record_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -111,7 +117,7 @@ class ResumeOrchestrator:
         source_meta = _codex_source_session_meta(plan) if provider.name == "codex" else None
         # P6-14: an inherited fork prefix is present when the earliest captured turn
         # anchors past byte 0 (records before it are pre-fork inherited history).
-        has_inherited_prefix = _has_inherited_prefix(trajectory.spans)
+        has_inherited_prefix = _has_inherited_prefix(trajectory.spans, trajectory.data)
         provider_session_path = _write_provider_session(
             provider.name,
             provider.home,
@@ -123,6 +129,7 @@ class ResumeOrchestrator:
             source_meta,
             has_inherited_prefix,
             plan.session_id,
+            trajectory.inherited_record_count,
         )
         _carry_provider_session_state(provider.name, provider.home, plan.session_id, new_session_id, target_cwd)
         if provider.name == "codex" and provider_session_path is not None:
@@ -343,9 +350,11 @@ def _trajectory_prefix(store: CheckpointStore, plan: ResumePlan) -> TrajectoryPr
     # SAME transcript at [0:first_start_offset]. Prepend it so the resumed
     # provider session reproduces the full context rather than starting amnesiac.
     inherited = _inherited_fork_prefix(manifests)
+    inherited_record_count = 0
     if inherited:
         chunks.append(inherited)
         offset = len(inherited)
+        inherited_record_count = jsonl_count_records(inherited)
     for manifest in manifests:
         if manifest.trajectory_ref is None:
             continue
@@ -366,7 +375,7 @@ def _trajectory_prefix(store: CheckpointStore, plan: ResumePlan) -> TrajectoryPr
                 turn_keys[manifest.turn_id] = chunk_key
         offset = end_offset
     if chunks:
-        return TrajectoryPrefix(b"".join(chunks), spans, turn_keys)
+        return TrajectoryPrefix(b"".join(chunks), spans, turn_keys, inherited_record_count)
     legacy = store.slice_trajectory(_trajectory_resume_offset(plan))
     if plan.target_manifest.trajectory_offset < len(legacy):
         spans[plan.turn_id] = (
@@ -374,19 +383,30 @@ def _trajectory_prefix(store: CheckpointStore, plan: ResumePlan) -> TrajectoryPr
             len(legacy),
             jsonl_count_records(legacy[plan.target_manifest.trajectory_offset :]),
         )
-    return TrajectoryPrefix(legacy, spans, turn_keys)
+    return TrajectoryPrefix(legacy, spans, turn_keys, inherited_record_count)
 
 
-def _has_inherited_prefix(spans: dict[int, tuple[int, int, int]]) -> bool:
-    """True when the earliest captured turn anchors past byte 0 (P6-14).
+def _has_inherited_prefix(
+    spans: dict[int, tuple[int, int, int]], data: bytes = b""
+) -> bool:
+    """True when the resume carries a fork-style inherited pre-fork prefix (P6-14).
 
-    Records before the first turn's start byte are pre-fork inherited history, so a
-    non-zero earliest start means this resume carries a fork-style inherited prefix.
+    Two signals, because the byte-offset one does not survive a capture round-trip:
+    1. The earliest captured turn anchors past byte 0 — records before it are
+       inherited pre-fork history. This holds for a freshly-captured native fork.
+    2. The trajectory already carries `forkedFrom` stamps (P7-3). When the plugin
+       materialises a fork resume it stamps `forkedFrom` on the inherited records;
+       if THAT session is later captured and resumed again, realign folds the
+       inherited prefix back into turn 0 at byte 0, so signal (1) is lost. The
+       `forkedFrom` marker persists in the bytes, so it keeps the inherited-prefix
+       verdict idempotent across resume generations (otherwise a synthetic
+       permission-mode is re-injected every hop — `_ensure_permission_mode_record`).
     """
-    if not spans:
-        return False
-    earliest_turn = min(spans)
-    return spans[earliest_turn][0] > 0
+    if spans:
+        earliest_turn = min(spans)
+        if spans[earliest_turn][0] > 0:
+            return True
+    return b'"forkedFrom"' in data
 
 
 def _manifests_provider_name(manifests: list[CheckpointManifest]) -> str | None:
@@ -733,6 +753,7 @@ def _write_provider_session(
     source_meta: dict[str, object] | None = None,
     has_inherited_prefix: bool = False,
     source_session_id: str | None = None,
+    inherited_record_count: int = 0,
 ) -> Path | None:
     if not trajectory:
         return None
@@ -743,7 +764,7 @@ def _write_provider_session(
     if provider_name == "claude":
         return _write_claude_session(
             provider_home, cwd, new_session_id, trajectory, model, permission_mode,
-            has_inherited_prefix, source_session_id,
+            has_inherited_prefix, source_session_id, inherited_record_count,
         )
     return None
 
@@ -848,6 +869,7 @@ def _write_claude_session(
     permission_mode: str | None,
     has_inherited_prefix: bool = False,
     source_session_id: str | None = None,
+    inherited_record_count: int = 0,
 ) -> Path:
     path = claude_home / "projects" / _claude_project_dir_name(cwd) / f"{new_session_id}.jsonl"
     _write_bytes_atomic(
@@ -856,6 +878,7 @@ def _write_claude_session(
             trajectory, new_session_id, cwd, model, permission_mode,
             has_inherited_prefix=has_inherited_prefix,
             source_session_id=source_session_id,
+            inherited_record_count=inherited_record_count,
         ),
     )
     return path
@@ -1063,6 +1086,7 @@ def _rewrite_claude_trajectory(
     *,
     has_inherited_prefix: bool = False,
     source_session_id: str | None = None,
+    inherited_record_count: int = 0,
 ) -> bytes:
     lines: list[bytes] = []
     last_uuid: str | None = None
@@ -1071,13 +1095,21 @@ def _rewrite_claude_trajectory(
     records = _ensure_permission_mode_record(
         records, permission_mode, new_session_id, has_inherited_prefix=has_inherited_prefix
     )
-    # P6-12: when this resume carries an inherited fork prefix, records before the
-    # first captured turn (the first promptId-bearing user record) are pre-fork
-    # history. Find that boundary so we can stamp forkedFrom on them like a native
-    # fork. The anchor uuid is the last inherited record's (remapped) uuid.
-    inherited_boundary = (
-        _first_captured_turn_index(records) if (has_inherited_prefix and source_session_id) else 0
-    )
+    # P6-12/P7-5: when this resume carries an inherited fork prefix, the records
+    # before the first captured turn are pre-fork history we stamp forkedFrom on.
+    # The boundary is the KNOWN inherited record count (threaded from
+    # _trajectory_prefix), NOT the first promptId-bearing user record — that scan
+    # is wrong for a resume-of-resume, where the inherited record 0 already carries
+    # a promptId and the scan returns 0 (no-op). Fall back to the scan only when the
+    # count is unavailable (legacy callers).
+    if has_inherited_prefix and source_session_id:
+        inherited_boundary = (
+            inherited_record_count
+            if inherited_record_count > 0
+            else _first_captured_turn_index(records)
+        )
+    else:
+        inherited_boundary = 0
     # P4-4: build the FULL old->new uuid map first. messageId (file-history-
     # snapshot) and leafUuid (last-prompt) can reference a message uuid that
     # appears later in the file, so a single forward pass would leave them
@@ -1092,16 +1124,18 @@ def _rewrite_claude_trajectory(
     # to a message uuid that belongs to the next turn — outside this slice. After
     # the remap below those pointers would dangle. Trim them from the end.
     records = _drop_dangling_trailing_pointers(records, uuid_map)
-    # P6-12: the remapped uuid of the last inherited-prefix record is the anchor the
-    # inherited records' forkedFrom should point at (mirrors a native fork's anchor).
-    fork_anchor_uuid: str | None = None
-    if inherited_boundary > 0:
-        for record in records[:inherited_boundary]:
-            old = record.get("uuid")
-            if isinstance(old, str) and old in uuid_map:
-                fork_anchor_uuid = uuid_map[old]
+    # P7-6: native sessions carry a SINGLE uniform CLI `version` across all records.
+    # A resumed transcript that inherits a pre-fork prefix can mix versions (the
+    # inherited history was written by an older client than the captured turns),
+    # which distinguishes it from native. We have no live version to stamp (the hook
+    # payload/env snapshot don't carry one), so re-pin every versioned record to the
+    # MOST RECENT version that genuinely appears in this trajectory — uniform like
+    # native, without fabricating a value the session never saw.
+    latest_version = _latest_claude_version(records)
     for idx, record in enumerate(records):
         record["sessionId"] = new_session_id
+        if latest_version and "version" in record:
+            record["version"] = latest_version
         if "cwd" in record:
             record["cwd"] = str(cwd)
         # F2: Claude records carry the model at `message.model` on assistant
@@ -1144,14 +1178,27 @@ def _rewrite_claude_trajectory(
             record["parentUuid"] = last_uuid
         if isinstance(record.get("uuid"), str) and record.get("type") in {"user", "assistant"}:
             last_uuid = str(record["uuid"])
-        # P6-12: stamp forkedFrom on inherited-prefix records to mirror native forks.
+        # P6-12/P7-2: mirror a native fork's forkedFrom on inherited-prefix records.
+        # Native invariant (verified on real forks): every inherited record stamps
+        # forkedFrom.messageUuid == its OWN uuid (one distinct anchor per record),
+        # NOT a single shared anchor. record["uuid"] is already remapped above, so
+        # point messageUuid at it.
+        own_uuid = record.get("uuid")
         if (
             source_session_id
             and idx < inherited_boundary
-            and fork_anchor_uuid is not None
+            and isinstance(own_uuid, str)
             and "forkedFrom" not in record
         ):
-            record["forkedFrom"] = {"sessionId": source_session_id, "messageUuid": fork_anchor_uuid}
+            record["forkedFrom"] = {"sessionId": source_session_id, "messageUuid": own_uuid}
+        # P7-2: a forkedFrom carried over from a PRIOR resume generation points at an
+        # old uuid that we just remapped; re-point its messageUuid so the own-uuid
+        # invariant survives the round-trip (otherwise it dangles to a dead uuid).
+        existing_fork = record.get("forkedFrom")
+        if isinstance(existing_fork, dict):
+            mu = existing_fork.get("messageUuid")
+            if isinstance(mu, str) and mu in uuid_map:
+                existing_fork["messageUuid"] = uuid_map[mu]
         lines.append(_json_line(record))
     return b"".join(lines)
 
@@ -1223,6 +1270,22 @@ def _first_captured_turn_index(records: list[dict[str, object]]) -> int:
     return 0
 
 
+def _latest_claude_version(records: list[dict[str, object]]) -> str | None:
+    """The most recent CLI `version` appearing in the trajectory (P7-6).
+
+    Records are in chronological order, so the LAST `version` is the newest client
+    that wrote this thread. Used to make a resumed transcript carry one uniform
+    version like a native session (rather than mixing an inherited prefix's older
+    version with the captured turns'). Returns None when no record carries a version.
+    """
+    latest: str | None = None
+    for record in records:
+        value = record.get("version")
+        if isinstance(value, str) and value:
+            latest = value
+    return latest
+
+
 def _claude_project_dir_name(cwd: Path) -> str:
     return str(cwd).replace("/", "-")
 
@@ -1242,7 +1305,14 @@ def _jsonl_records(data: bytes) -> list[dict[str, object]]:
 
 
 def _json_line(record: dict[str, object]) -> bytes:
-    return (json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+    # P7-1: provider transcripts (codex rollouts, claude .jsonl, the codex
+    # session_index) are re-serialized through here. Native records preserve
+    # INSERTION order (e.g. codex meta payload `id, timestamp, cwd, ...`; claude
+    # `type, mode, sessionId`), never alphabetical. `json.loads` already preserves
+    # source key order and the synthetic records we build are constructed in native
+    # order, so emit WITHOUT sort_keys — alphabetizing every key was a 100%-vs-0%
+    # fingerprint distinguishing resumed transcripts from native ones.
+    return (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8")
 
 
 def _write_bytes_atomic(path: Path, data: bytes) -> None:

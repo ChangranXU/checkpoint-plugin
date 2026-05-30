@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import uuid
 from pathlib import Path
@@ -19,6 +20,24 @@ from .retention import clean_keep_last
 from .store import CheckpointStore
 from .types import ResumePlan
 from .ui.diff_viewer import show_diff_viewer
+
+
+def _supports_color(stream: Any = sys.stdout) -> bool:
+    """True when ANSI color is safe to emit (a real TTY, color not disabled)."""
+    # Honor the NO_COLOR convention (https://no-color.org) and non-TTY pipes/files.
+    if os.environ.get("NO_COLOR"):
+        return False
+    return bool(getattr(stream, "isatty", lambda: False)())
+
+
+def _colorize(text: str, style: str, *, stream: Any = sys.stdout) -> str:
+    """Wrap text in an ANSI style, but only when the stream supports color."""
+    codes = {"bold": "1", "green": "32", "cyan": "36", "yellow": "33"}
+    if not _supports_color(stream):
+        return text
+    prefix = "".join(f"\033[{codes[part]}m" for part in style.split() if part in codes)
+    return f"{prefix}{text}\033[0m" if prefix else text
+
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -102,7 +121,7 @@ def _dispatch(args: argparse.Namespace) -> int:
         if report.provider_session_path is not None:
             print(f"Provider session: {report.provider_session_path}")
         if report.resume_command is not None:
-            print(f"Resume with: {report.resume_command}")
+            print(f"Resume with: {_colorize(report.resume_command, 'bold green')}")
         return 0
     if args.command == "clean":
         removed = clean_keep_last(args.keep_last)
