@@ -7,7 +7,7 @@ import os
 import shutil
 import sys
 import uuid
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -29,6 +29,10 @@ from .types import CheckpointManifest, ResumePlan, ResumeReport, TrajectoryRefer
 class TrajectoryPrefix:
     data: bytes
     spans: dict[int, tuple[int, int, int]]
+    # P6-2: provider per-turn key (codex turn_id / claude promptId) for each
+    # manifest turn_id, so realign can re-tile the rewritten file by matching
+    # record keys instead of trusting pre-rewrite record counts.
+    turn_keys: dict[int, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -105,6 +109,9 @@ class ResumeOrchestrator:
         new_session_id = _new_resume_session_id()
         trajectory = _trajectory_prefix(original_store, plan)
         source_meta = _codex_source_session_meta(plan) if provider.name == "codex" else None
+        # P6-14: an inherited fork prefix is present when the earliest captured turn
+        # anchors past byte 0 (records before it are pre-fork inherited history).
+        has_inherited_prefix = _has_inherited_prefix(trajectory.spans)
         provider_session_path = _write_provider_session(
             provider.name,
             provider.home,
@@ -114,11 +121,15 @@ class ResumeOrchestrator:
             plan.target_env.model,
             plan.target_env.permission_mode,
             source_meta,
+            has_inherited_prefix,
+            plan.session_id,
         )
-        _carry_provider_session_state(provider.name, provider.home, plan.session_id, new_session_id)
+        _carry_provider_session_state(provider.name, provider.home, plan.session_id, new_session_id, target_cwd)
         if provider.name == "codex" and provider_session_path is not None:
             _append_codex_session_index(
-                provider.home, new_session_id, _source_session_title(original_store)
+                provider.home,
+                new_session_id,
+                _source_session_title(original_store) or _derive_session_title(original_store, plan),
             )
         self._copy_session_prefix(original_store, plan, new_session_id, provider_session_path, trajectory, target_cwd)
         return ResumeReport(
@@ -145,12 +156,20 @@ class ResumeOrchestrator:
         _write_resumed_metadata(store, target_store, plan, new_session_id, provider_session_path, cwd)
         if store.blobs_dir.exists():
             shutil.copytree(store.blobs_dir, target_store.blobs_dir, dirs_exist_ok=True)
-        # P4-3: realign spans to the REWRITTEN provider file so resumed manifests'
-        # byte offsets match the file their trajectory_ref points at (otherwise a
-        # resume-of-a-resume reads stale raw-concat offsets and drops records).
+        # P4-3/P6-2: realign spans to the REWRITTEN provider file so resumed
+        # manifests' byte offsets match the file their trajectory_ref points at
+        # (otherwise a resume-of-a-resume reads stale raw-concat offsets and drops
+        # records). Re-tile by per-turn provider key, not pre-rewrite counts.
+        included = [m for m in store.list_manifests() if m.turn_id <= plan.turn_id]
+        provider_name = _manifests_provider_name(included)
         realigned = replace(
             trajectory,
-            spans=_realign_spans_to_provider_file(provider_session_path, trajectory.spans),
+            spans=_realign_spans_to_provider_file(
+                provider_session_path,
+                trajectory.spans,
+                provider_name=provider_name,
+                turn_keys=trajectory.turn_keys,
+            ),
         )
         for manifest in store.list_manifests():
             if manifest.turn_id <= plan.turn_id:
@@ -213,8 +232,11 @@ def _parent_turn_for_subagent(
     """Best-effort parent turn that spawned this subagent (for the redirect).
 
     Prefer the parent turn whose trajectory slice references the subagent's
-    agent_id (the `Task` tool_use that launched it). Fall back to the latest
-    parent turn created at or before the subagent's start, else the latest turn.
+    agent_id (the `Task` tool_use that launched it). P6-6: when the agent_id is in
+    no slice (e.g. the fork-parent edge), fall back to the EARLIEST turn that ended
+    at or after the subagent started — that is the turn during which the subagent
+    ran. The old "latest turn created <= start_ts" picked the turn that ended
+    BEFORE the subagent started (off-by-one), redirecting to the wrong turn.
     """
     try:
         parent_store = CheckpointStore(session_dir(parent_session_id, home))
@@ -229,9 +251,11 @@ def _parent_turn_for_subagent(
                 return manifest.turn_id
     start_ts = subagent_metadata.get("start_ts")
     if isinstance(start_ts, str):
-        eligible = [m for m in manifests if m.created_ts <= start_ts]
-        if eligible:
-            return max(eligible, key=lambda m: m.turn_id).turn_id
+        # The spawning turn is the earliest turn that had not yet finished when the
+        # subagent started, i.e. the earliest turn with created_ts >= start_ts.
+        running = [m for m in manifests if m.created_ts >= start_ts]
+        if running:
+            return min(running, key=lambda m: m.turn_id).turn_id
     return max(manifests, key=lambda m: m.turn_id).turn_id
 
 
@@ -310,8 +334,10 @@ def _codex_source_session_meta(plan: ResumePlan) -> dict[str, object] | None:
 def _trajectory_prefix(store: CheckpointStore, plan: ResumePlan) -> TrajectoryPrefix:
     chunks: list[bytes] = []
     spans: dict[int, tuple[int, int, int]] = {}
+    turn_keys: dict[int, object] = {}
     offset = 0
     manifests = [m for m in store.list_manifests() if m.turn_id <= plan.turn_id]
+    key_extractor = _provider_key_extractor(manifests)
     # F3: a forked/resumed session's first captured turn anchors mid-transcript
     # (the new promptId), but the inherited pre-fork history lives inline in the
     # SAME transcript at [0:first_start_offset]. Prepend it so the resumed
@@ -334,9 +360,13 @@ def _trajectory_prefix(store: CheckpointStore, plan: ResumePlan) -> TrajectoryPr
         chunks.append(chunk)
         end_offset = offset + len(chunk)
         spans[manifest.turn_id] = (offset, end_offset, jsonl_count_records(chunk))
+        if key_extractor is not None:
+            chunk_key = _first_record_key(chunk, key_extractor)
+            if chunk_key is not None:
+                turn_keys[manifest.turn_id] = chunk_key
         offset = end_offset
     if chunks:
-        return TrajectoryPrefix(b"".join(chunks), spans)
+        return TrajectoryPrefix(b"".join(chunks), spans, turn_keys)
     legacy = store.slice_trajectory(_trajectory_resume_offset(plan))
     if plan.target_manifest.trajectory_offset < len(legacy):
         spans[plan.turn_id] = (
@@ -344,7 +374,49 @@ def _trajectory_prefix(store: CheckpointStore, plan: ResumePlan) -> TrajectoryPr
             len(legacy),
             jsonl_count_records(legacy[plan.target_manifest.trajectory_offset :]),
         )
-    return TrajectoryPrefix(legacy, spans)
+    return TrajectoryPrefix(legacy, spans, turn_keys)
+
+
+def _has_inherited_prefix(spans: dict[int, tuple[int, int, int]]) -> bool:
+    """True when the earliest captured turn anchors past byte 0 (P6-14).
+
+    Records before the first turn's start byte are pre-fork inherited history, so a
+    non-zero earliest start means this resume carries a fork-style inherited prefix.
+    """
+    if not spans:
+        return False
+    earliest_turn = min(spans)
+    return spans[earliest_turn][0] > 0
+
+
+def _manifests_provider_name(manifests: list[CheckpointManifest]) -> str | None:
+    """Provider name from the first manifest carrying a trajectory_ref (P6-2)."""
+    for manifest in manifests:
+        ref = manifest.trajectory_ref
+        if ref is not None:
+            return ref.provider
+    return None
+
+
+def _provider_key_extractor(manifests: list[CheckpointManifest]):
+    """The per-turn key extractor for the provider these manifests belong to (P6-2)."""
+    return _key_extractor_for(_manifests_provider_name(manifests))
+
+
+def _first_record_key(chunk: bytes, key_extractor) -> object:
+    """Key of the first keyed record in a turn's chunk = that turn's provider key."""
+    for line in chunk.splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if isinstance(record, dict):
+            key = key_extractor(record)
+            if key is not None:
+                return key
+    return None
 
 
 def _inherited_fork_prefix(manifests: list[CheckpointManifest]) -> bytes:
@@ -378,17 +450,24 @@ def _inherited_fork_prefix(manifests: list[CheckpointManifest]) -> bytes:
 def _realign_spans_to_provider_file(
     provider_session_path: Path | None,
     spans: dict[int, tuple[int, int, int]],
+    *,
+    provider_name: str | None = None,
+    turn_keys: dict[int, object] | None = None,
 ) -> dict[int, tuple[int, int, int]]:
-    """Recompute turn spans as line-aligned byte ranges over the REWRITTEN file (P4-3).
+    """Recompute turn spans as line-aligned byte ranges over the REWRITTEN file (P4-3/P6-2).
 
-    `_write_provider_session` re-serializes the trajectory (sort_keys, uuid remap,
-    a synthetic leading permission-mode/session_meta record), so the raw-concat
-    spans from `_trajectory_prefix` no longer align to the file the resumed
-    manifests point at. Reading them later (resume-of-a-resume) raw-seeks mid-line
-    and drops records. We retile the rewritten file by record count: records with
-    no owning turn (inherited fork prefix + any synthetic record) fold into the
-    earliest turn, then each later turn takes its own record_count. Produces
-    full, gap-free, boundary-aligned coverage.
+    `_write_provider_session` re-serializes the trajectory (sort_keys, uuid remap, a
+    synthetic leading record) AND P6-3 may drop inlined-ancestor records anywhere, so
+    the raw-concat spans no longer align to the file the resumed manifests point at.
+    Reading them later (resume-of-a-resume) raw-seeks mid-line and drops records.
+
+    P6-2: re-tile by matching each rewritten record's per-turn key (codex `turn_id` /
+    claude `promptId`) against `turn_keys`, NOT by trusting pre-rewrite record counts
+    (which mis-slice interior turns once a record is dropped in turn >= 2). A keyless
+    record (session_meta, and any record without the per-turn key) attaches to the
+    currently-open turn — the turn of the most recent keyed record; keyless records
+    before the first keyed record fold into the earliest turn (inherited prefix).
+    Falls back to count-based retiling when no key map is available (legacy path).
     """
     if provider_session_path is None or not spans:
         return spans
@@ -396,19 +475,86 @@ def _realign_spans_to_provider_file(
         data = provider_session_path.read_bytes()
     except OSError:
         return spans
-    line_ends: list[int] = []  # byte offset just past each non-blank record
+    # (line_end_byte, parsed_record) for each non-blank line.
+    parsed: list[tuple[int, dict | None]] = []
     offset = 0
     for line in data.splitlines(keepends=True):
         end = offset + len(line)
         if line.strip():
-            line_ends.append(end)
+            record: dict | None
+            try:
+                loaded = json.loads(line)
+                record = loaded if isinstance(loaded, dict) else None
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                record = None
+            parsed.append((end, record))
         offset = end
-    total = len(line_ends)
+    total = len(parsed)
     if total == 0:
         return spans
     ordered = sorted(spans.items())
+    extractor = _key_extractor_for(provider_name)
+    if extractor is None or not turn_keys:
+        return _realign_by_count(data, parsed, ordered)
+
+    # Map each provider key -> owning turn_id (int). Turns with no distinct key
+    # (None) can't be matched and will only collect keyless records via fall-through.
+    key_to_turn: dict[object, int] = {}
+    for turn_id, _ in ordered:
+        key = turn_keys.get(turn_id)
+        if key is not None:
+            key_to_turn[key] = turn_id
+    first_turn = ordered[0][0]
+    # Walk records, assigning each to a turn. Keyed records that match a known turn
+    # open that turn; keyless (or unknown-key) records attach to the open turn.
+    counts: dict[int, int] = {turn_id: 0 for turn_id, _ in ordered}
+    line_ends: list[int] = [end for end, _ in parsed]
+    record_turn: list[int] = []
+    open_turn = first_turn
+    seen_keyed = False
+    for _, record in parsed:
+        key = extractor(record) if isinstance(record, dict) else None
+        if key is not None and key in key_to_turn:
+            open_turn = key_to_turn[key]
+            seen_keyed = True
+        elif not seen_keyed:
+            open_turn = first_turn  # leading keyless inherited prefix
+        record_turn.append(open_turn)
+        counts[open_turn] += 1
+
+    realigned: dict[int, tuple[int, int, int]] = {}
+    consumed = 0
+    start_byte = 0
+    for turn_id, _ in ordered:
+        take = counts[turn_id]
+        consumed = min(consumed + take, total)
+        end_byte = line_ends[consumed - 1] if consumed > 0 else start_byte
+        realigned[turn_id] = (start_byte, end_byte, take)
+        start_byte = end_byte
+    # Safety net: the last turn always extends to EOF (covers any trailing tail).
+    last_turn = ordered[-1][0]
+    last_start, _, last_count = realigned[last_turn]
+    realigned[last_turn] = (last_start, len(data), last_count)
+    return realigned
+
+
+def _key_extractor_for(provider_name: str | None):
+    if provider_name == "codex":
+        return codex_key
+    if provider_name == "claude":
+        return claude_key
+    return None
+
+
+def _realign_by_count(
+    data: bytes,
+    parsed: list[tuple[int, dict | None]],
+    ordered: list[tuple[int, tuple[int, int, int]]],
+) -> dict[int, tuple[int, int, int]]:
+    """Legacy count-based retiling (no key map available)."""
+    line_ends = [end for end, _ in parsed]
+    total = len(line_ends)
     assigned = sum(count for _, (_, _, count) in ordered)
-    # Leading records (inherited prefix + synthetic) fold into the first turn.
     leading = max(0, total - assigned)
     realigned: dict[int, tuple[int, int, int]] = {}
     consumed = 0
@@ -419,7 +565,6 @@ def _realign_spans_to_provider_file(
         end_byte = line_ends[consumed - 1] if consumed > 0 else start_byte
         realigned[turn_id] = (start_byte, end_byte, take)
         start_byte = end_byte
-    # Safety net: the last turn always extends to EOF (covers any rounding).
     last_turn = ordered[-1][0]
     last_start, _, last_count = realigned[last_turn]
     realigned[last_turn] = (last_start, len(data), last_count)
@@ -586,6 +731,8 @@ def _write_provider_session(
     model: str | None,
     permission_mode: str | None,
     source_meta: dict[str, object] | None = None,
+    has_inherited_prefix: bool = False,
+    source_session_id: str | None = None,
 ) -> Path | None:
     if not trajectory:
         return None
@@ -594,7 +741,10 @@ def _write_provider_session(
             provider_home, cwd, new_session_id, trajectory, model, permission_mode, source_meta
         )
     if provider_name == "claude":
-        return _write_claude_session(provider_home, cwd, new_session_id, trajectory, model, permission_mode)
+        return _write_claude_session(
+            provider_home, cwd, new_session_id, trajectory, model, permission_mode,
+            has_inherited_prefix, source_session_id,
+        )
     return None
 
 
@@ -625,6 +775,30 @@ def _source_session_title(store: CheckpointStore) -> str | None:
     return title if isinstance(title, str) and title else None
 
 
+def _derive_session_title(store: CheckpointStore, plan: ResumePlan) -> str:
+    """Non-null thread_name for the codex session_index (P6-5).
+
+    Real index entries always carry a non-empty `thread_name`, so when the source
+    has no recorded `session_title` we derive one. Selection rule (corrected): the
+    TARGET turn's preview first (the turn being resumed names the session), else the
+    nearest PRECEDING included turn with a non-empty preview, else a constant. We do
+    NOT default to turn 0's preview on a later-turn resume — turn 0 can name
+    unrelated inherited context.
+    """
+    preview_by_turn: dict[int, str] = {}
+    for manifest in store.list_manifests():
+        if manifest.turn_id <= plan.turn_id:
+            preview = (manifest.user_message_preview or "").strip()
+            if preview:
+                preview_by_turn[manifest.turn_id] = preview
+    # Walk from the target turn downward to the earliest included turn.
+    for turn_id in range(plan.turn_id, -1, -1):
+        preview = preview_by_turn.get(turn_id)
+        if preview:
+            return preview[:50]
+    return "Resumed session"
+
+
 def _append_codex_session_index(
     codex_home: Path, new_session_id: str, title: str | None
 ) -> None:
@@ -636,7 +810,7 @@ def _append_codex_session_index(
     entry (rewriting the whole file atomically) so it shows up.
     """
     index_path = codex_home / "session_index.jsonl"
-    entry = {"id": new_session_id, "thread_name": title, "updated_at": _now()}
+    entry = {"id": new_session_id, "thread_name": title, "updated_at": _zulu_now()}
     try:
         existing = index_path.read_bytes() if index_path.exists() else b""
     except OSError:
@@ -672,9 +846,18 @@ def _write_claude_session(
     trajectory: bytes,
     model: str | None,
     permission_mode: str | None,
+    has_inherited_prefix: bool = False,
+    source_session_id: str | None = None,
 ) -> Path:
     path = claude_home / "projects" / _claude_project_dir_name(cwd) / f"{new_session_id}.jsonl"
-    _write_bytes_atomic(path, _rewrite_claude_trajectory(trajectory, new_session_id, cwd, model, permission_mode))
+    _write_bytes_atomic(
+        path,
+        _rewrite_claude_trajectory(
+            trajectory, new_session_id, cwd, model, permission_mode,
+            has_inherited_prefix=has_inherited_prefix,
+            source_session_id=source_session_id,
+        ),
+    )
     return path
 
 
@@ -713,19 +896,26 @@ def _rewrite_codex_trajectory(
     original_session_id = _first_session_meta_id(records)
     if not records or records[0].get("type") != "session_meta":
         lines.append(_json_line(_codex_session_meta(new_session_id, cwd, source_meta)))
-    # H1: a forked/subagent codex transcript carries a CHAIN of stacked
-    # session_meta records in its inherited prefix (e.g. e400<-ed20<-3a77). The
-    # resumed file must contain exactly ONE leading session_meta — rewriting
-    # every meta's id to new_session_id produced 2-3 identical-id headers, which
-    # is not a valid single-session rollout. Keep only the first; drop ancestors.
-    seen_session_meta = False
+    # P6-3: a forked/subagent codex transcript carries session_meta records from
+    # PRIOR generations inlined into its prefix. Two kinds exist on disk:
+    #   - same-session continuation metas: id == head id (the first meta's id),
+    #     written when the live session was itself resumed/rolled-back. These are
+    #     legitimate and may appear mid-stream (verified on real 019e6522/019e648f);
+    #     keep + rewrite them like the head.
+    #   - inlined ancestor metas: id != head id (an older ancestor's id). These are
+    #     replayed history and must be dropped, wherever they sit.
+    # The discriminator is the meta's ORIGINAL id vs the head id — NOT position
+    # ("leading run") and NOT forked_from_id (a fork's head carries forked_from_id
+    # while its inlined ancestors carry forked_from_id=None — backwards).
+    head_meta_id = original_session_id
     for record in records:
         if _is_transient_codex_event(record):
             continue  # M1
         if record.get("type") == "session_meta":
-            if seen_session_meta:
-                continue  # H1: drop inlined ancestor metas
-            seen_session_meta = True
+            payload = record.get("payload")
+            this_id = payload.get("id") if isinstance(payload, dict) else None
+            if head_meta_id is not None and this_id != head_meta_id:
+                continue  # P6-3: drop inlined ancestor metas (id != head)
         payload = record.get("payload")
         if isinstance(payload, dict):
             if record.get("type") == "session_meta":
@@ -773,12 +963,17 @@ def _codex_session_meta(
     cwd: Path,
     source_meta: dict[str, object] | None,
 ) -> dict[str, object]:
-    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    now = _zulu_now()
     payload: dict[str, object] = {
         "id": new_session_id,
         "timestamp": now,
         "cwd": str(cwd),
     }
+    # P6-11: a forked source carries `forked_from_id`; preserve it on the synthetic
+    # meta so the resumed session records its ancestry (the in-place rewrite path at
+    # _rewrite_codex_trajectory repoints this to the original session id instead).
+    if source_meta and source_meta.get("forked_from_id"):
+        payload["forked_from_id"] = source_meta["forked_from_id"]
     _apply_preserved_meta_fields(payload, source_meta)
     _mark_codex_session_visible(payload)
     return {
@@ -794,6 +989,13 @@ _PRESERVED_CODEX_META_FIELDS = (
     "base_instructions",
     "dynamic_tools",
     "git",
+    # P6-1 / P6-11: provenance fields are carried verbatim from the source meta so
+    # we never clobber a structured subagent `source` dict (or a CLI/TUI
+    # entrypoint's provenance) with the Desktop/vscode defaults below.
+    "originator",
+    "source",
+    "thread_source",
+    "agent_nickname",
 )
 
 
@@ -810,9 +1012,13 @@ def _apply_preserved_meta_fields(
 
 
 def _mark_codex_session_visible(payload: dict[str, object]) -> None:
-    payload["originator"] = "Codex Desktop"
-    payload["source"] = "vscode"
-    payload["thread_source"] = "user"
+    # P6-1: fill the Desktop/vscode/user provenance defaults ONLY when the field is
+    # absent. `_apply_preserved_meta_fields` runs first, so a real `source` (string
+    # OR a structured `{subagent:{...}}` dict), `originator`, or `thread_source` is
+    # already present and must never be overwritten or coerced.
+    payload.setdefault("originator", "Codex Desktop")
+    payload.setdefault("source", "vscode")
+    payload.setdefault("thread_source", "user")
 
 
 _CLAUDE_POINTER_KEYS = ("messageId", "leafUuid")
@@ -854,11 +1060,24 @@ def _rewrite_claude_trajectory(
     cwd: Path,
     model: str | None,
     permission_mode: str | None,
+    *,
+    has_inherited_prefix: bool = False,
+    source_session_id: str | None = None,
 ) -> bytes:
     lines: list[bytes] = []
     last_uuid: str | None = None
+    permission_mode = _normalize_permission_mode(permission_mode)
     records = _jsonl_records(trajectory)
-    records = _ensure_permission_mode_record(records, permission_mode, new_session_id)
+    records = _ensure_permission_mode_record(
+        records, permission_mode, new_session_id, has_inherited_prefix=has_inherited_prefix
+    )
+    # P6-12: when this resume carries an inherited fork prefix, records before the
+    # first captured turn (the first promptId-bearing user record) are pre-fork
+    # history. Find that boundary so we can stamp forkedFrom on them like a native
+    # fork. The anchor uuid is the last inherited record's (remapped) uuid.
+    inherited_boundary = (
+        _first_captured_turn_index(records) if (has_inherited_prefix and source_session_id) else 0
+    )
     # P4-4: build the FULL old->new uuid map first. messageId (file-history-
     # snapshot) and leafUuid (last-prompt) can reference a message uuid that
     # appears later in the file, so a single forward pass would leave them
@@ -873,7 +1092,15 @@ def _rewrite_claude_trajectory(
     # to a message uuid that belongs to the next turn — outside this slice. After
     # the remap below those pointers would dangle. Trim them from the end.
     records = _drop_dangling_trailing_pointers(records, uuid_map)
-    for record in records:
+    # P6-12: the remapped uuid of the last inherited-prefix record is the anchor the
+    # inherited records' forkedFrom should point at (mirrors a native fork's anchor).
+    fork_anchor_uuid: str | None = None
+    if inherited_boundary > 0:
+        for record in records[:inherited_boundary]:
+            old = record.get("uuid")
+            if isinstance(old, str) and old in uuid_map:
+                fork_anchor_uuid = uuid_map[old]
+    for idx, record in enumerate(records):
         record["sessionId"] = new_session_id
         if "cwd" in record:
             record["cwd"] = str(cwd)
@@ -901,24 +1128,74 @@ def _rewrite_claude_trajectory(
             value = record.get(pointer_key)
             if isinstance(value, str) and value in uuid_map:
                 record[pointer_key] = uuid_map[value]
+        # P6-7: file-history-snapshot records nest a second pointer at
+        # snapshot.messageId; the top-level remap above misses it, leaving it
+        # dangling after the uuid rename (breaks rewind/file-restore). Remap it
+        # narrowly (only this record type, only when the nested id is known).
+        if record.get("type") == "file-history-snapshot":
+            snapshot = record.get("snapshot")
+            if isinstance(snapshot, dict):
+                nested = snapshot.get("messageId")
+                if isinstance(nested, str) and nested in uuid_map:
+                    snapshot["messageId"] = uuid_map[nested]
         if isinstance(record.get("parentUuid"), str):
             record["parentUuid"] = uuid_map.get(str(record["parentUuid"]), last_uuid)
         elif "parentUuid" in record and record.get("type") not in {"summary", "permission-mode"}:
             record["parentUuid"] = last_uuid
         if isinstance(record.get("uuid"), str) and record.get("type") in {"user", "assistant"}:
             last_uuid = str(record["uuid"])
+        # P6-12: stamp forkedFrom on inherited-prefix records to mirror native forks.
+        if (
+            source_session_id
+            and idx < inherited_boundary
+            and fork_anchor_uuid is not None
+            and "forkedFrom" not in record
+        ):
+            record["forkedFrom"] = {"sessionId": source_session_id, "messageUuid": fork_anchor_uuid}
         lines.append(_json_line(record))
     return b"".join(lines)
+
+
+_CLAUDE_PERMISSION_MODES = (
+    "default",
+    "acceptEdits",
+    "plan",
+    "auto",
+    "dontAsk",
+    "bypassPermissions",
+)
+
+
+def _normalize_permission_mode(permission_mode: str | None) -> str | None:
+    """Validate against Claude's permissionMode enum, falling back to 'default' (P6-14).
+
+    An unknown mode (provider drift, a typo in captured env) would make Claude
+    reject the synthetic/re-pinned record, so coerce anything off-enum to 'default'.
+    """
+    if not permission_mode:
+        return permission_mode
+    if permission_mode in _CLAUDE_PERMISSION_MODES:
+        return permission_mode
+    return "default"
 
 
 def _ensure_permission_mode_record(
     records: list[dict[str, object]],
     permission_mode: str | None,
     new_session_id: str,
+    *,
+    has_inherited_prefix: bool = False,
 ) -> list[dict[str, object]]:
     if not permission_mode:
         return records
     if any(record.get("type") == "permission-mode" for record in records):
+        return records
+    # P6-14: a native fork-style resume (one that inherits a pre-fork prefix) does
+    # NOT carry a synthetic lone permission-mode record, so injecting one diverges
+    # from a real fork. Only inject for a normal new-session resume (no inherited
+    # prefix — turn 0 at byte 0). The resume-of-resume count-parity path is a
+    # normal resume and keeps injecting.
+    if has_inherited_prefix:
         return records
     synthetic = {
         "type": "permission-mode",
@@ -932,6 +1209,18 @@ def _ensure_permission_mode_record(
             break
         insert_at = idx + 1
     return [*records[:insert_at], synthetic, *records[insert_at:]]
+
+
+def _first_captured_turn_index(records: list[dict[str, object]]) -> int:
+    """Index of the first captured turn = first promptId-bearing user record (P6-12).
+
+    Records before it are the inherited pre-fork prefix. Returns 0 when no captured
+    turn boundary is found (nothing to treat as inherited).
+    """
+    for idx, record in enumerate(records):
+        if record.get("type") == "user" and record.get("promptId"):
+            return idx
+    return 0
 
 
 def _claude_project_dir_name(cwd: Path) -> str:
@@ -970,6 +1259,16 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _zulu_now() -> str:
+    """RFC3339 UTC timestamp with a `Z` suffix (P6-4).
+
+    Codex writes `...Z` in both `session_meta.timestamp` and the
+    `session_index.jsonl` `updated_at` field; `_now()`'s `+00:00` form would be a
+    representation drift from native entries the picker reads.
+    """
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 def _resume_command(provider_name: str, new_session_id: str) -> str | None:
     if provider_name == "claude":
         return f"claude --resume {new_session_id}"
@@ -983,6 +1282,7 @@ def _carry_provider_session_state(
     provider_home: Path,
     old_session_id: str,
     new_session_id: str,
+    cwd: Path,
 ) -> None:
     """Reuse the original session's append-only state under the new session id.
 
@@ -997,10 +1297,12 @@ def _carry_provider_session_state(
         provider_home / "file-history" / new_session_id,
     )
     _hardlink_todos(provider_home / "todos", old_session_id, new_session_id)
-    _carry_claude_subagents(provider_home, old_session_id, new_session_id)
+    _carry_claude_subagents(provider_home, old_session_id, new_session_id, cwd)
 
 
-def _carry_claude_subagents(provider_home: Path, old_session_id: str, new_session_id: str) -> None:
+def _carry_claude_subagents(
+    provider_home: Path, old_session_id: str, new_session_id: str, cwd: Path
+) -> None:
     """Carry a session's subagent transcripts to the resumed session (B4).
 
     Claude stores subagents under `projects/<project>/<session>/subagents/`.
@@ -1018,18 +1320,23 @@ def _carry_claude_subagents(provider_home: Path, old_session_id: str, new_sessio
             continue
         src = project_dir / old_session_id / "subagents"
         if src.exists() and src.is_dir():
-            _carry_subagent_tree(src, project_dir / new_session_id / "subagents", new_session_id)
+            _carry_subagent_tree(src, project_dir / new_session_id / "subagents", new_session_id, cwd)
 
 
-def _carry_subagent_tree(src: Path, dst: Path, new_session_id: str) -> None:
-    """Copy a subagent tree, rewriting each record's sessionId (H3).
+def _carry_subagent_tree(src: Path, dst: Path, new_session_id: str, cwd: Path) -> None:
+    """Copy a subagent tree, rewriting each record's sessionId and cwd (H3/P6-8).
 
     A subagent transcript is a self-contained sidechain: its internal
-    uuid/parentUuid are independent and it holds no back-pointer to the parent's
-    Task tool_use id (the link is parent->subagent via the agent id / filename).
-    So the minimal correct carry rewrites ONLY `sessionId` to the new parent id
-    and leaves every other field byte-identical. Non-jsonl entries (rare) keep
-    the cheap hardlink/copy path.
+    uuid/parentUuid are independent. Verified against real sidechains:
+    `sourceToolAssistantUUID`, where present, is an INTRA-sidechain pointer into the
+    subagent file's own uuid namespace (it resolves to a uuid inside the same file,
+    never the parent main transcript), so it must NOT be remapped through the
+    parent's uuid map — that would be a no-op at best and corrupting at worst. The
+    correct carry therefore rewrites `sessionId` (to the new parent id) AND `cwd`
+    (every real subagent record carries cwd; a stale cwd would point the resumed
+    sidechain at the old working directory), and leaves every other field — all
+    uuids included — byte-identical. Non-jsonl entries (rare) keep the cheap
+    hardlink/copy path.
     """
     if not src.exists() or not src.is_dir():
         return
@@ -1050,6 +1357,8 @@ def _carry_subagent_tree(src: Path, dst: Path, new_session_id: str) -> None:
             for record in records:
                 if "sessionId" in record:
                     record["sessionId"] = new_session_id
+                if "cwd" in record:
+                    record["cwd"] = str(cwd)
             _write_bytes_atomic(target, b"".join(_json_line(record) for record in records))
             continue
         try:

@@ -69,12 +69,28 @@ def _on_subagent_end(payload: dict[str, Any], cwd: Path, parent_session_id: str)
     # SubagentStop omits `model` (SessionStart-only); inherit the parent's pinned
     # session_env so the subagent checkpoint records the same model/effort (G2).
     sub_env = {**_parent_session_env(parent_session_id), **_session_env(payload)}
+    # P6-6: persist whatever durable spawn link SubagentStop provides — the
+    # agent_id (primary match via _manifest_references_agent) plus the sidechain
+    # filename stem, which survives even when agent_id is absent from any slice.
+    lineage: dict[str, Any] = {
+        "parent_session_id": parent_session_id,
+        "agent_id": agent_id,
+        "agent_type": _first_string(payload, "agent_type", "agentType"),
+    }
+    if transcript_path is not None:
+        lineage["sidechain_stem"] = transcript_path.stem
+    ref = _subagent_trajectory_ref(payload, transcript_path)
+    if ref is None:
+        # P6-9: no sidechain file was found, so the slice is empty. Record WHY at a
+        # defined location so a reader knows the empty trajectory is expected, not a
+        # capture bug.
+        lineage["capture_status"] = "no_sidechain_file"
+        ref = _empty_trajectory_ref("claude")
     coordinator.on_session_start(
         source="subagent",
         session_env=sub_env,
-        lineage={"parent_session_id": parent_session_id, "agent_id": agent_id, "agent_type": _first_string(payload, "agent_type", "agentType")},
+        lineage=lineage,
     )
-    ref = _subagent_trajectory_ref(payload, transcript_path) or _empty_trajectory_ref("claude")
     coordinator.on_turn_end(_turn_record(payload), ref)
     return 0
 

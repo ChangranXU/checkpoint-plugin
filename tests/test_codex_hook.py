@@ -385,7 +385,10 @@ def test_codex_startup_fork_records_lineage_from_session_meta(tmp_path, monkeypa
     assert codex_hook.main([]) == 0
 
     metadata = json.loads((plugin_home / "sessions" / "FORKED" / "metadata.json").read_text())
-    assert metadata["source"] == "startup"
+    # P6-16: a fork that arrived disguised as source="startup" is normalized to "fork".
+    assert metadata["source"] == "fork"
     assert metadata["forked_from_transcript"] == str(parent)
-    assert metadata["forked_at_offset"] == parent.stat().st_size
-    assert metadata["forked_at_record_count"] == 2
+    # P6-10: anchor at the fork's OWN inlined-prefix length (drift-free), not the
+    # parent's live EOF. At SessionStart the fork file holds only its inlined prefix.
+    assert metadata["forked_at_offset"] == own.stat().st_size
+    assert metadata["forked_at_record_count"] == 1

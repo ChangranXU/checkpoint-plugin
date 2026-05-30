@@ -63,11 +63,20 @@ class CheckpointCoordinator:
         # Capture the byte offset + record count at fork time as the anchor point
         # in the parent's history where this session branched (F5).
         if source in {"resume", "compact"} and source_transcript_path:
-            metadata["forked_from_transcript"] = source_transcript_path
-            anchor = _fork_anchor(source_transcript_path)
-            if anchor is not None:
-                metadata["forked_at_offset"] = anchor[0]
-                metadata["forked_at_record_count"] = anchor[1]
+            # P6-15: for claude the SessionStart `transcript_path` is the session's
+            # OWN file (Claude resumes in place under the same id), so recording it
+            # verbatim makes forked_from_transcript a self-reference. The true
+            # ancestor is named by `forkedFrom.sessionId` inside that transcript;
+            # resolve it, and drop the field entirely when it would point at self.
+            ancestor = _resolve_fork_ancestor_transcript(
+                provider.name, source_transcript_path, self.session_id
+            )
+            if ancestor is not None:
+                metadata["forked_from_transcript"] = ancestor
+                anchor = _fork_anchor(ancestor)
+                if anchor is not None:
+                    metadata["forked_at_offset"] = anchor[0]
+                    metadata["forked_at_record_count"] = anchor[1]
         # M2: Codex forks ("fork chat") arrive with source="startup" (or a
         # structured subagent source), so the resume/compact guard never fires.
         # Detect the fork structurally from the new rollout's first session_meta
@@ -77,6 +86,10 @@ class CheckpointCoordinator:
             if fork is not None:
                 parent_transcript, anchor = fork
                 metadata["forked_from_transcript"] = parent_transcript
+                # P6-16: a structurally-detected codex fork arrives as
+                # source="startup"; normalize it to "fork" so readers (and the
+                # picker) don't mistake a branch for a cold start.
+                metadata["source"] = "fork"
                 if anchor is not None:
                     metadata["forked_at_offset"] = anchor[0]
                     metadata["forked_at_record_count"] = anchor[1]
@@ -216,6 +229,54 @@ def _read_metadata(path: Path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _resolve_fork_ancestor_transcript(
+    provider_name: str,
+    source_transcript_path: str,
+    own_session_id: str,
+) -> str | None:
+    """The ANCESTOR transcript a fork branched from, never a self-reference (P6-15).
+
+    For codex the SessionStart `transcript_path` is genuinely the parent rollout, so
+    we return it as-is. For claude the path is the session's OWN file (Claude resumes
+    in place under the same id); the real ancestor is named by `forkedFrom.sessionId`
+    inside that transcript. We resolve a sibling `<ancestor>.jsonl` and return it; if
+    the path is self-referential and no distinct ancestor resolves, return None so the
+    misleading self-pointer is dropped rather than recorded.
+    """
+    path = Path(source_transcript_path).expanduser()
+    if provider_name != "claude":
+        return source_transcript_path
+    if path.stem != own_session_id:
+        return source_transcript_path  # already names a different (ancestor) file
+    ancestor_id = _claude_forked_from_session_id(path)
+    if not ancestor_id or ancestor_id == own_session_id:
+        return None
+    sibling = path.with_name(f"{ancestor_id}.jsonl")
+    return str(sibling) if sibling.exists() else None
+
+
+def _claude_forked_from_session_id(transcript_path: Path) -> str | None:
+    """The `forkedFrom.sessionId` recorded in a claude fork transcript (P6-15)."""
+    try:
+        with transcript_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(record, dict):
+                    forked_from = record.get("forkedFrom")
+                    if isinstance(forked_from, dict):
+                        sid = forked_from.get("sessionId")
+                        if isinstance(sid, str) and sid:
+                            return sid
+    except OSError:
+        return None
+    return None
+
+
 def _fork_anchor(transcript_path: str) -> tuple[int, int] | None:
     """(byte offset, record count) of a forked-from transcript at fork time (F5).
 
@@ -269,10 +330,35 @@ def _codex_fork_lineage(
     if not isinstance(forked_from_id, str) or not forked_from_id:
         return None
     matches = sorted(codex_home.glob(f"sessions/**/rollout-*-{forked_from_id}.jsonl"))
+    # P6-10: anchor at the fork's OWN inlined prefix length, not the parent's live
+    # EOF. The parent rollout keeps growing after the branch, so its current size
+    # over-counts the branch point; the fork inlines the parent history up to the
+    # branch, so the inlined prefix is the faithful, drift-free anchor.
+    anchor = _codex_inlined_prefix_anchor(path)
+    if anchor is None and matches:
+        anchor = _fork_anchor(str(matches[0]))  # fallback: parent file (legacy)
     if not matches:
-        return forked_from_id, None
-    parent_path = matches[0]
-    return str(parent_path), _fork_anchor(str(parent_path))
+        return forked_from_id, anchor
+    return str(matches[0]), anchor
+
+
+def _codex_inlined_prefix_anchor(fork_path: Path) -> tuple[int, int] | None:
+    """(byte offset, record count) of the inlined ancestor prefix in a codex fork (P6-10).
+
+    A codex fork inlines the parent's history at the head of its OWN rollout. The
+    branch point is the end of that inlined prefix, measured in the fork's own file,
+    which (unlike the parent's live EOF) never drifts as the parent keeps growing.
+    At SessionStart the fork file holds only the inlined history (plus its own
+    session_meta), so the full current length IS the inlined-prefix anchor.
+    """
+    try:
+        data = fork_path.read_bytes()
+    except OSError:
+        return None
+    count = sum(1 for line in data.splitlines() if line.strip())
+    if count == 0:
+        return None
+    return len(data), count
 
 
 def _ref_with_end_offset(ref: TrajectoryReference, end_offset: int) -> TrajectoryReference:

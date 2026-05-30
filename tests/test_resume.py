@@ -1200,6 +1200,30 @@ def test_claude_rewrite_remaps_file_history_message_id():
     assert last_prompt["leafUuid"] == assistant["uuid"]
 
 
+def test_claude_rewrite_remaps_nested_snapshot_message_id():
+    """P6-7: file-history-snapshot also nests snapshot.messageId; it must be remapped
+    through the uuid map so it doesn't dangle after the rename (breaks rewind)."""
+    from checkpoint_plugin.resume import _rewrite_claude_trajectory
+
+    trajectory = (
+        json.dumps({"type": "user", "uuid": "u1", "parentUuid": None, "promptId": "p", "message": {"role": "user", "content": "hi"}}) + "\n"
+        + json.dumps({"type": "assistant", "uuid": "a1", "parentUuid": "u1", "message": {"role": "assistant", "content": []}}) + "\n"
+        # nested snapshot.messageId points at the assistant uuid a1
+        + json.dumps({"type": "file-history-snapshot", "messageId": "a1", "snapshot": {"messageId": "a1", "files": {}}}) + "\n"
+    ).encode("utf-8")
+    out = _rewrite_claude_trajectory(trajectory, "NEW", Path("/new"), None, None)
+    records = [json.loads(line) for line in out.splitlines()]
+    assistant = next(r for r in records if r.get("type") == "assistant")
+    fhs = next(r for r in records if r.get("type") == "file-history-snapshot")
+    # Both the top-level AND the nested pointer track the renamed assistant uuid.
+    assert fhs["messageId"] == assistant["uuid"]
+    assert fhs["snapshot"]["messageId"] == assistant["uuid"]
+    assert fhs["snapshot"]["messageId"] != "a1"
+    # No field still holds the old uuid as its exact value.
+    assert fhs["messageId"] != "a1"
+    assert "a1" not in {r.get("uuid") for r in records}
+
+
 def test_resume_forked_session_includes_inherited_prefix(tmp_path, monkeypatch):
     """F3: resuming a forked session (first turn anchored mid-transcript) must
     materialize the inherited pre-fork records, not start amnesiac."""
@@ -1321,6 +1345,48 @@ def test_codex_rewrite_collapses_session_meta_chain():
     assert records[0]["type"] == "session_meta"
 
 
+def test_codex_rewrite_keeps_same_id_metas_drops_ancestor_metas():
+    """P6-3: collapse only INLINED-ANCESTOR metas (id != head). Same-head-id
+    continuation metas are kept + rewritten wherever they sit. Modeled on the real
+    019e648f fork shape: head meta carries forked_from_id; inlined ancestor metas
+    (different id) carry forked_from_id=None and appear BOTH leading and mid-stream;
+    a same-head-id meta reappears mid-stream (a rolled-back restart of this fork).
+    The forked_from_id-based discriminator would give a DIFFERENT (wrong) result."""
+    from checkpoint_plugin.resume import _rewrite_codex_trajectory
+
+    HEAD, ANCESTOR = "019e648f", "019e644b"
+    trajectory = (
+        # head/fork meta — carries forked_from_id (it IS a fork of the ancestor)
+        json.dumps({"type": "session_meta", "payload": {"id": HEAD, "forked_from_id": ANCESTOR, "cwd": "/old"}}) + "\n"
+        # leading inlined ancestor meta — id != head, forked_from_id=None
+        + json.dumps({"type": "session_meta", "payload": {"id": ANCESTOR, "cwd": "/old"}}) + "\n"
+        + json.dumps({"type": "turn_context", "payload": {"turn_id": "t-1", "model": "m"}}) + "\n"
+        + json.dumps({"type": "response_item", "payload": {"type": "message"}}) + "\n"
+        # MID-STREAM inlined ancestor meta — id != head (a leading-run rule would WRONGLY keep this)
+        + json.dumps({"type": "session_meta", "payload": {"id": ANCESTOR, "cwd": "/old"}}) + "\n"
+        + json.dumps({"type": "turn_context", "payload": {"turn_id": "t-2", "model": "m"}}) + "\n"
+        # MID-STREAM same-head-id meta — this fork's own restart marker; must be KEPT
+        + json.dumps({"type": "session_meta", "payload": {"id": HEAD, "forked_from_id": ANCESTOR, "cwd": "/old"}}) + "\n"
+        + json.dumps({"type": "turn_context", "payload": {"turn_id": "t-3", "model": "m"}}) + "\n"
+    ).encode("utf-8")
+
+    out = _rewrite_codex_trajectory(trajectory, "NEW", Path("/new"), None, None, None)
+    records = [json.loads(line) for line in out.splitlines()]
+    metas = [r for r in records if r.get("type") == "session_meta"]
+    # Both ANCESTOR metas (leading AND mid-stream) dropped; both HEAD metas kept+rewritten.
+    assert len(metas) == 2, "two same-head-id metas survive; both ancestor metas dropped"
+    assert all(m["payload"]["id"] == "NEW" for m in metas)
+    assert records[0]["type"] == "session_meta"
+    # No ANCESTOR id remains anywhere in the output.
+    assert ANCESTOR not in out.decode("utf-8")
+    # A forked_from_id-based rule would have dropped the HEAD metas (they carry it)
+    # and kept the ANCESTOR metas (forked_from_id=None) — the opposite. Prove the
+    # id-discriminator did NOT do that: turn_contexts t-1/t-2/t-3 all survive.
+    turn_ids = {r["payload"].get("turn_id") for r in records if r.get("type") == "turn_context"}
+    assert turn_ids == {"t-1", "t-2", "t-3"}
+
+
+
 def test_codex_rewrite_strips_thread_rolled_back():
     """M1: transient fork-control event_msgs (thread_rolled_back) describe the
     parent's history surgery and must not be carried into the resumed session."""
@@ -1334,6 +1400,124 @@ def test_codex_rewrite_strips_thread_rolled_back():
     out = _rewrite_codex_trajectory(trajectory, "NEW", Path("/new"), None, None, None)
     assert b"thread_rolled_back" not in out
     assert b"task_started" in out
+
+
+def test_codex_rewrite_preserves_structured_source_and_provenance():
+    """P6-1/P6-11: provenance fields are carried verbatim from source_meta and the
+    Desktop/vscode/user defaults only fill when a field is ABSENT — a structured
+    subagent `source` dict and a CLI/TUI entrypoint must never be clobbered."""
+    from checkpoint_plugin.resume import _rewrite_codex_trajectory
+
+    # (a) subagent meta: dict source + thread_source=subagent + agent_nickname.
+    sub_source = {"subagent": {"thread_spawn": {"parent": "p"}}}
+    trajectory = (
+        json.dumps(
+            {
+                "type": "session_meta",
+                "payload": {
+                    "id": "old",
+                    "cwd": "/old",
+                    "source": sub_source,
+                    "thread_source": "subagent",
+                    "agent_nickname": "Tesla",
+                    "originator": "codex_cli_rs",
+                },
+            }
+        )
+        + "\n"
+        + json.dumps({"type": "turn_context", "payload": {"turn_id": "t-1", "model": "m"}}) + "\n"
+    ).encode("utf-8")
+    out = _rewrite_codex_trajectory(trajectory, "NEW", Path("/new"), None, None, None)
+    meta = next(json.loads(l)["payload"] for l in out.splitlines() if json.loads(l).get("type") == "session_meta")
+    assert meta["source"] == sub_source, "structured dict source must survive, not coerced to 'vscode'"
+    assert meta["thread_source"] == "subagent"
+    assert meta["agent_nickname"] == "Tesla"
+    assert meta["originator"] == "codex_cli_rs"
+
+    # (b) meta missing provenance fields → defaults applied.
+    bare = (
+        json.dumps({"type": "session_meta", "payload": {"id": "old", "cwd": "/old"}}) + "\n"
+        + json.dumps({"type": "turn_context", "payload": {"turn_id": "t-1", "model": "m"}}) + "\n"
+    ).encode("utf-8")
+    out2 = _rewrite_codex_trajectory(bare, "NEW", Path("/new"), None, None, None)
+    meta2 = next(json.loads(l)["payload"] for l in out2.splitlines() if json.loads(l).get("type") == "session_meta")
+    assert meta2["source"] == "vscode"
+    assert meta2["originator"] == "Codex Desktop"
+    assert meta2["thread_source"] == "user"
+
+
+def test_codex_synthetic_meta_preserves_nickname_and_forked_from_id():
+    """P6-11: when the trajectory has no leading session_meta, the synthetic meta
+    must still carry agent_nickname and forked_from_id from source_meta."""
+    from checkpoint_plugin.resume import _codex_session_meta
+
+    source_meta = {
+        "source": {"subagent": {}},
+        "thread_source": "subagent",
+        "agent_nickname": "Dewey",
+        "forked_from_id": "ANCESTOR",
+    }
+    record = _codex_session_meta("NEW", Path("/new"), source_meta)
+    payload = record["payload"]
+    assert payload["agent_nickname"] == "Dewey"
+    assert payload["forked_from_id"] == "ANCESTOR"
+    assert payload["source"] == {"subagent": {}}
+    assert payload["thread_source"] == "subagent"
+
+
+def test_codex_session_index_uses_zulu_timestamp(tmp_path):
+    """P6-4: the appended session_index entry's updated_at must end with Z."""
+    import datetime as _dt
+    from checkpoint_plugin.resume import _append_codex_session_index
+
+    _append_codex_session_index(tmp_path, "NEW", "a title")
+    line = (tmp_path / "session_index.jsonl").read_text().strip().splitlines()[-1]
+    entry = json.loads(line)
+    assert entry["updated_at"].endswith("Z")
+    # Round-trips as RFC3339 (Z → +00:00 for fromisoformat).
+    parsed = _dt.datetime.fromisoformat(entry["updated_at"].replace("Z", "+00:00"))
+    assert parsed.tzinfo is not None
+
+
+def test_codex_session_index_thread_name_never_null(tmp_path, monkeypatch):
+    """P6-5: with no recorded session_title, the derived title comes from the TARGET
+    turn (not turn 0) and is always a non-empty string."""
+    from types import SimpleNamespace
+    from checkpoint_plugin.resume import _derive_session_title
+    from checkpoint_plugin.store import CheckpointStore
+    from checkpoint_plugin.types import CheckpointManifest
+
+    store = CheckpointStore(tmp_path / "sess")
+
+    def _mk(turn_id, preview):
+        return CheckpointManifest(
+            turn_id=turn_id,
+            session_id="s",
+            created_ts="2026-01-01T00:00:00Z",
+            env_ref="e",
+            fs_ref="f",
+            user_message_preview=preview,
+        )
+
+    store.write_manifest(_mk(0, "inherited unrelated context"))
+    store.write_manifest(_mk(1, "the real target prompt"))
+    store.write_manifest(_mk(2, "a later turn not included"))
+
+    title = _derive_session_title(store, SimpleNamespace(turn_id=1))
+    assert title == "the real target prompt"
+    assert title != "inherited unrelated context"
+
+    # Target preview empty → fall back to nearest preceding non-empty preview.
+    store2 = CheckpointStore(tmp_path / "sess2")
+    store2.write_manifest(_mk(0, "first prompt"))
+    store2.write_manifest(_mk(1, ""))
+    assert _derive_session_title(store2, SimpleNamespace(turn_id=1)) == "first prompt"
+
+    # No previews anywhere → constant fallback, never null/empty.
+    store3 = CheckpointStore(tmp_path / "sess3")
+    store3.write_manifest(_mk(0, ""))
+    assert _derive_session_title(store3, SimpleNamespace(turn_id=0)) == "Resumed session"
+
 
 
 def test_render_diff_shows_effort_change():
@@ -1425,8 +1609,8 @@ def test_parent_resume_rewrites_carried_subagent_sessionid(tmp_path, monkeypatch
     sub_dir.mkdir(parents=True)
     sub_file = sub_dir / "agent-abc.jsonl"
     sub_records = [
-        {"type": "user", "sessionId": "s1", "uuid": "sub-u1", "parentUuid": None, "isSidechain": True, "message": {"role": "user", "content": "go"}},
-        {"type": "assistant", "sessionId": "s1", "uuid": "sub-a1", "parentUuid": "sub-u1", "isSidechain": True, "message": {"role": "assistant", "content": []}},
+        {"type": "user", "sessionId": "s1", "uuid": "sub-u1", "parentUuid": None, "cwd": "/old", "isSidechain": True, "sourceToolAssistantUUID": "sub-u1", "message": {"role": "user", "content": "go"}},
+        {"type": "assistant", "sessionId": "s1", "uuid": "sub-a1", "parentUuid": "sub-u1", "cwd": "/old", "isSidechain": True, "message": {"role": "assistant", "content": []}},
     ]
     sub_file.write_text("\n".join(json.dumps(r) for r in sub_records) + "\n", encoding="utf-8")
 
@@ -1452,3 +1636,210 @@ def test_parent_resume_rewrites_carried_subagent_sessionid(tmp_path, monkeypatch
     # Internal uuid/parentUuid chain is preserved verbatim (self-contained sidechain).
     assert [r["uuid"] for r in out] == ["sub-u1", "sub-a1"]
     assert [r.get("parentUuid") for r in out] == [None, "sub-u1"]
+    # P6-8: cwd is rewritten to the resume cwd on every record...
+    assert {r["cwd"] for r in out} == {str(cwd)}
+    # ...but sourceToolAssistantUUID is an intra-sidechain pointer and is left
+    # byte-identical (NOT remapped through the parent's uuid map).
+    assert out[0]["sourceToolAssistantUUID"] == "sub-u1"
+
+
+def _write_jsonl(path, records):
+    path.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+    return path
+
+
+def test_realign_handles_interior_record_drop(tmp_path):
+    """P6-2: a 3-turn rewritten codex file where a record was dropped in turn 1 must
+    still produce gap-free, line-aligned spans with a correct turn-2 boundary."""
+    from checkpoint_plugin.resume import _realign_spans_to_provider_file
+
+    # Rewritten file: leading session_meta (keyless), then 3 turns. Turn 1 has only
+    # ONE content record (a record was dropped vs the pre-rewrite count of 2).
+    records = [
+        {"type": "session_meta", "payload": {"id": "S"}},                      # keyless -> turn 0
+        {"type": "turn_context", "payload": {"turn_id": "t0"}},                # turn 0
+        {"type": "response_item", "payload": {"turn_id": "t0", "n": 1}},       # turn 0
+        {"type": "turn_context", "payload": {"turn_id": "t1"}},                # turn 1
+        {"type": "response_item", "payload": {"turn_id": "t1", "n": 1}},       # turn 1 (the 2nd was dropped)
+        {"type": "turn_context", "payload": {"turn_id": "t2"}},                # turn 2
+        {"type": "response_item", "payload": {"turn_id": "t2", "n": 1}},       # turn 2
+    ]
+    f = _write_jsonl(tmp_path / "rollout.jsonl", records)
+    # Pre-rewrite spans had turn1 count=3 (stale); realign must fix it from keys.
+    spans = {0: (0, 0, 3), 1: (0, 0, 3), 2: (0, 0, 2)}
+    turn_keys = {0: "t0", 1: "t1", 2: "t2"}
+    out = _realign_spans_to_provider_file(f, spans, provider_name="codex", turn_keys=turn_keys)
+
+    data = f.read_bytes()
+    # Gap-free, line-aligned, full coverage.
+    assert out[0][0] == 0
+    assert out[0][1] == out[1][0]
+    assert out[1][1] == out[2][0]
+    assert out[2][1] == len(data)
+    # Each turn's byte range begins exactly at a record boundary in the file.
+    line_starts = {0}
+    acc = 0
+    for line in data.splitlines(keepends=True):
+        acc += len(line)
+        line_starts.add(acc)
+    for s, e, _ in out.values():
+        assert s in line_starts and e in line_starts
+    # Turn 0 owns the keyless leading meta + its 2 records = 3 records.
+    assert out[0][2] == 3
+    # Turn 1 owns just its 1 surviving record (NOT the stale 3).
+    assert out[1][2] == 2  # turn_context + 1 response_item
+    assert out[2][2] == 2
+
+
+def test_realign_attaches_midstream_meta_both_orderings(tmp_path):
+    """P6-2: a keyless mid-stream session_meta attaches to the open turn under BOTH
+    real codex orderings. Ordering A (meta after task_started) -> next turn; ordering
+    B (meta before task_started) -> previous turn. Spans stay gap-free either way."""
+    from checkpoint_plugin.resume import _realign_spans_to_provider_file
+
+    # Ordering A: turn_context(t1) opens turn1 BEFORE the keyless meta.
+    recs_a = [
+        {"type": "turn_context", "payload": {"turn_id": "t0"}},
+        {"type": "response_item", "payload": {"turn_id": "t0"}},
+        {"type": "turn_context", "payload": {"turn_id": "t1"}},  # opens turn 1
+        {"type": "session_meta", "payload": {"id": "S"}},        # keyless -> turn 1
+        {"type": "response_item", "payload": {"turn_id": "t1"}},
+    ]
+    fa = _write_jsonl(tmp_path / "a.jsonl", recs_a)
+    out_a = _realign_spans_to_provider_file(
+        fa, {0: (0, 0, 2), 1: (0, 0, 3)}, provider_name="codex", turn_keys={0: "t0", 1: "t1"}
+    )
+    assert out_a[0][2] == 2  # turn 0: its 2 records only
+    assert out_a[1][2] == 3  # turn 1: opens at t1, absorbs the keyless meta
+
+    # Ordering B: keyless meta appears BEFORE turn_context(t1) -> attaches to turn 0.
+    recs_b = [
+        {"type": "turn_context", "payload": {"turn_id": "t0"}},
+        {"type": "response_item", "payload": {"turn_id": "t0"}},
+        {"type": "session_meta", "payload": {"id": "S"}},        # keyless -> still turn 0
+        {"type": "turn_context", "payload": {"turn_id": "t1"}},  # opens turn 1 here
+        {"type": "response_item", "payload": {"turn_id": "t1"}},
+    ]
+    fb = _write_jsonl(tmp_path / "b.jsonl", recs_b)
+    out_b = _realign_spans_to_provider_file(
+        fb, {0: (0, 0, 2), 1: (0, 0, 3)}, provider_name="codex", turn_keys={0: "t0", 1: "t1"}
+    )
+    assert out_b[0][2] == 3  # turn 0 keeps the keyless meta (most-recent-keyed = t0)
+    assert out_b[1][2] == 2  # turn 1: just its 2 keyed records
+    # Both orderings: gap-free, EOF-terminated.
+    for out, f in ((out_a, fa), (out_b, fb)):
+        assert out[0][0] == 0 and out[0][1] == out[1][0]
+        assert out[1][1] == len(f.read_bytes())
+
+
+def test_parent_turn_for_subagent_picks_spawning_turn(tmp_path, monkeypatch):
+    """P6-6: (a) agent_id present in a parent slice -> that turn. (b) agent_id absent
+    everywhere -> the CORRECTED fallback picks the earliest turn with created_ts >=
+    start_ts (the turn the subagent ran in), not the latest turn that ended before."""
+    from checkpoint_plugin.resume import _parent_turn_for_subagent
+    from checkpoint_plugin.store import CheckpointStore
+    from checkpoint_plugin.types import CheckpointManifest
+    from checkpoint_plugin.paths import session_dir
+
+    monkeypatch.setenv("TEST_HOME", str(tmp_path))
+    home = tmp_path / "plugin"
+    store = CheckpointStore(session_dir("parent", home))
+
+    def _mk(turn_id, ts, ref=None):
+        return CheckpointManifest(
+            turn_id=turn_id, session_id="parent", created_ts=ts,
+            env_ref="e", fs_ref="f", trajectory_ref=ref,
+        )
+
+    # Three turns at increasing timestamps; no agent_id reference in any slice.
+    store.write_manifest(_mk(0, "2026-01-01T00:00:00Z"))
+    store.write_manifest(_mk(1, "2026-01-01T00:01:00Z"))
+    store.write_manifest(_mk(2, "2026-01-01T00:02:00Z"))
+
+    # (b) subagent started at 00:00:30 — it ran during turn 1 (the earliest turn
+    # that ended at/after start), NOT turn 0 (which ended before it started).
+    turn = _parent_turn_for_subagent(home, "parent", None, {"start_ts": "2026-01-01T00:00:30Z"})
+    assert turn == 1, "corrected fallback must pick the earliest turn ending >= start_ts"
+
+    # A start before all turns -> earliest turn.
+    assert _parent_turn_for_subagent(home, "parent", None, {"start_ts": "2025-12-31T00:00:00Z"}) == 0
+    # A start after all turns -> latest turn (nothing ended at/after it).
+    assert _parent_turn_for_subagent(home, "parent", None, {"start_ts": "2027-01-01T00:00:00Z"}) == 2
+
+
+def test_no_synthetic_permission_mode_for_fork_resume():
+    """P6-14: a fork-style resume (inherited prefix present) must NOT get a synthetic
+    lone permission-mode record; a normal resume still does. Also: off-enum modes
+    coerce to 'default'."""
+    from checkpoint_plugin.resume import _rewrite_claude_trajectory, _normalize_permission_mode
+
+    traj = (
+        json.dumps({"type": "user", "uuid": "u1", "parentUuid": None, "promptId": "p", "message": {"role": "user", "content": "hi"}}) + "\n"
+        + json.dumps({"type": "assistant", "uuid": "a1", "parentUuid": "u1", "message": {"role": "assistant", "content": []}}) + "\n"
+    ).encode("utf-8")
+
+    # Normal resume (no inherited prefix) -> synthetic permission-mode injected.
+    normal = _rewrite_claude_trajectory(traj, "NEW", Path("/new"), None, "acceptEdits")
+    normal_recs = [json.loads(l) for l in normal.splitlines()]
+    assert any(r.get("type") == "permission-mode" for r in normal_recs)
+
+    # Fork-style resume (inherited prefix) -> NO synthetic permission-mode.
+    forked = _rewrite_claude_trajectory(
+        traj, "NEW", Path("/new"), None, "acceptEdits", has_inherited_prefix=True
+    )
+    forked_recs = [json.loads(l) for l in forked.splitlines()]
+    assert not any(r.get("type") == "permission-mode" for r in forked_recs)
+
+    # Off-enum mode coerces to default.
+    assert _normalize_permission_mode("bogusMode") == "default"
+    assert _normalize_permission_mode("plan") == "plan"
+    assert _normalize_permission_mode(None) is None
+
+
+def test_claude_resume_stamps_forkedfrom_on_inherited_records():
+    """P6-12: inherited-prefix records (before the first captured turn) get a
+    forkedFrom={sessionId, messageUuid} stamp mirroring native forks; the captured
+    turn's own records do NOT."""
+    from checkpoint_plugin.resume import _rewrite_claude_trajectory
+
+    traj = (
+        # inherited prefix: a user record from BEFORE the fork (no promptId match yet)
+        json.dumps({"type": "user", "uuid": "old-u", "parentUuid": None, "message": {"role": "user", "content": "old"}}) + "\n"
+        + json.dumps({"type": "assistant", "uuid": "old-a", "parentUuid": "old-u", "message": {"role": "assistant", "content": []}}) + "\n"
+        # first captured turn: user record WITH promptId = the boundary
+        + json.dumps({"type": "user", "uuid": "new-u", "parentUuid": "old-a", "promptId": "P", "message": {"role": "user", "content": "new"}}) + "\n"
+        + json.dumps({"type": "assistant", "uuid": "new-a", "parentUuid": "new-u", "message": {"role": "assistant", "content": []}}) + "\n"
+    ).encode("utf-8")
+
+    out = _rewrite_claude_trajectory(
+        traj, "NEW", Path("/new"), None, None,
+        has_inherited_prefix=True, source_session_id="SOURCE",
+    )
+    recs = [json.loads(l) for l in out.splitlines()]
+    by_old = {}
+    # Match records back by content since uuids were remapped.
+    for r in recs:
+        content = r.get("message", {}).get("content")
+        by_old[r.get("type"), str(content)] = r
+    inherited_user = by_old[("user", "old")]
+    inherited_asst = by_old[("assistant", "[]")] if ("assistant", "[]") in by_old else None
+    captured_user = by_old[("user", "new")]
+
+    # Inherited records carry forkedFrom pointing at SOURCE with a remapped anchor uuid.
+    assert inherited_user["forkedFrom"]["sessionId"] == "SOURCE"
+    assert inherited_user["forkedFrom"]["messageUuid"] == captured_user["parentUuid"]
+    # The captured turn's user record does NOT get a forkedFrom stamp.
+    assert "forkedFrom" not in captured_user
+
+
+def test_claude_resume_no_forkedfrom_without_inherited_prefix():
+    """P6-12: a normal resume (no inherited prefix) stamps nothing."""
+    from checkpoint_plugin.resume import _rewrite_claude_trajectory
+
+    traj = (
+        json.dumps({"type": "user", "uuid": "u1", "parentUuid": None, "promptId": "P", "message": {"role": "user", "content": "hi"}}) + "\n"
+        + json.dumps({"type": "assistant", "uuid": "a1", "parentUuid": "u1", "message": {"role": "assistant", "content": []}}) + "\n"
+    ).encode("utf-8")
+    out = _rewrite_claude_trajectory(traj, "NEW", Path("/new"), None, None, source_session_id="SOURCE")
+    recs = [json.loads(l) for l in out.splitlines()]
+    assert all("forkedFrom" not in r for r in recs)

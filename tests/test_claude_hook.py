@@ -258,6 +258,8 @@ def test_claude_subagent_without_sidechain_file_does_not_slice_parent(tmp_path, 
     assert ref.record_count == 0
     metadata = json.loads((sub_store.session_dir / "metadata.json").read_text(encoding="utf-8"))
     assert metadata["lineage"]["parent_session_id"] == "parent-session"
+    # P6-9: surface WHY the slice is empty so a reader doesn't mistake it for a bug.
+    assert metadata["lineage"]["capture_status"] == "no_sidechain_file"
 
 
 def test_claude_model_captured_from_session_start(tmp_path, monkeypatch):

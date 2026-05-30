@@ -211,3 +211,35 @@ def test_concurrent_turn_end_writes_are_serialized(tmp_path):
 def _write_turn(home, cwd, session_id, user_message):
     coordinator = CheckpointCoordinator(session_id=session_id, cwd=cwd, plugin_home=home)
     coordinator.on_turn_end(TurnRecord(user_message=user_message))
+
+
+def test_resolve_fork_ancestor_transcript_avoids_self_reference(tmp_path):
+    """P6-15: a claude resume's transcript_path is the session's OWN file; the
+    ancestor must be resolved via forkedFrom.sessionId, never recorded as self."""
+    from checkpoint_plugin.coordinator import _resolve_fork_ancestor_transcript
+
+    proj = tmp_path
+    own = proj / "SELF.jsonl"
+    ancestor = proj / "ANCESTOR.jsonl"
+    ancestor.write_text(json.dumps({"type": "user", "sessionId": "ANCESTOR"}) + "\n", encoding="utf-8")
+    own.write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "user", "sessionId": "SELF", "forkedFrom": {"sessionId": "ANCESTOR", "messageUuid": "m1"}}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    # claude self-named file -> resolves to the distinct ancestor sibling.
+    resolved = _resolve_fork_ancestor_transcript("claude", str(own), "SELF")
+    assert resolved == str(ancestor)
+
+    # No forkedFrom / ancestor missing -> None (drop the self-pointer rather than lie).
+    lonely = proj / "LONE.jsonl"
+    lonely.write_text(json.dumps({"type": "user", "sessionId": "LONE"}) + "\n", encoding="utf-8")
+    assert _resolve_fork_ancestor_transcript("claude", str(lonely), "LONE") is None
+
+    # codex path is the real parent rollout already -> returned verbatim.
+    assert _resolve_fork_ancestor_transcript("codex", "/prior/rollout.jsonl", "FORKED") == "/prior/rollout.jsonl"
