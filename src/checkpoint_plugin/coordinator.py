@@ -13,6 +13,7 @@ from .env.collector import collect_environment, environment_to_blob
 from .env.providers import detect_provider
 from .fs.ignore import IgnoreMatcher
 from .fs.snapshot import filesystem_to_blob, snapshot_cwd
+from .integrations._trajectory_slicer import claude_key, codex_key
 from .paths import ensure_home, load_config, session_dir
 from .store import CheckpointStore
 from .types import CheckpointManifest, TrajectoryReference
@@ -44,6 +45,15 @@ class CheckpointCoordinator:
         lineage: dict[str, Any] | None = None,
         source_transcript_path: str | None = None,
     ) -> None:
+        # F13: the last turn of a prior run never gets its end_offset back-filled
+        # (`_close_previous_trajectory_ref` only extends a turn against the NEXT turn's
+        # start, and the last turn has no successor), so it stops short of EOF when the
+        # provider flushed a trailing record after the Stop hook read the file. There
+        # is no finalize/SessionEnd hook to fix this at write time, so we re-anchor it
+        # lazily here — the next session_start is the first moment the transcript is
+        # guaranteed fully flushed. Resume already recovers this tail at read time;
+        # this makes the STORED manifest faithful for non-resume consumers too.
+        self._reanchor_last_turn_to_eof()
         provider = detect_provider(self.cwd)
         metadata_path = self.session_dir / "metadata.json"
         existing = _read_metadata(metadata_path)
@@ -68,15 +78,31 @@ class CheckpointCoordinator:
             # verbatim makes forked_from_transcript a self-reference. The true
             # ancestor is named by `forkedFrom.sessionId` inside that transcript;
             # resolve it, and drop the field entirely when it would point at self.
-            ancestor = _resolve_fork_ancestor_transcript(
-                provider.name, source_transcript_path, self.session_id
-            )
-            if ancestor is not None:
-                metadata["forked_from_transcript"] = ancestor
-                anchor = _fork_anchor(ancestor)
-                if anchor is not None:
-                    metadata["forked_at_offset"] = anchor[0]
-                    metadata["forked_at_record_count"] = anchor[1]
+            # F6/F7 (codex): the codex resume `transcript_path` is ALSO the session's
+            # own rollout (its first session_meta carries `forked_from_id` = the true
+            # ancestor). Recording the path verbatim self-references and anchoring on
+            # the self-file overshoots the branch point (the self-file already holds
+            # the resume's own new turns by hook time). Resolve the ancestor by
+            # `forked_from_id` and anchor on the PARENT (its EOF is the branch point),
+            # keeping source="resume" (do NOT relabel to "fork").
+            if provider.name == "codex":
+                resumed = _codex_resume_lineage(provider.home, source_transcript_path, self.session_id)
+                if resumed is not None:
+                    parent_transcript, anchor = resumed
+                    metadata["forked_from_transcript"] = parent_transcript
+                    if anchor is not None:
+                        metadata["forked_at_offset"] = anchor[0]
+                        metadata["forked_at_record_count"] = anchor[1]
+            else:
+                ancestor = _resolve_fork_ancestor_transcript(
+                    provider.name, source_transcript_path, self.session_id
+                )
+                if ancestor is not None:
+                    metadata["forked_from_transcript"] = ancestor
+                    anchor = _fork_anchor(ancestor)
+                    if anchor is not None:
+                        metadata["forked_at_offset"] = anchor[0]
+                        metadata["forked_at_record_count"] = anchor[1]
         # M2: Codex forks ("fork chat") arrive with source="startup" (or a
         # structured subagent source), so the resume/compact guard never fires.
         # Detect the fork structurally from the new rollout's first session_meta
@@ -186,6 +212,37 @@ class CheckpointCoordinator:
                 trajectory_ref=refreshed_ref,
             )
         )
+
+    def _reanchor_last_turn_to_eof(self) -> None:
+        """Extend the last stored turn's end_offset to the transcript EOF (F13).
+
+        Called at session_start, when the prior run's transcript is fully flushed.
+        Only extends when the bytes between the stored end_offset and EOF are a
+        same-turn complete tail (newline-terminated, no record bearing a DIFFERENT
+        per-turn key) — the identical guard resume uses in `_recover_trailing_tail`,
+        so we never absorb a later turn's records. A no-op when there are no
+        manifests, the transcript is gone, or the slice already reaches EOF.
+        """
+        try:
+            with self.store.session_lock():
+                latest = self.store.latest_manifest()
+                if latest is None or latest.trajectory_ref is None:
+                    return
+                ref = latest.trajectory_ref
+                tail = _trailing_same_turn_tail(ref)
+                if not tail:
+                    return
+                new_end = ref.end_offset + len(tail)
+                refreshed = _ref_with_end_offset(ref, new_end)
+                self.store.write_manifest(
+                    replace(
+                        latest,
+                        trajectory_end_offset=refreshed.end_offset,
+                        trajectory_ref=refreshed,
+                    )
+                )
+        except OSError:
+            return
 
     def _refresh_metadata_title(
         self,
@@ -361,6 +418,69 @@ def _codex_inlined_prefix_anchor(fork_path: Path) -> tuple[int, int] | None:
     return len(data), count
 
 
+def _codex_resume_lineage(
+    codex_home: Path,
+    own_transcript_path: str | None,
+    own_session_id: str,
+) -> tuple[str, tuple[int, int] | None] | None:
+    """Lineage for a Codex RESUME, anchored on the true parent (F6/F7).
+
+    A codex resume's SessionStart `transcript_path` is the resume session's OWN
+    rollout, whose first `session_meta.forked_from_id` names the ancestor it
+    continues. Recording the path verbatim self-references (F6); anchoring on that
+    self-file overshoots the branch point because, by the time the hook fires, the
+    rollout already carries the resume's own new turns (F7 — verified on 8c17:
+    self-EOF rec47/byte139338 vs true boundary rec33/byte118563).
+
+    We resolve the ancestor rollout via `forked_from_id` and anchor on the PARENT:
+    a resume continues from the parent's end, so the parent's EOF (size, record
+    count) is the branch point — and it lives in the parent's own coordinate space,
+    not the inflated self-file. Falls back to treating a distinct, non-self
+    `transcript_path` as the ancestor directly (e.g. a bare prior rollout with no
+    inlined meta), so a genuinely-distinct parent path is still recorded.
+    """
+    if not own_transcript_path:
+        return None
+    forked_from_id = _codex_forked_from_id(Path(own_transcript_path).expanduser())
+    if forked_from_id:
+        matches = sorted(codex_home.glob(f"sessions/**/rollout-*-{forked_from_id}.jsonl"))
+        if matches:
+            parent = str(matches[0])
+            return parent, _fork_anchor(parent)
+        return forked_from_id, None  # parent file gone; keep the bare id as the ref
+    if _path_is_distinct_ancestor(own_transcript_path, own_session_id):
+        return own_transcript_path, _fork_anchor(own_transcript_path)
+    return None
+
+
+def _codex_forked_from_id(transcript_path: Path) -> str | None:
+    """The `forked_from_id` in a codex rollout's first session_meta, if any."""
+    try:
+        with transcript_path.open("rb") as handle:
+            first_line = handle.readline()
+    except OSError:
+        return None
+    if not first_line.strip():
+        return None
+    try:
+        record = json.loads(first_line.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(record, dict) or record.get("type") != "session_meta":
+        return None
+    payload = record.get("payload")
+    value = payload.get("forked_from_id") if isinstance(payload, dict) else None
+    return value if isinstance(value, str) and value else None
+
+
+def _path_is_distinct_ancestor(transcript_path: str, own_session_id: str) -> bool:
+    """True when `transcript_path` names a file other than this session's own rollout."""
+    stem = Path(transcript_path).stem
+    # codex rollout filenames are `rollout-<ts>-<session_id>`; a self-reference ends
+    # with the own id. Anything else is a distinct ancestor path.
+    return own_session_id not in stem
+
+
 def _ref_with_end_offset(ref: TrajectoryReference, end_offset: int) -> TrajectoryReference:
     path = Path(ref.transcript_path).expanduser()
     try:
@@ -380,6 +500,72 @@ def _ref_with_end_offset(ref: TrajectoryReference, end_offset: int) -> Trajector
 
 def _count_jsonl_records(data: bytes) -> int:
     return sum(1 for line in data.splitlines() if line.strip())
+
+
+def _trailing_same_turn_tail(ref: TrajectoryReference) -> bytes:
+    """Bytes flushed after `ref.end_offset` that still belong to `ref`'s turn (F13).
+
+    Mirrors resume's `_recover_trailing_tail` guard so the stored manifest and a
+    resume agree: the candidate tail must end with a newline (no truncated JSON) and
+    contain no record carrying a per-turn key distinct from the turn's anchor key (no
+    new turn started). Returns b"" when there is nothing safe to absorb.
+    """
+    if not ref.transcript_path:
+        return b""
+    path = Path(ref.transcript_path).expanduser()
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return b""
+    if size <= ref.end_offset:
+        return b""
+    try:
+        with path.open("rb") as handle:
+            handle.seek(ref.end_offset)
+            tail = handle.read(size - ref.end_offset)
+    except OSError:
+        return b""
+    if not tail.endswith(b"\n"):
+        return b""
+    extractor = claude_key if ref.provider == "claude" else codex_key if ref.provider == "codex" else None
+    if extractor is None:
+        return tail
+    anchor = _anchor_key_for_ref(ref, extractor)
+    for line in tail.splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        key = extractor(record)
+        if key is not None and key != anchor:
+            return b""
+    return tail
+
+
+def _anchor_key_for_ref(ref: TrajectoryReference, extractor: Any) -> Any:
+    path = Path(ref.transcript_path).expanduser()
+    try:
+        with path.open("rb") as handle:
+            handle.seek(ref.start_offset)
+            data = handle.read(ref.end_offset - ref.start_offset)
+    except OSError:
+        return None
+    for line in data.splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, dict):
+            key = extractor(record)
+            if key is not None:
+                return key
+    return None
 
 
 def _user_message_preview(turn_record: TurnRecord, trajectory_ref: TrajectoryReference) -> str:

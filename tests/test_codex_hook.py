@@ -29,6 +29,54 @@ def test_codex_session_start_writes_metadata(tmp_path, monkeypatch):
     assert metadata["source"] == "startup"
 
 
+def test_codex_session_env_captures_approval_and_sandbox_when_present(tmp_path, monkeypatch):
+    """F15: when the codex hook payload carries approval_policy/sandbox, record them
+    in session_env so the checkpoint metadata describes the actual policy, not just
+    the coarse permission_mode. Best-effort: only when the payload provides them."""
+    plugin_home = tmp_path / "plugin"
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    payload = {
+        "hook_event_name": "SessionStart",
+        "session_id": "codex-pol",
+        "cwd": str(cwd),
+        "model": "gpt-test",
+        "permission_mode": "default",
+        "approval_policy": "on-request",
+        "sandbox_mode": "workspace-write",
+        "source": "startup",
+    }
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
+    assert codex_hook.main([]) == 0
+
+    env = json.loads((plugin_home / "sessions" / "codex-pol" / "metadata.json").read_text())["session_env"]
+    assert env["approval_policy"] == "on-request"
+    assert env["sandbox_mode"] == "workspace-write"
+    assert env["permission_mode"] == "default"
+
+
+def test_codex_session_env_omits_policy_when_absent(tmp_path, monkeypatch):
+    """F15: a payload without approval/sandbox fields records neither (no empty keys)."""
+    plugin_home = tmp_path / "plugin"
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    payload = {
+        "hook_event_name": "SessionStart",
+        "session_id": "codex-nopol",
+        "cwd": str(cwd),
+        "model": "gpt-test",
+        "source": "startup",
+    }
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
+    assert codex_hook.main([]) == 0
+
+    env = json.loads((plugin_home / "sessions" / "codex-nopol" / "metadata.json").read_text()).get("session_env", {})
+    assert "approval_policy" not in env
+    assert "sandbox_mode" not in env
+
+
 def test_codex_resume_session_records_fork_lineage(tmp_path, monkeypatch):
     """B5: a native resume/compact fork records the transcript it forked from."""
     plugin_home = tmp_path / "plugin"
@@ -392,3 +440,55 @@ def test_codex_startup_fork_records_lineage_from_session_meta(tmp_path, monkeypa
     # parent's live EOF. At SessionStart the fork file holds only its inlined prefix.
     assert metadata["forked_at_offset"] == own.stat().st_size
     assert metadata["forked_at_record_count"] == 1
+
+
+def test_codex_resume_resolves_ancestor_not_self_and_anchors_on_parent(tmp_path, monkeypatch):
+    """F6/F7: a codex resume's SessionStart transcript_path is the resume's OWN
+    rollout (first session_meta carries forked_from_id). Lineage must resolve the
+    true ancestor (not self-reference) and anchor on the PARENT's EOF (the branch
+    point), not the inflated self-file length which already holds the resume's own
+    new turns by hook time."""
+    plugin_home = tmp_path / "plugin"
+    codex_home = tmp_path / "codex"
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    parent_dir = codex_home / "sessions" / "2026" / "05" / "30"
+    parent_dir.mkdir(parents=True)
+    parent = parent_dir / "rollout-2026-05-30T00-00-00-ANCESTOR.jsonl"
+    parent.write_bytes(
+        (json.dumps({"type": "session_meta", "payload": {"id": "ANCESTOR"}}) + "\n"
+         + json.dumps({"type": "event_msg", "payload": {"type": "task_started"}}) + "\n"
+         + json.dumps({"type": "event_msg", "payload": {"type": "task_complete"}}) + "\n").encode("utf-8")
+    )
+    # The resume's OWN rollout: inlines the ancestor head meta + ancestor history +
+    # its own new turn (so the self-file is LONGER than the true branch point).
+    own = parent_dir / "rollout-2026-05-30T02-00-00-RESUMED.jsonl"
+    own.write_bytes(
+        (json.dumps({"type": "session_meta", "payload": {"id": "RESUMED", "forked_from_id": "ANCESTOR"}}) + "\n"
+         + json.dumps({"type": "session_meta", "payload": {"id": "ANCESTOR"}}) + "\n"
+         + json.dumps({"type": "event_msg", "payload": {"type": "task_started"}}) + "\n"
+         + json.dumps({"type": "event_msg", "payload": {"type": "task_complete"}}) + "\n"
+         + json.dumps({"type": "event_msg", "payload": {"type": "task_started", "note": "own new turn"}}) + "\n").encode("utf-8")
+    )
+    payload = {
+        "hook_event_name": "SessionStart",
+        "session_id": "RESUMED",
+        "cwd": str(cwd),
+        "source": "resume",
+        "transcript_path": str(own),
+    }
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
+    assert codex_hook.main([]) == 0
+
+    metadata = json.loads((plugin_home / "sessions" / "RESUMED" / "metadata.json").read_text())
+    # source stays "resume" (NOT relabeled to "fork").
+    assert metadata["source"] == "resume"
+    # F6: ancestor resolved to the PARENT rollout, not the self-referential own path.
+    assert metadata["forked_from_transcript"] == str(parent)
+    assert "RESUMED" not in metadata["forked_from_transcript"]
+    # F7: anchor on the parent EOF (branch point), not the longer self-file.
+    assert metadata["forked_at_offset"] == parent.stat().st_size
+    assert metadata["forked_at_record_count"] == 3
+    assert metadata["forked_at_offset"] < own.stat().st_size  # self-file would overshoot

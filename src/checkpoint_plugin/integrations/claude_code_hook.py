@@ -86,6 +86,17 @@ def _on_subagent_end(payload: dict[str, Any], cwd: Path, parent_session_id: str)
         # capture bug.
         lineage["capture_status"] = "no_sidechain_file"
         ref = _empty_trajectory_ref("claude")
+    elif transcript_path is not None:
+        # F12: SubagentStop can fire before the subagent's final assistant record is
+        # flushed (verified: af44fcc2 slice caught 3/4 records, the deliverable rec3
+        # flushed ~14ms later). The slice reads to the current EOF, so a later flush
+        # is silently truncated. We can't reliably block for the flush, but we record
+        # the sidechain's observed size+mtime so a consumer (or a later re-slice on
+        # the next session_start) can DETECT that the stored slice is stale — the file
+        # having grown past `sidechain_observed_size` means records were missed.
+        observed = _sidechain_observed_state(transcript_path, ref.end_offset)
+        if observed is not None:
+            lineage["sidechain_observed_size"], lineage["sidechain_observed_mtime"] = observed
     coordinator.on_session_start(
         source="subagent",
         session_env=sub_env,
@@ -216,6 +227,25 @@ def _subagent_trajectory_ref(payload: dict[str, Any], transcript_path: Path | No
 
 def _stem(path: Path | None) -> str:
     return path.stem if path is not None else "unknown"
+
+
+def _sidechain_observed_state(transcript_path: Path, sliced_end_offset: int) -> tuple[int, str] | None:
+    """The sidechain file's (size, mtime-iso) at capture time, for staleness checks (F12).
+
+    A later flush grows the file beyond the captured slice's end; recording the size
+    we sliced against lets a reader tell whether the stored slice still covers the
+    whole file. Returns None if the file can't be stat'd. We record the size we
+    actually sliced to (`sliced_end_offset`) so a future re-stat that returns a larger
+    size is an unambiguous staleness signal.
+    """
+    try:
+        stat = transcript_path.stat()
+    except OSError:
+        return None
+    from datetime import datetime, timezone
+
+    mtime = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
+    return sliced_end_offset, mtime
 
 
 if __name__ == "__main__":

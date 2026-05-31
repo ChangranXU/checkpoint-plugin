@@ -243,3 +243,58 @@ def test_resolve_fork_ancestor_transcript_avoids_self_reference(tmp_path):
 
     # codex path is the real parent rollout already -> returned verbatim.
     assert _resolve_fork_ancestor_transcript("codex", "/prior/rollout.jsonl", "FORKED") == "/prior/rollout.jsonl"
+
+
+def test_last_turn_end_offset_reanchored_to_eof_on_next_session_start(tmp_path, monkeypatch):
+    """F13: the last turn's end_offset trails EOF when the provider flushes a
+    trailing same-turn record after the Stop hook reads the file. There is no
+    finalize hook, so the next session_start re-anchors it to the (now fully
+    flushed) EOF — provided the tail is same-turn complete."""
+    home = tmp_path / "plugin"
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(home))
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(
+        json.dumps({"type": "user", "promptId": "p0", "uuid": "u0", "message": {"role": "user", "content": "hi"}}) + "\n"
+        + json.dumps({"type": "assistant", "uuid": "a0", "promptId": "p0", "message": {"role": "assistant", "content": "x"}}) + "\n",
+        encoding="utf-8",
+    )
+    c = CheckpointCoordinator(session_id="sx", cwd=cwd)
+    c.on_session_start()
+    captured = transcript.stat().st_size
+    c.on_turn_end(TurnRecord(user_message="hi"), TrajectoryReference("claude", str(transcript), 0, captured, 2))
+    assert c.store.read_manifest(0).trajectory_ref.end_offset == captured
+
+    # Provider flushes a trailing same-turn record AFTER the Stop hook.
+    with transcript.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"type": "system", "subtype": "stop_hook_summary", "promptId": "p0"}) + "\n")
+    grown = transcript.stat().st_size
+
+    CheckpointCoordinator(session_id="sx", cwd=cwd).on_session_start()
+    assert c.store.read_manifest(0).trajectory_ref.end_offset == grown
+
+
+def test_reanchor_does_not_absorb_a_new_turn_tail(tmp_path, monkeypatch):
+    """F13 guard: a trailing record bearing a DIFFERENT per-turn key is a new turn
+    and must NOT be folded into the last captured turn."""
+    home = tmp_path / "plugin"
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(home))
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(
+        json.dumps({"type": "user", "promptId": "p0", "uuid": "u0", "message": {"role": "user", "content": "hi"}}) + "\n",
+        encoding="utf-8",
+    )
+    c = CheckpointCoordinator(session_id="sy", cwd=cwd)
+    c.on_session_start()
+    captured = transcript.stat().st_size
+    c.on_turn_end(TurnRecord(user_message="hi"), TrajectoryReference("claude", str(transcript), 0, captured, 1))
+
+    # A NEW turn (distinct promptId) lands in the tail.
+    with transcript.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"type": "user", "promptId": "p1", "uuid": "u1", "message": {"role": "user", "content": "next"}}) + "\n")
+
+    CheckpointCoordinator(session_id="sy", cwd=cwd).on_session_start()
+    assert c.store.read_manifest(0).trajectory_ref.end_offset == captured

@@ -266,11 +266,22 @@ def test_resume_materializes_codex_native_session(tmp_path, monkeypatch):
     assert records[0]["payload"]["cli_version"] == "1.2.3"
     assert records[0]["payload"]["model_provider"] == "test-provider"
     assert records[0]["payload"]["base_instructions"] == {"text": "be helpful"}
-    assert records[2]["payload"]["model"] == "gpt-target"
-    assert records[2]["payload"]["permission_profile"] == "acceptEdits"
+    # F14: the fresh head meta places forked_from_id immediately after id (idx1).
+    head_keys = list(records[0]["payload"].keys())
+    assert head_keys[0] == "id"
+    assert head_keys[1] == "forked_from_id"
+    assert records[0]["payload"]["forked_from_id"] == "old"
+    # F2: native codex resume keeps the inlined source meta chain (depth-scaled count
+    # = 2 for a resume of a startup), rather than collapsing to one head meta.
+    metas = [r for r in records if r.get("type") == "session_meta"]
+    assert len(metas) == 2
+    assert metas[1]["payload"]["id"] == "old"  # inlined source meta keeps its id
+    turn_context = next(r for r in records if r.get("type") == "turn_context")
+    assert turn_context["payload"]["model"] == "gpt-target"
+    assert turn_context["payload"]["permission_profile"] == "acceptEdits"
     # Permission mode must not bleed into the sandbox policy (B2): it stays as
     # whatever the original transcript recorded.
-    assert records[2]["payload"]["sandbox_policy"] == "workspace-write"
+    assert turn_context["payload"]["sandbox_policy"] == "workspace-write"
     # M5: the resumed codex session is registered in the picker index.
     index_path = codex_home / "session_index.jsonl"
     assert index_path.exists()
@@ -376,7 +387,11 @@ def test_resume_materializes_codex_session_meta_for_sliced_trajectory(tmp_path, 
     assert records[0]["payload"]["originator"] == "Codex Desktop"
     assert records[0]["payload"]["source"] == "vscode"
     assert records[0]["payload"]["thread_source"] == "user"
-    assert records[1]["type"] == "event_msg"
+    # F2: the inlined source meta is kept (id=old), cwd re-pinned to the copy.
+    assert records[1]["type"] == "session_meta"
+    assert records[1]["payload"]["id"] == "old"
+    assert records[1]["payload"]["cwd"] == str(copy_cwd)
+    assert records[2]["type"] == "event_msg"
 
 
 def test_resume_materializes_claude_native_session(tmp_path, monkeypatch):
@@ -435,10 +450,20 @@ def test_resume_materializes_claude_native_session(tmp_path, monkeypatch):
     materialized = claude_home / "projects" / str(cwd).replace("/", "-") / f"{report.new_session_id}.jsonl"
     assert str(materialized) == report.provider_session_path
     records = [json.loads(line) for line in materialized.read_text(encoding="utf-8").splitlines()]
-    assert {record["sessionId"] for record in records} == {report.new_session_id}
-    assert records[0]["permissionMode"] == "acceptEdits"
-    assert records[1]["cwd"] == str(cwd)
-    assert records[2]["parentUuid"] == records[1]["uuid"]
+    # F4: a claude resume is fork-shaped — the leading keyless permission-mode record
+    # is stripped (native b57f8e6f drops all such records), leaving the uuid-bearing
+    # user + assistant records.
+    assert [r["type"] for r in records] == ["user", "assistant"]
+    assert not any(r.get("type") == "permission-mode" for r in records)
+    # sessionId re-pinned on records that carry it (F8); cwd re-pinned to the target.
+    assert {r["sessionId"] for r in records} == {report.new_session_id}
+    assert all(r["cwd"] == str(cwd) for r in records)
+    # F1: inherited uuids preserved byte-identical, forkedFrom resolves into the source.
+    assert [r["uuid"] for r in records] == ["old-user", "old-assistant"]
+    assert all(r["forkedFrom"]["sessionId"] == "s1" for r in records)
+    assert all(r["forkedFrom"]["messageUuid"] == r["uuid"] for r in records)
+    # parentUuid chain preserved: the assistant still points at the user.
+    assert records[1]["parentUuid"] == records[0]["uuid"]
 
 
 def test_resume_restores_environment_with_target_provider_layout(tmp_path, monkeypatch):
@@ -1188,19 +1213,26 @@ def test_codex_rewrite_repins_string_permission_profile():
 
 
 def test_claude_rewrite_repins_model_on_assistant_message():
-    """F2: Claude model lives at message.model on assistant records, not top-level."""
+    """F2: Claude model lives at message.model on assistant records, not top-level.
+    F8: sessionId is rewritten only on records that already carry it (native FHS
+    records have none and must not gain one)."""
     from checkpoint_plugin.resume import _rewrite_claude_trajectory
 
     trajectory = (
-        json.dumps({"type": "user", "uuid": "u1", "parentUuid": None, "promptId": "p", "message": {"role": "user", "content": "hi"}}) + "\n"
-        + json.dumps({"type": "assistant", "uuid": "a1", "parentUuid": "u1", "message": {"role": "assistant", "model": "claude-opus-4-8", "content": []}}) + "\n"
+        json.dumps({"type": "user", "sessionId": "old", "uuid": "u1", "parentUuid": None, "promptId": "p", "message": {"role": "user", "content": "hi"}}) + "\n"
+        + json.dumps({"type": "assistant", "sessionId": "old", "uuid": "a1", "parentUuid": "u1", "message": {"role": "assistant", "model": "claude-opus-4-8", "content": []}}) + "\n"
+        + json.dumps({"type": "file-history-snapshot", "messageId": "a1", "snapshot": {}, "isSnapshotUpdate": False}) + "\n"
     ).encode("utf-8")
     out = _rewrite_claude_trajectory(trajectory, "NEW", Path("/new"), "claude-sonnet-4-6", None)
     records = [json.loads(line) for line in out.splitlines()]
     assistant = next(r for r in records if r.get("type") == "assistant")
     assert assistant["message"]["model"] == "claude-sonnet-4-6"
-    # sessionId rewritten across the board.
-    assert {r["sessionId"] for r in records} == {"NEW"}
+    # F8: sessionId rewritten on records that carry it; FHS keeps its native key-set
+    # (no sessionId added).
+    assert {r["sessionId"] for r in records if "sessionId" in r} == {"NEW"}
+    fhs = next(r for r in records if r.get("type") == "file-history-snapshot")
+    assert "sessionId" not in fhs
+    assert set(fhs.keys()) == {"type", "messageId", "snapshot", "isSnapshotUpdate"}
 
 
 def test_claude_rewrite_remaps_file_history_message_id():
@@ -1425,10 +1457,12 @@ def test_has_inherited_prefix_survives_resume_round_trip():
     assert _has_inherited_prefix({}) is False
 
 
-def test_codex_rewrite_collapses_session_meta_chain():
-    """H1: a forked/subagent codex transcript carries a CHAIN of stacked
-    session_meta records; the rewrite must emit exactly ONE leading meta with the
-    new id, pointing forked_from_id at the original (first) session id."""
+def test_codex_rewrite_preserves_session_meta_chain():
+    """F2: native codex resume/fork keeps the FULL inlined ancestor session_meta
+    chain (depth-scaled: startup=1, resume=2, fork-of-fork=3) and prepends a fresh
+    head meta. The old behavior collapsed every chain to one meta; that was
+    non-native. The head points forked_from_id at the source (first) id; each inlined
+    meta keeps its own id + forked_from_id verbatim."""
     from checkpoint_plugin.resume import _rewrite_codex_trajectory
 
     trajectory = (
@@ -1440,10 +1474,20 @@ def test_codex_rewrite_collapses_session_meta_chain():
     out = _rewrite_codex_trajectory(trajectory, "NEW", Path("/new"), None, None, None)
     records = [json.loads(line) for line in out.splitlines()]
     metas = [r for r in records if r.get("type") == "session_meta"]
-    assert len(metas) == 1, "exactly one session_meta must survive"
-    assert metas[0]["payload"]["id"] == "NEW"
-    assert metas[0]["payload"]["forked_from_id"] == "SUB"
+    # Fresh head + the three inlined source metas.
+    assert len(metas) == 4
     assert records[0]["type"] == "session_meta"
+    # Fresh head: new id, forked_from_id at idx1 pointing at the source head id.
+    head = metas[0]["payload"]
+    assert head["id"] == "NEW"
+    assert list(head.keys())[:2] == ["id", "forked_from_id"]
+    assert head["forked_from_id"] == "SUB"
+    # Inlined chain preserved verbatim (own id + own forked_from_id), cwd re-pinned.
+    assert [m["payload"]["id"] for m in metas[1:]] == ["SUB", "PARENT", "GRAND"]
+    assert metas[1]["payload"]["forked_from_id"] == "PARENT"
+    assert metas[2]["payload"]["forked_from_id"] == "GRAND"
+    assert "forked_from_id" not in metas[3]["payload"]
+    assert all(m["payload"]["cwd"] == "/new" for m in metas)
 
 
 def test_rewrite_preserves_source_key_order_not_alphabetical():
@@ -1475,15 +1519,31 @@ def test_rewrite_preserves_source_key_order_not_alphabetical():
     assert codex_top == ["timestamp", "type", "payload"]
     assert codex_top != sorted(codex_top), "codex meta must NOT be alphabetized"
 
+    # P8-F3: native rollouts/transcripts use COMPACT separators (no space after
+    # `,`/`:`). Python's default spacing was a 100%-vs-0% fingerprint AND shifted
+    # downstream byte offsets. Both rewriters route through `_json_line`, so every
+    # emitted line must be compact. (`", "` only appears with the default
+    # separators; a compact line has `","`.)
+    for out in (claude_out, codex_out):
+        for line in out.splitlines():
+            if not line.strip():
+                continue
+            assert b'", "' not in line and b'": ' not in line, (
+                f"resumed record must use compact JSON separators, got: {line!r}"
+            )
+            # round-trips (compact is still valid JSON)
+            assert isinstance(json.loads(line), dict)
 
 
-def test_codex_rewrite_keeps_same_id_metas_drops_ancestor_metas():
-    """P6-3: collapse only INLINED-ANCESTOR metas (id != head). Same-head-id
-    continuation metas are kept + rewritten wherever they sit. Modeled on the real
-    019e648f fork shape: head meta carries forked_from_id; inlined ancestor metas
-    (different id) carry forked_from_id=None and appear BOTH leading and mid-stream;
-    a same-head-id meta reappears mid-stream (a rolled-back restart of this fork).
-    The forked_from_id-based discriminator would give a DIFFERENT (wrong) result."""
+
+def test_codex_rewrite_keeps_full_inlined_meta_chain_with_original_ids():
+    """F2: native codex resume keeps the source's FULL inlined meta history verbatim
+    (each meta keeps its ORIGINAL id), and prepends a single fresh head meta. This
+    supersedes the old P6-3 collapse/drop-ancestor model. Modeled on a fork whose
+    inlined history carries BOTH same-head-id continuation metas (in-place rollback
+    restarts) and different-id inlined-ancestor metas, appearing leading AND
+    mid-stream — all are part of the source's real on-disk history and a native
+    resume replays them as-is under their original ids."""
     from checkpoint_plugin.resume import _rewrite_codex_trajectory
 
     HEAD, ANCESTOR = "019e648f", "019e644b"
@@ -1494,10 +1554,10 @@ def test_codex_rewrite_keeps_same_id_metas_drops_ancestor_metas():
         + json.dumps({"type": "session_meta", "payload": {"id": ANCESTOR, "cwd": "/old"}}) + "\n"
         + json.dumps({"type": "turn_context", "payload": {"turn_id": "t-1", "model": "m"}}) + "\n"
         + json.dumps({"type": "response_item", "payload": {"type": "message"}}) + "\n"
-        # MID-STREAM inlined ancestor meta — id != head (a leading-run rule would WRONGLY keep this)
+        # MID-STREAM inlined ancestor meta — id != head
         + json.dumps({"type": "session_meta", "payload": {"id": ANCESTOR, "cwd": "/old"}}) + "\n"
         + json.dumps({"type": "turn_context", "payload": {"turn_id": "t-2", "model": "m"}}) + "\n"
-        # MID-STREAM same-head-id meta — this fork's own restart marker; must be KEPT
+        # MID-STREAM same-head-id meta — this fork's own restart marker
         + json.dumps({"type": "session_meta", "payload": {"id": HEAD, "forked_from_id": ANCESTOR, "cwd": "/old"}}) + "\n"
         + json.dumps({"type": "turn_context", "payload": {"turn_id": "t-3", "model": "m"}}) + "\n"
     ).encode("utf-8")
@@ -1505,23 +1565,25 @@ def test_codex_rewrite_keeps_same_id_metas_drops_ancestor_metas():
     out = _rewrite_codex_trajectory(trajectory, "NEW", Path("/new"), None, None, None)
     records = [json.loads(line) for line in out.splitlines()]
     metas = [r for r in records if r.get("type") == "session_meta"]
-    # Both ANCESTOR metas (leading AND mid-stream) dropped; both HEAD metas kept+rewritten.
-    assert len(metas) == 2, "two same-head-id metas survive; both ancestor metas dropped"
-    assert all(m["payload"]["id"] == "NEW" for m in metas)
+    # Fresh head (id=NEW) + all four inlined source metas preserved with original ids.
+    assert len(metas) == 5
     assert records[0]["type"] == "session_meta"
-    # No ANCESTOR id remains anywhere in the output.
-    assert ANCESTOR not in out.decode("utf-8")
-    # A forked_from_id-based rule would have dropped the HEAD metas (they carry it)
-    # and kept the ANCESTOR metas (forked_from_id=None) — the opposite. Prove the
-    # id-discriminator did NOT do that: turn_contexts t-1/t-2/t-3 all survive.
+    assert metas[0]["payload"]["id"] == "NEW"
+    assert metas[0]["payload"]["forked_from_id"] == HEAD
+    assert [m["payload"]["id"] for m in metas[1:]] == [HEAD, ANCESTOR, ANCESTOR, HEAD]
+    # cwd re-pinned on every meta; original ids otherwise untouched.
+    assert all(m["payload"]["cwd"] == "/new" for m in metas)
+    # All turns survive (no records dropped between metas).
     turn_ids = {r["payload"].get("turn_id") for r in records if r.get("type") == "turn_context"}
     assert turn_ids == {"t-1", "t-2", "t-3"}
 
 
 
-def test_codex_rewrite_strips_thread_rolled_back():
-    """M1: transient fork-control event_msgs (thread_rolled_back) describe the
-    parent's history surgery and must not be carried into the resumed session."""
+def test_codex_rewrite_keeps_thread_rolled_back():
+    """F11: native codex forks REPLAY thread_rolled_back verbatim (verified on
+    a67e idx 35/55 and 8c17 idx 34, both reload fine), and inside a captured turn
+    it is the real edit-and-resend seam. The old M1 strip both diverged from native
+    and erased that seam, so the rewrite must keep it."""
     from checkpoint_plugin.resume import _rewrite_codex_trajectory
 
     trajectory = (
@@ -1530,7 +1592,7 @@ def test_codex_rewrite_strips_thread_rolled_back():
         + json.dumps({"type": "event_msg", "payload": {"type": "task_started"}}) + "\n"
     ).encode("utf-8")
     out = _rewrite_codex_trajectory(trajectory, "NEW", Path("/new"), None, None, None)
-    assert b"thread_rolled_back" not in out
+    assert b"thread_rolled_back" in out
     assert b"task_started" in out
 
 
@@ -1560,13 +1622,18 @@ def test_codex_rewrite_preserves_structured_source_and_provenance():
         + json.dumps({"type": "turn_context", "payload": {"turn_id": "t-1", "model": "m"}}) + "\n"
     ).encode("utf-8")
     out = _rewrite_codex_trajectory(trajectory, "NEW", Path("/new"), None, None, None)
-    meta = next(json.loads(l)["payload"] for l in out.splitlines() if json.loads(l).get("type") == "session_meta")
-    assert meta["source"] == sub_source, "structured dict source must survive, not coerced to 'vscode'"
-    assert meta["thread_source"] == "subagent"
-    assert meta["agent_nickname"] == "Tesla"
-    assert meta["originator"] == "codex_cli_rs"
+    metas = [json.loads(l)["payload"] for l in out.splitlines() if json.loads(l).get("type") == "session_meta"]
+    # F2: the structured-source meta is kept as the INLINED source meta (records[1]),
+    # under its original id; the fresh head (records[0]) is the new session.
+    assert metas[0]["id"] == "NEW"
+    inlined = metas[1]
+    assert inlined["id"] == "old"
+    assert inlined["source"] == sub_source, "structured dict source must survive, not coerced to 'vscode'"
+    assert inlined["thread_source"] == "subagent"
+    assert inlined["agent_nickname"] == "Tesla"
+    assert inlined["originator"] == "codex_cli_rs"
 
-    # (b) meta missing provenance fields → defaults applied.
+    # (b) meta missing provenance fields → defaults applied (on both head + inlined).
     bare = (
         json.dumps({"type": "session_meta", "payload": {"id": "old", "cwd": "/old"}}) + "\n"
         + json.dumps({"type": "turn_context", "payload": {"turn_id": "t-1", "model": "m"}}) + "\n"
@@ -1928,53 +1995,44 @@ def test_no_synthetic_permission_mode_for_fork_resume():
     assert _normalize_permission_mode(None) is None
 
 
-def test_claude_resume_stamps_forkedfrom_on_inherited_records():
-    """P6-12/P7-2: inherited-prefix records (before the first captured turn) get a
-    forkedFrom={sessionId, messageUuid} stamp mirroring native forks; the captured
-    turn's own records do NOT. P7-2: the native invariant is messageUuid == the
-    record's OWN (remapped) uuid — one distinct anchor per record, NOT a single
-    shared anchor."""
+def test_claude_resume_stamps_forkedfrom_resolving_into_parent():
+    """F1/F4: a claude resume is fork-shaped — every inherited record keeps its uuid
+    BYTE-IDENTICAL to the source and stamps forkedFrom={sessionId, messageUuid} with
+    messageUuid == its own (preserved) uuid, so the link resolves INTO the parent
+    session (the native invariant, verified 26/26 on b57f8e6f). The old behavior
+    remapped uuids and pointed forkedFrom at the remapped uuid (resolved into source
+    0/26 — link severed)."""
     from checkpoint_plugin.resume import _rewrite_claude_trajectory
 
     traj = (
-        # inherited prefix: a user record from BEFORE the fork (no promptId match yet)
-        json.dumps({"type": "user", "uuid": "old-u", "parentUuid": None, "message": {"role": "user", "content": "old"}}) + "\n"
-        + json.dumps({"type": "assistant", "uuid": "old-a", "parentUuid": "old-u", "message": {"role": "assistant", "content": "old-resp"}}) + "\n"
-        # first captured turn: user record WITH promptId = the boundary
-        + json.dumps({"type": "user", "uuid": "new-u", "parentUuid": "old-a", "promptId": "P", "message": {"role": "user", "content": "new"}}) + "\n"
-        + json.dumps({"type": "assistant", "uuid": "new-a", "parentUuid": "new-u", "message": {"role": "assistant", "content": "new-resp"}}) + "\n"
+        json.dumps({"type": "user", "uuid": "src-u", "parentUuid": None, "promptId": "p0", "message": {"role": "user", "content": "first"}}) + "\n"
+        + json.dumps({"type": "assistant", "uuid": "src-a", "parentUuid": "src-u", "message": {"role": "assistant", "content": "resp"}}) + "\n"
+        + json.dumps({"type": "user", "uuid": "src-u2", "parentUuid": "src-a", "promptId": "P", "message": {"role": "user", "content": "second"}}) + "\n"
     ).encode("utf-8")
+    source_uuids = {"src-u", "src-a", "src-u2"}
 
     out = _rewrite_claude_trajectory(
-        traj, "NEW", Path("/new"), None, None,
-        has_inherited_prefix=True, source_session_id="SOURCE",
-        inherited_record_count=2,
+        traj, "NEW", Path("/new"), None, None, source_session_id="SOURCE",
     )
     recs = [json.loads(l) for l in out.splitlines()]
-    by_old = {}
-    # Match records back by content since uuids were remapped (contents are distinct).
+    # Every uuid-bearing record is fork-stamped, uuid preserved byte-identical.
+    assert len(recs) == 3
     for r in recs:
-        content = r.get("message", {}).get("content")
-        by_old[r.get("type"), str(content)] = r
-    inherited_user = by_old[("user", "old")]
-    inherited_asst = by_old[("assistant", "old-resp")]
-    captured_user = by_old[("user", "new")]
-
-    # P7-2: each inherited record's forkedFrom points at SOURCE with messageUuid ==
-    # its OWN remapped uuid (mirroring native: own_uuid == messageUuid per record).
-    assert inherited_user["forkedFrom"]["sessionId"] == "SOURCE"
-    assert inherited_user["forkedFrom"]["messageUuid"] == inherited_user["uuid"]
-    assert inherited_asst["forkedFrom"]["messageUuid"] == inherited_asst["uuid"]
-    # Distinct anchor per record (NOT a single shared anchor).
-    assert inherited_user["forkedFrom"]["messageUuid"] != inherited_asst["forkedFrom"]["messageUuid"]
-    # The captured turn's user record does NOT get a forkedFrom stamp.
-    assert "forkedFrom" not in captured_user
+        assert r["uuid"] in source_uuids, "inherited uuid must be preserved byte-identical"
+        assert r["forkedFrom"]["sessionId"] == "SOURCE"
+        # messageUuid == own preserved uuid → resolves INTO the parent session.
+        assert r["forkedFrom"]["messageUuid"] == r["uuid"]
+        assert r["forkedFrom"]["messageUuid"] in source_uuids
+    # Distinct anchor per record.
+    anchors = {r["forkedFrom"]["messageUuid"] for r in recs}
+    assert len(anchors) == 3
 
 
-def test_claude_resume_of_resume_remaps_existing_forkedfrom():
-    """P7-2: a forkedFrom carried over from a prior resume generation points at an
-    old uuid; the rewrite remaps its messageUuid so the own-uuid invariant survives
-    the round-trip instead of dangling to a dead uuid."""
+def test_claude_resume_of_resume_preserves_existing_forkedfrom():
+    """F1: under byte-identical uuid preservation, a forkedFrom carried over from a
+    prior resume generation keeps pointing at its original ancestor (messageUuid ==
+    the preserved own uuid), so the cross-session link stays resolvable across resume
+    generations rather than being re-pointed or dangled."""
     from checkpoint_plugin.resume import _rewrite_claude_trajectory
 
     # An inherited record already stamped (gen1): forkedFrom.messageUuid == own uuid.
@@ -1990,10 +2048,13 @@ def test_claude_resume_of_resume_remaps_existing_forkedfrom():
     )
     recs = [json.loads(l) for l in out.splitlines()]
     inh = next(r for r in recs if r["message"]["content"] == "inh")
-    # messageUuid was remapped along with the record's own uuid; invariant holds.
-    assert inh["forkedFrom"]["messageUuid"] == inh["uuid"]
-    assert inh["forkedFrom"]["messageUuid"] != "g1-u", "stale uuid must be remapped"
-    assert inh["uuid"] != "g1-u"
+    # uuid preserved byte-identical; pre-existing forkedFrom kept (not overwritten).
+    assert inh["uuid"] == "g1-u"
+    assert inh["forkedFrom"] == {"sessionId": "ANC", "messageUuid": "g1-u"}
+    # The other record (no prior forkedFrom) gets one pointing at its own preserved uuid.
+    cap = next(r for r in recs if r["message"]["content"] == "cap")
+    assert cap["uuid"] == "cap-u"
+    assert cap["forkedFrom"]["messageUuid"] == "cap-u"
 
 
 def test_claude_resume_repins_version_uniform_to_latest():
@@ -2015,14 +2076,19 @@ def test_claude_resume_repins_version_uniform_to_latest():
     assert versions == {"2.1.156"}, f"expected uniform latest version, got {versions}"
 
 
-def test_claude_resume_no_forkedfrom_without_inherited_prefix():
-    """P6-12: a normal resume (no inherited prefix) stamps nothing."""
+def test_claude_resume_is_fork_shaped_even_from_startup():
+    """F4: every claude resume is fork-shaped, even a resume of a plain startup
+    session (no prior inherited prefix). All inherited records carry forkedFrom and
+    keep their uuids byte-identical; no synthetic permission-mode is injected."""
     from checkpoint_plugin.resume import _rewrite_claude_trajectory
 
     traj = (
         json.dumps({"type": "user", "uuid": "u1", "parentUuid": None, "promptId": "P", "message": {"role": "user", "content": "hi"}}) + "\n"
         + json.dumps({"type": "assistant", "uuid": "a1", "parentUuid": "u1", "message": {"role": "assistant", "content": []}}) + "\n"
     ).encode("utf-8")
-    out = _rewrite_claude_trajectory(traj, "NEW", Path("/new"), None, None, source_session_id="SOURCE")
+    out = _rewrite_claude_trajectory(traj, "NEW", Path("/new"), None, "acceptEdits", source_session_id="SOURCE")
     recs = [json.loads(l) for l in out.splitlines()]
-    assert all("forkedFrom" not in r for r in recs)
+    # Fork-shaped: forkedFrom on every record, uuids preserved, no synthetic mode rec.
+    assert all(r["forkedFrom"]["sessionId"] == "SOURCE" for r in recs)
+    assert {r["uuid"] for r in recs} == {"u1", "a1"}
+    assert not any(r.get("type") == "permission-mode" for r in recs)

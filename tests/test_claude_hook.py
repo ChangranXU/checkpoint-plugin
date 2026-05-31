@@ -171,6 +171,13 @@ def test_claude_subagent_stop_creates_separate_checkpoint(tmp_path, monkeypatch)
     assert metadata["lineage"]["parent_session_id"] == "parent-session"
     assert metadata["lineage"]["agent_id"] == "abc123"
     assert metadata["lineage"]["agent_type"] == "Explore"
+    # F12: the sidechain's observed size (== the sliced end_offset) and mtime are
+    # recorded so a later flush (file grown past this size) is detectable as a stale
+    # slice rather than a silent truncation.
+    assert metadata["lineage"]["sidechain_observed_size"] == ref.end_offset
+    assert metadata["lineage"]["sidechain_observed_size"] <= sub_transcript.stat().st_size
+    assert isinstance(metadata["lineage"]["sidechain_observed_mtime"], str)
+    assert metadata["lineage"]["sidechain_observed_mtime"].endswith("+00:00")
 
 
 def test_claude_subagent_inherits_parent_model(tmp_path, monkeypatch):

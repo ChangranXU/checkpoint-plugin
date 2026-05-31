@@ -121,10 +121,20 @@ def _seed_codex_env(session_id: str, payload: dict[str, Any]) -> None:
 
 
 def _session_env(payload: dict[str, Any]) -> dict[str, str]:
-    """Provider fields recorded at SessionStart for fallback at later turns."""
+    """Provider fields recorded at SessionStart for fallback at later turns.
+
+    F15: also capture codex's approval/sandbox policy when the hook payload carries
+    it. The authoritative policy lives in the rollout's `turn_context` (replayed
+    verbatim on resume, so resume is unaffected either way), but recording it in
+    `session_env` makes the checkpoint metadata self-describing rather than only
+    listing the coarse `permission_mode`. Best-effort: codex does not always deliver
+    these at the hook, so they're included only when present.
+    """
     fields = {
         "model": _first_string(payload, "model"),
         "permission_mode": _first_string(payload, "permission_mode", "permissionMode"),
+        "approval_policy": _first_string(payload, "approval_policy", "approvalPolicy"),
+        "sandbox_mode": _first_string(payload, "sandbox_mode", "sandboxMode", "sandbox_policy", "sandboxPolicy"),
     }
     return {key: value for key, value in fields.items() if value}
 

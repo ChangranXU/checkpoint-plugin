@@ -759,7 +759,8 @@ def _write_provider_session(
         return None
     if provider_name == "codex":
         return _write_codex_session(
-            provider_home, cwd, new_session_id, trajectory, model, permission_mode, source_meta
+            provider_home, cwd, new_session_id, trajectory, model, permission_mode,
+            source_meta, inherited_record_count,
         )
     if provider_name == "claude":
         return _write_claude_session(
@@ -816,8 +817,23 @@ def _derive_session_title(store: CheckpointStore, plan: ResumePlan) -> str:
     for turn_id in range(plan.turn_id, -1, -1):
         preview = preview_by_turn.get(turn_id)
         if preview:
-            return preview[:50]
+            return _cap_title(preview)
     return "Resumed session"
+
+
+def _cap_title(preview: str, limit: int = 48) -> str:
+    """Cap a derived thread_name at `limit` chars on a word boundary (F18).
+
+    `preview[:50]` cut mid-word ("...it's a fork tes"), unlike native titles which
+    are whole-word summaries (max len ~46 in real data). We can't summarize, but we
+    can at least avoid the mid-word slice: trim to the last space within the cap. If
+    there is no interior space (one long token), fall back to the hard cap.
+    """
+    if len(preview) <= limit:
+        return preview
+    head = preview[:limit]
+    cut = head.rfind(" ")
+    return head[:cut].rstrip() if cut > 0 else head
 
 
 def _append_codex_session_index(
@@ -849,13 +865,22 @@ def _write_codex_session(
     model: str | None,
     permission_mode: str | None,
     source_meta: dict[str, object] | None,
+    inherited_record_count: int = 0,
 ) -> Path:
-    now = datetime.now(timezone.utc)
+    # F10: native rollout filenames + the YYYY/MM/DD bucket use LOCAL time (verified:
+    # native 415c filename T20-07-30 for payload UTC 12:07:30 on a UTC+8 host), while
+    # in-record timestamps stay UTC-Z. Using UTC for the filename both skews the stamp
+    # and, near UTC-midnight, files the rollout in the wrong date directory (so it
+    # sorts incorrectly in the picker). Build the path/filename from local time.
+    now = datetime.now().astimezone()
     session_dir_path = codex_home / "sessions" / now.strftime("%Y") / now.strftime("%m") / now.strftime("%d")
     path = session_dir_path / f"rollout-{now.strftime('%Y-%m-%dT%H-%M-%S')}-{new_session_id}.jsonl"
     _write_bytes_atomic(
         path,
-        _rewrite_codex_trajectory(trajectory, new_session_id, cwd, model, permission_mode, source_meta),
+        _rewrite_codex_trajectory(
+            trajectory, new_session_id, cwd, model, permission_mode, source_meta,
+            inherited_record_count,
+        ),
     )
     return path
 
@@ -884,24 +909,6 @@ def _write_claude_session(
     return path
 
 
-_TRANSIENT_CODEX_EVENT_MSGS = ("thread_rolled_back",)
-
-
-def _is_transient_codex_event(record: dict[str, object]) -> bool:
-    """Fork-control event_msgs that describe the PARENT's history surgery (M1).
-
-    A forked/subagent codex transcript replays markers like `thread_rolled_back`
-    that belong to the original thread, not to the fresh resumed session. Carried
-    verbatim they make a reloaded session replay a spurious rollback, so we drop
-    them when rewriting. The set is intentionally narrow so meaningful events
-    (user_message, task_started, ...) are never stripped.
-    """
-    if record.get("type") != "event_msg":
-        return False
-    payload = record.get("payload")
-    return isinstance(payload, dict) and payload.get("type") in _TRANSIENT_CODEX_EVENT_MSGS
-
-
 def _rewrite_codex_trajectory(
     trajectory: bytes,
     new_session_id: str,
@@ -909,47 +916,48 @@ def _rewrite_codex_trajectory(
     model: str | None,
     permission_mode: str | None,
     source_meta: dict[str, object] | None,
+    inherited_record_count: int = 0,
 ) -> bytes:
     lines: list[bytes] = []
     records = _jsonl_records(trajectory)
-    # P4-5: the new session forked FROM the original session, so its session_meta
-    # lineage should point at the original id — not keep the stale `forked_from_id`
-    # of whatever the original itself forked from. Capture the original id before
-    # rewriting (the first session_meta's id).
+    # P4-5: the new session forked FROM the original session, so the fresh head
+    # meta's lineage points at the original id (the first session_meta's id).
     original_session_id = _first_session_meta_id(records)
-    if not records or records[0].get("type") != "session_meta":
+    source_cwd = _codex_source_cwd(source_meta, records)
+    now = _zulu_now()
+    # F2: native codex resume/fork keeps the inlined ancestor session_meta chain and
+    # PREPENDS a fresh head meta (verified: native depth-scaled count startup=1,
+    # resume=2, fork-of-fork=3). The old code collapsed every chain to one meta. We
+    # now (1) prepend a fresh head meta (new id, forked_from_id=source id, its own
+    # payload timestamp = resume moment) and (2) keep each inlined source meta with
+    # its ORIGINAL id, forked_from_id and payload timestamp, only re-stamping the
+    # record-level timestamp to the resume moment (F9) — exactly mirroring native
+    # a67e (record-ts=fork moment on all metas; payload-ts=each meta's creation).
+    if records and records[0].get("type") == "session_meta":
+        lines.append(_json_line(_codex_head_meta(new_session_id, cwd, source_meta, original_session_id, now)))
+    else:
+        # No source meta to inline: emit the single synthetic head (legacy shape).
         lines.append(_json_line(_codex_session_meta(new_session_id, cwd, source_meta)))
-    # P6-3: a forked/subagent codex transcript carries session_meta records from
-    # PRIOR generations inlined into its prefix. Two kinds exist on disk:
-    #   - same-session continuation metas: id == head id (the first meta's id),
-    #     written when the live session was itself resumed/rolled-back. These are
-    #     legitimate and may appear mid-stream (verified on real 019e6522/019e648f);
-    #     keep + rewrite them like the head.
-    #   - inlined ancestor metas: id != head id (an older ancestor's id). These are
-    #     replayed history and must be dropped, wherever they sit.
-    # The discriminator is the meta's ORIGINAL id vs the head id — NOT position
-    # ("leading run") and NOT forked_from_id (a fork's head carries forked_from_id
-    # while its inlined ancestors carry forked_from_id=None — backwards).
-    head_meta_id = original_session_id
     for record in records:
-        if _is_transient_codex_event(record):
-            continue  # M1
-        if record.get("type") == "session_meta":
-            payload = record.get("payload")
-            this_id = payload.get("id") if isinstance(payload, dict) else None
-            if head_meta_id is not None and this_id != head_meta_id:
-                continue  # P6-3: drop inlined ancestor metas (id != head)
+        # F11: native forks REPLAY thread_rolled_back verbatim — a67e (fork-of-fork)
+        # keeps it at idx 35 & 55 in its inlined prefix, 8c17 at idx 34, and both
+        # reload fine. The old M1 strip-everywhere both diverged from native and
+        # erased the in-thread edit-and-resend seam inside captured turns (415c rec30,
+        # between the version-1 and version-2 prompts). The most faithful behavior is
+        # to keep these markers exactly as a native session would, so we no longer
+        # strip them at all.
         payload = record.get("payload")
+        if record.get("type") == "session_meta" and isinstance(payload, dict):
+            # Keep this inlined ancestor meta verbatim in lineage (its own id +
+            # forked_from_id), re-stamp only timestamps and cwd.
+            _apply_preserved_meta_fields(payload, source_meta)
+            _mark_codex_session_visible(payload)
+            payload["cwd"] = str(cwd)
+            record["timestamp"] = now  # F9: record-ts = resume moment
+            # payload["timestamp"] (the meta's original creation time) is preserved.
+            lines.append(_json_line(record))
+            continue
         if isinstance(payload, dict):
-            if record.get("type") == "session_meta":
-                _apply_preserved_meta_fields(payload, source_meta)
-                _mark_codex_session_visible(payload)
-                # Re-point lineage at the session we forked from (or drop a stale
-                # ancestor when we have nothing meaningful to point at).
-                if original_session_id:
-                    payload["forked_from_id"] = original_session_id
-                elif "forked_from_id" in payload:
-                    del payload["forked_from_id"]
             if "id" in payload:
                 payload["id"] = new_session_id
             if "thread_id" in payload:
@@ -973,12 +981,129 @@ def _rewrite_codex_trajectory(
                 # itself a string (legacy/simple form).
                 if permission_mode and isinstance(payload.get("permission_profile"), str):
                     payload["permission_profile"] = permission_mode
+        # F5: rewrite the SOURCE cwd to the resume cwd everywhere it is embedded, not
+        # just payload["cwd"]: the structured sandbox/permission write-roots and the
+        # environment_context / developer message bodies still named the source
+        # workspace, which would (re)grant sandbox writes to the wrong directory on a
+        # reloaded resume — a real correctness/safety gap, not cosmetic.
+        if source_cwd:
+            _rewrite_codex_record_cwd(record, source_cwd, str(cwd))
         if "id" in record:
             record["id"] = new_session_id
         if "session_id" in record:
             record["session_id"] = new_session_id
         lines.append(_json_line(record))
     return b"".join(lines)
+
+
+def _codex_source_cwd(
+    source_meta: dict[str, object] | None, records: list[dict[str, object]]
+) -> str | None:
+    """The source session's cwd, for F5 path-prefix rewriting.
+
+    Prefer the captured `source_meta` (read before any per-record cwd is rewritten);
+    fall back to the first session_meta payload cwd in the trajectory.
+    """
+    if source_meta:
+        value = source_meta.get("cwd")
+        if isinstance(value, str) and value:
+            return value
+    for record in records:
+        if record.get("type") == "session_meta":
+            payload = record.get("payload")
+            if isinstance(payload, dict):
+                value = payload.get("cwd")
+                return value if isinstance(value, str) and value else None
+    return None
+
+
+def _rewrite_codex_record_cwd(record: dict[str, object], source_cwd: str, target_cwd: str) -> None:
+    """Replace the source cwd path with the resume cwd inside one codex record (F5).
+
+    Uses exact path-prefix matching (`== source` or `startswith(source + "/")`) on
+    string leaves, never blind substring replace — the source cwd is a literal prefix
+    of the resume copy dir name, so a substring replace would double-append the
+    suffix. Walks nested dicts/lists (turn_context sandbox/permission write-roots) and
+    rewrites the `<cwd>...</cwd>` body plus developer "writable roots are ..." text in
+    message records.
+    """
+    if source_cwd == target_cwd:
+        return
+    _rewrite_cwd_in_value(record, source_cwd, target_cwd)
+
+
+def _rewrite_cwd_in_value(value: object, source_cwd: str, target_cwd: str) -> object:
+    if isinstance(value, dict):
+        for key, item in list(value.items()):
+            value[key] = _rewrite_cwd_in_value(item, source_cwd, target_cwd)
+        return value
+    if isinstance(value, list):
+        for i, item in enumerate(value):
+            value[i] = _rewrite_cwd_in_value(item, source_cwd, target_cwd)
+        return value
+    if isinstance(value, str):
+        return _rewrite_cwd_in_string(value, source_cwd, target_cwd)
+    return value
+
+
+def _rewrite_cwd_in_string(text: str, source_cwd: str, target_cwd: str) -> str:
+    """Rewrite source-cwd path occurrences in a string leaf via exact-prefix anchors.
+
+    Handles two shapes: (1) the whole string IS a path (sandbox/permission entries:
+    `path == source` or `path.startswith(source + "/")`); (2) the path is embedded in
+    free text (`<cwd>/src/test</cwd>`, "writable roots are /src/test, ..."). For (2)
+    we replace each occurrence of the source path only when it is followed by a path
+    boundary (`/`, end, or a non-path char), so `/test` never matches inside
+    `/test-checkpoint-copy`.
+    """
+    if source_cwd not in text:
+        return text
+    if text == source_cwd:
+        return target_cwd
+    if text.startswith(source_cwd + "/"):
+        return target_cwd + text[len(source_cwd):]
+    # Embedded in free text: rewrite occurrences at a path boundary.
+    result: list[str] = []
+    i = 0
+    n = len(source_cwd)
+    while True:
+        j = text.find(source_cwd, i)
+        if j < 0:
+            result.append(text[i:])
+            break
+        result.append(text[i:j])
+        after = text[j + n : j + n + 1]
+        # Boundary: end of string, a path separator, or a non-path delimiter. NOT a
+        # bare alnum/'-'/'_' which would mean a longer sibling dir (test-checkpoint…).
+        if after == "" or after == "/" or not (after.isalnum() or after in "-_"):
+            result.append(target_cwd)
+        else:
+            result.append(source_cwd)  # sibling like test-checkpoint-copy; leave as-is
+        i = j + n
+    return "".join(result)
+
+
+def _codex_head_meta(
+    new_session_id: str,
+    cwd: Path,
+    source_meta: dict[str, object] | None,
+    original_session_id: str | None,
+    now: str,
+) -> dict[str, object]:
+    """A fresh codex head session_meta forked from the source (F2/F14).
+
+    Native head metas place `forked_from_id` immediately after `id` (idx1) and carry
+    their own creation timestamp as payload `timestamp`; the inlined source chain is
+    kept separately by the caller.
+    """
+    payload: dict[str, object] = {"id": new_session_id}
+    if original_session_id:
+        payload["forked_from_id"] = original_session_id  # F14: right after id
+    payload["timestamp"] = now
+    payload["cwd"] = str(cwd)
+    _apply_preserved_meta_fields(payload, source_meta)
+    _mark_codex_session_visible(payload)
+    return {"timestamp": now, "type": "session_meta", "payload": payload}
 
 
 def _codex_session_meta(
@@ -1046,6 +1171,13 @@ def _mark_codex_session_visible(payload: dict[str, object]) -> None:
 
 _CLAUDE_POINTER_KEYS = ("messageId", "leafUuid")
 
+# F4: the keyless provider-bookkeeping record types a native claude fork drops from
+# its inherited region (verified: native b57f8e6f omits exactly these from 4be30374).
+# `system` records carry uuids and are message content, so they are NOT in this set.
+_CLAUDE_STRIPPED_FORK_TYPES = frozenset(
+    {"mode", "permission-mode", "file-history-snapshot", "ai-title", "last-prompt"}
+)
+
 
 def _drop_dangling_trailing_pointers(
     records: list[dict[str, object]],
@@ -1088,84 +1220,88 @@ def _rewrite_claude_trajectory(
     source_session_id: str | None = None,
     inherited_record_count: int = 0,
 ) -> bytes:
-    lines: list[bytes] = []
-    last_uuid: str | None = None
+    """Rewrite a captured claude trajectory into a native fork-shaped transcript.
+
+    F1/F4 (verified against native b57f8e6f, a `--resume` of the startup 4be30374):
+    a native claude resume produces a FORK-shaped file, regardless of whether the
+    source was itself a fork:
+      * It keeps each inherited record's `uuid`/`parentUuid` BYTE-IDENTICAL to the
+        source and stamps `forkedFrom = {sessionId: source, messageUuid: own_uuid}`,
+        so 26/26 forkedFrom.messageUuid resolve INTO the parent session — the
+        cross-session thread link Claude uses for fork navigation/rewind. The old
+        code remapped every uuid via uuid4() then pointed forkedFrom at the REMAPPED
+        uuid, so it resolved into the source 0/26 (link severed). P7-2's
+        "own == messageUuid" was true-but-insufficient (it never checked resolution).
+      * It STRIPS the source's keyless records (mode, permission-mode,
+        file-history-snapshot, ai-title, last-prompt) from the inherited region and
+        begins at the first uuid-bearing record; native b57f8e6f drops exactly the 10
+        keyless records 4be30374 carried.
+      * It does NOT synthesize a leading permission-mode record.
+
+    A resume WRITE captures the source's records through the resumed turn; there are
+    no genuinely-new turns yet (those happen live after the resume loads), so the
+    ENTIRE captured prefix is inherited and every uuid-bearing record is fork-stamped
+    with its preserved uuid. `inherited_record_count`/`has_inherited_prefix` are
+    retained for signature compatibility but the inherited region is now the whole
+    captured set.
+    """
     permission_mode = _normalize_permission_mode(permission_mode)
     records = _jsonl_records(trajectory)
-    records = _ensure_permission_mode_record(
-        records, permission_mode, new_session_id, has_inherited_prefix=has_inherited_prefix
-    )
-    # P6-12/P7-5: when this resume carries an inherited fork prefix, the records
-    # before the first captured turn are pre-fork history we stamp forkedFrom on.
-    # The boundary is the KNOWN inherited record count (threaded from
-    # _trajectory_prefix), NOT the first promptId-bearing user record — that scan
-    # is wrong for a resume-of-resume, where the inherited record 0 already carries
-    # a promptId and the scan returns 0 (no-op). Fall back to the scan only when the
-    # count is unavailable (legacy callers).
-    if has_inherited_prefix and source_session_id:
-        inherited_boundary = (
-            inherited_record_count
-            if inherited_record_count > 0
-            else _first_captured_turn_index(records)
-        )
+    is_fork_shaped = bool(source_session_id)
+    if is_fork_shaped:
+        # F4: a native fork inherits only message records; it drops the source's
+        # keyless provider-bookkeeping records. Strip exactly the types native
+        # b57f8e6f dropped from 4be30374's inherited region (mode, permission-mode,
+        # file-history-snapshot, ai-title, last-prompt) — NOT every keyless record:
+        # `system` records carry uuids and are kept, and any other keyless content is
+        # left intact rather than guessed away.
+        records = [r for r in records if r.get("type") not in _CLAUDE_STRIPPED_FORK_TYPES]
     else:
-        inherited_boundary = 0
-    # P4-4: build the FULL old->new uuid map first. messageId (file-history-
-    # snapshot) and leafUuid (last-prompt) can reference a message uuid that
-    # appears later in the file, so a single forward pass would leave them
-    # dangling. Two passes: map every uuid, then remap all references against it.
+        # Legacy path (no source id): keep the old synthetic-permission-mode behavior.
+        records = _ensure_permission_mode_record(
+            records, permission_mode, new_session_id, has_inherited_prefix=has_inherited_prefix
+        )
+    # Build the old->new uuid map. For a fork-shaped resume the inherited records keep
+    # their uuids byte-identical (identity map) so forkedFrom.messageUuid resolves into
+    # the parent; only a non-fork (legacy) resume remaps to fresh uuids.
     uuid_map: dict[str, str] = {}
     for record in records:
         old_uuid = record.get("uuid")
         if isinstance(old_uuid, str) and old_uuid not in uuid_map:
-            uuid_map[old_uuid] = str(uuid.uuid4())
-    # M4: the latest turn's EOF tail can end with keyless records
-    # (file-history-snapshot, last-prompt) whose messageId/leafUuid point FORWARD
-    # to a message uuid that belongs to the next turn — outside this slice. After
-    # the remap below those pointers would dangle. Trim them from the end.
+            uuid_map[old_uuid] = old_uuid if is_fork_shaped else str(uuid.uuid4())
     records = _drop_dangling_trailing_pointers(records, uuid_map)
-    # P7-6: native sessions carry a SINGLE uniform CLI `version` across all records.
-    # A resumed transcript that inherits a pre-fork prefix can mix versions (the
-    # inherited history was written by an older client than the captured turns),
-    # which distinguishes it from native. We have no live version to stamp (the hook
-    # payload/env snapshot don't carry one), so re-pin every versioned record to the
-    # MOST RECENT version that genuinely appears in this trajectory — uniform like
-    # native, without fabricating a value the session never saw.
+    # P7-6: native sessions carry a SINGLE uniform CLI `version`. Re-pin every
+    # versioned record to the most recent version present (uniform, like native).
     latest_version = _latest_claude_version(records)
-    for idx, record in enumerate(records):
-        record["sessionId"] = new_session_id
+    last_uuid: str | None = None
+    lines: list[bytes] = []
+    for record in records:
+        # F8: file-history-snapshot/summary records carry no sessionId natively; gate
+        # the re-pin on field presence so we don't add a non-native key.
+        if "sessionId" in record:
+            record["sessionId"] = new_session_id
         if latest_version and "version" in record:
             record["version"] = latest_version
         if "cwd" in record:
             record["cwd"] = str(cwd)
-        # F2: Claude records carry the model at `message.model` on assistant
-        # records, not as a top-level field. Re-pin it there. (The legacy
-        # top-level branch is kept for any record that does carry it.)
+        # F2: Claude model lives at message.model on assistant records, not top-level.
         if model:
             if "model" in record:
                 record["model"] = model
             message = record.get("message")
-            if (
-                record.get("type") == "assistant"
-                and isinstance(message, dict)
-                and "model" in message
-            ):
+            if record.get("type") == "assistant" and isinstance(message, dict) and "model" in message:
                 message["model"] = model
         if permission_mode and record.get("type") == "permission-mode":
             record["permissionMode"] = permission_mode
         if isinstance(record.get("uuid"), str):
             record["uuid"] = uuid_map[str(record["uuid"])]
-        # Remap message-uuid pointers carried by non-message records so they keep
-        # referencing the same (renamed) records: file-history-snapshot.messageId
-        # and last-prompt.leafUuid.
         for pointer_key in ("messageId", "leafUuid"):
             value = record.get(pointer_key)
             if isinstance(value, str) and value in uuid_map:
                 record[pointer_key] = uuid_map[value]
-        # P6-7: file-history-snapshot records nest a second pointer at
-        # snapshot.messageId; the top-level remap above misses it, leaving it
-        # dangling after the uuid rename (breaks rewind/file-restore). Remap it
-        # narrowly (only this record type, only when the nested id is known).
+        # P6-7: file-history-snapshot nests snapshot.messageId; remap it too. (Under
+        # the fork-shaped identity map this is a no-op; it still matters on the legacy
+        # remap path.)
         if record.get("type") == "file-history-snapshot":
             snapshot = record.get("snapshot")
             if isinstance(snapshot, dict):
@@ -1178,22 +1314,15 @@ def _rewrite_claude_trajectory(
             record["parentUuid"] = last_uuid
         if isinstance(record.get("uuid"), str) and record.get("type") in {"user", "assistant"}:
             last_uuid = str(record["uuid"])
-        # P6-12/P7-2: mirror a native fork's forkedFrom on inherited-prefix records.
-        # Native invariant (verified on real forks): every inherited record stamps
-        # forkedFrom.messageUuid == its OWN uuid (one distinct anchor per record),
-        # NOT a single shared anchor. record["uuid"] is already remapped above, so
-        # point messageUuid at it.
+        # F1: stamp forkedFrom on every inherited record, pointing messageUuid at the
+        # record's OWN (preserved) uuid so it resolves INTO the parent session — the
+        # native invariant. record["uuid"] is byte-identical to the source here.
         own_uuid = record.get("uuid")
-        if (
-            source_session_id
-            and idx < inherited_boundary
-            and isinstance(own_uuid, str)
-            and "forkedFrom" not in record
-        ):
+        if is_fork_shaped and isinstance(own_uuid, str) and "forkedFrom" not in record:
             record["forkedFrom"] = {"sessionId": source_session_id, "messageUuid": own_uuid}
-        # P7-2: a forkedFrom carried over from a PRIOR resume generation points at an
-        # old uuid that we just remapped; re-point its messageUuid so the own-uuid
-        # invariant survives the round-trip (otherwise it dangles to a dead uuid).
+        # A forkedFrom carried over from a prior generation already points at the
+        # (preserved) uuid; under the identity map it needs no remap, but on the legacy
+        # remap path re-point it so it doesn't dangle.
         existing_fork = record.get("forkedFrom")
         if isinstance(existing_fork, dict):
             mu = existing_fork.get("messageUuid")
@@ -1258,18 +1387,6 @@ def _ensure_permission_mode_record(
     return [*records[:insert_at], synthetic, *records[insert_at:]]
 
 
-def _first_captured_turn_index(records: list[dict[str, object]]) -> int:
-    """Index of the first captured turn = first promptId-bearing user record (P6-12).
-
-    Records before it are the inherited pre-fork prefix. Returns 0 when no captured
-    turn boundary is found (nothing to treat as inherited).
-    """
-    for idx, record in enumerate(records):
-        if record.get("type") == "user" and record.get("promptId"):
-            return idx
-    return 0
-
-
 def _latest_claude_version(records: list[dict[str, object]]) -> str | None:
     """The most recent CLI `version` appearing in the trajectory (P7-6).
 
@@ -1312,7 +1429,11 @@ def _json_line(record: dict[str, object]) -> bytes:
     # source key order and the synthetic records we build are constructed in native
     # order, so emit WITHOUT sort_keys — alphabetizing every key was a 100%-vs-0%
     # fingerprint distinguishing resumed transcripts from native ones.
-    return (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8")
+    # P8-F3: native rollouts/transcripts serialize with COMPACT separators (`,`/`:`,
+    # no spaces). Python's default `(', ', ': ')` injected a space after every comma
+    # and colon — another 100%-vs-0% fingerprint (and it shifted every downstream
+    # manifest byte offset vs a native file). Emit compact to match native bytes.
+    return (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
 
 
 def _write_bytes_atomic(path: Path, data: bytes) -> None:
