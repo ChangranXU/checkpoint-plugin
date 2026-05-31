@@ -8,7 +8,9 @@ checkpoint lifecycle.
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +22,28 @@ from ._hook_common import first_string as _first_string
 from ._hook_common import parent_session_env as _parent_session_env
 from ._hook_common import read_payload as _read_payload
 from ._trajectory_slicer import codex_key, jsonl_after_leading_metas, jsonl_ref_for_turn
+
+# F12-codex: SubagentStop fires before codex flushes the turn-closing `task_complete`
+# event to the subagent rollout (verified: 6a3a slice ended 709B before EOF, missing
+# the trailing task_complete). Settle the file before slicing. Read the timing from
+# the env at call time (not import) so tests can tune/disable it per-case.
+# P11-SUB-1: observed flush latency ~2.3s exceeds the old 2.0s budget; raise to 3.5s.
+_SETTLE_TIMEOUT_ENV = "CHECKPOINT_SIDECHAIN_SETTLE_TIMEOUT"
+_SETTLE_POLL_ENV = "CHECKPOINT_SIDECHAIN_SETTLE_POLL"
+
+
+def _settle_timeout_s() -> float:
+    try:
+        return float(os.environ.get(_SETTLE_TIMEOUT_ENV, "3.5"))
+    except ValueError:
+        return 3.5
+
+
+def _settle_poll_s() -> float:
+    try:
+        return float(os.environ.get(_SETTLE_POLL_ENV, "0.1"))
+    except ValueError:
+        return 0.1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -88,8 +112,53 @@ def _on_subagent_end(payload: dict[str, Any], cwd: Path, parent_session_id: str)
             "agent_type": _first_string(payload, "agent_type", "agentType"),
         },
     )
+    if transcript_path is not None:
+        _settle_subagent_rollout(Path(transcript_path))
     ref = _subagent_trajectory_ref(payload, transcript_path) or _empty_trajectory_ref("codex")
     coordinator.on_turn_end(_turn_record(payload), ref)
+
+
+def _settle_subagent_rollout(transcript_path: Path) -> None:
+    """Block (bounded) for codex's turn-closing `task_complete` to flush (F12-codex).
+
+    The subagent's final `event_msg`/`task_complete` lands moments after SubagentStop.
+    Poll until the last non-blank record is a `task_complete` event, or the timeout
+    elapses. We do NOT bail on a stable size: while awaiting the delayed flush the
+    file is stable precisely because the closing record hasn't landed yet, so a
+    stable-size bail would give up exactly when we must keep waiting. Best-effort.
+    """
+    if _settle_timeout_s() <= 0:
+        return
+    deadline = time.monotonic() + _settle_timeout_s()
+    poll = _settle_poll_s()
+    while True:
+        if _subagent_tail_is_complete(transcript_path):
+            return
+        if not transcript_path.exists():
+            return
+        if time.monotonic() >= deadline:
+            return
+        time.sleep(poll)
+
+
+def _subagent_tail_is_complete(transcript_path: Path) -> bool:
+    """True when the rollout's last record is a `task_complete` event (turn closed)."""
+    try:
+        data = transcript_path.read_bytes()
+    except OSError:
+        return False
+    if not data.endswith(b"\n"):
+        return False
+    for line in reversed(data.splitlines()):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return False
+        payload = record.get("payload") if isinstance(record, dict) else None
+        return isinstance(payload, dict) and payload.get("type") == "task_complete"
+    return False
 
 
 def _event_from_payload(payload: dict[str, Any]) -> str:

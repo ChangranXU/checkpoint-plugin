@@ -40,6 +40,9 @@ def isolate_environ():
     saved = dict(os.environ)
     for name in _PROVIDER_ENV_VARS:
         os.environ.pop(name, None)
+    # F12: disable the subagent flush-settle delay by default so the suite never
+    # blocks on the bounded poll. The two settle tests opt back in explicitly.
+    os.environ["CHECKPOINT_SIDECHAIN_SETTLE_TIMEOUT"] = "0"
     try:
         yield
     finally:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,29 @@ from ._hook_common import first_string as _first_string
 from ._hook_common import parent_session_env as _parent_session_env
 from ._hook_common import read_payload as _read_payload
 from ._trajectory_slicer import claude_key, jsonl_ref_for_turn
+
+# F12: SubagentStop can fire before the subagent's final assistant deliverable is
+# flushed to its sidechain file (verified: a50fb captured 3/4 records, the end_turn
+# deliverable flushed moments later). We settle-and-re-slice: poll until the tail is
+# a complete assistant deliverable or the budget is exhausted, then slice. Read from
+# the env at call time (not import) so tests can tune/disable it per-case.
+# P11-SUB-1: observed flush latency ~2.3s exceeds the old 2.0s budget; raise to 3.5s.
+_SETTLE_TIMEOUT_ENV = "CHECKPOINT_SIDECHAIN_SETTLE_TIMEOUT"
+_SETTLE_POLL_ENV = "CHECKPOINT_SIDECHAIN_SETTLE_POLL"
+
+
+def _settle_timeout_s() -> float:
+    try:
+        return float(os.environ.get(_SETTLE_TIMEOUT_ENV, "3.5"))
+    except ValueError:
+        return 3.5
+
+
+def _settle_poll_s() -> float:
+    try:
+        return float(os.environ.get(_SETTLE_POLL_ENV, "0.1"))
+    except ValueError:
+        return 0.1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -79,21 +103,29 @@ def _on_subagent_end(payload: dict[str, Any], cwd: Path, parent_session_id: str)
     }
     if transcript_path is not None:
         lineage["sidechain_stem"] = transcript_path.stem
+    # F12: block briefly for the subagent's final assistant record to flush before
+    # slicing, so the deliverable isn't truncated. Bounded and best-effort.
+    if transcript_path is not None:
+        _settle_sidechain(transcript_path)
     ref = _subagent_trajectory_ref(payload, transcript_path)
     if ref is None:
-        # P6-9: no sidechain file was found, so the slice is empty. Record WHY at a
-        # defined location so a reader knows the empty trajectory is expected, not a
-        # capture bug.
+        # P11-ZOMBIE-1: no sidechain file → record lineage-only metadata (no fs/env
+        # snapshot). A full on_turn_end would snapshot the entire project directory
+        # into blobs that serve no purpose — there's no trajectory to associate them
+        # with. Write metadata so the session is discoverable, but skip the expensive
+        # checkpoint.
         lineage["capture_status"] = "no_sidechain_file"
-        ref = _empty_trajectory_ref("claude")
-    elif transcript_path is not None:
-        # F12: SubagentStop can fire before the subagent's final assistant record is
-        # flushed (verified: af44fcc2 slice caught 3/4 records, the deliverable rec3
-        # flushed ~14ms later). The slice reads to the current EOF, so a later flush
-        # is silently truncated. We can't reliably block for the flush, but we record
-        # the sidechain's observed size+mtime so a consumer (or a later re-slice on
-        # the next session_start) can DETECT that the stored slice is stale — the file
-        # having grown past `sidechain_observed_size` means records were missed.
+        coordinator.on_session_start(
+            source="subagent",
+            session_env=sub_env,
+            lineage=lineage,
+        )
+        return 0
+    if transcript_path is not None:
+        # Record the sidechain's observed size+mtime at slice time. After the settle
+        # above the slice should reach EOF, but a still-growing file (extremely late
+        # flush past the settle budget) remains detectable: the file having grown
+        # past `sidechain_observed_size` means records were missed.
         observed = _sidechain_observed_state(transcript_path, ref.end_offset)
         if observed is not None:
             lineage["sidechain_observed_size"], lineage["sidechain_observed_mtime"] = observed
@@ -223,6 +255,61 @@ def _subagent_trajectory_ref(payload: dict[str, Any], transcript_path: Path | No
         return None
     turn_id = payload.get("turn_id") or payload.get("turnId")
     return jsonl_ref_for_turn("claude", transcript_path, turn_id, claude_key)
+
+
+def _settle_sidechain(transcript_path: Path) -> None:
+    """Block (bounded) for the subagent's final deliverable to flush (F12).
+
+    SubagentStop fires when the subagent finishes, but Claude flushes the closing
+    assistant record to the sidechain file moments later. We poll until the file
+    looks complete — the last JSONL record is an assistant message with a
+    `stop_reason` (the deliverable) — or the timeout elapses. We do NOT bail on a
+    "stable size": while we await the delayed flush the file is stable precisely
+    BECAUSE the deliverable hasn't landed yet, so a stable-size bail would give up
+    exactly when we must keep waiting. Best-effort: a missing file returns at once.
+    """
+    if _settle_timeout_s() <= 0:
+        return
+    deadline = time.monotonic() + _settle_timeout_s()
+    poll = _settle_poll_s()
+    while True:
+        if _sidechain_tail_is_complete(transcript_path):
+            return
+        if not transcript_path.exists():
+            return
+        if time.monotonic() >= deadline:
+            return
+        time.sleep(poll)
+
+
+def _sidechain_tail_is_complete(transcript_path: Path) -> bool:
+    """True when the sidechain's last record is a finished assistant deliverable.
+
+    A complete subagent transcript ends with an assistant message carrying a
+    `stop_reason` (e.g. `end_turn`). Reads only the final non-blank line.
+    """
+    import json
+
+    try:
+        data = transcript_path.read_bytes()
+    except OSError:
+        return False
+    if not data.endswith(b"\n"):
+        return False  # mid-flush write
+    for line in reversed(data.splitlines()):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return False
+        if not isinstance(record, dict):
+            return False
+        if record.get("type") != "assistant":
+            return False
+        message = record.get("message")
+        return isinstance(message, dict) and message.get("stop_reason") is not None
+    return False
 
 
 def _stem(path: Path | None) -> str:

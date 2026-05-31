@@ -298,3 +298,74 @@ def test_reanchor_does_not_absorb_a_new_turn_tail(tmp_path, monkeypatch):
 
     CheckpointCoordinator(session_id="sy", cwd=cwd).on_session_start()
     assert c.store.read_manifest(0).trajectory_ref.end_offset == captured
+
+
+def test_reanchor_last_turn_to_eof_runs_on_read_for_terminal_session(tmp_path, monkeypatch):
+    """F13: a terminal/forked session never restarts under its own id, so its last
+    stored turn trails EOF for non-resume consumers (show/diff/rewind). The
+    module-level reanchor lets a read-path consumer trigger the same lazy fix."""
+    from checkpoint_plugin.coordinator import reanchor_last_turn_to_eof
+
+    home = tmp_path / "plugin"
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(home))
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(
+        json.dumps({"type": "user", "promptId": "p0", "uuid": "u0", "message": {"role": "user", "content": "hi"}}) + "\n"
+        + json.dumps({"type": "assistant", "uuid": "a0", "promptId": "p0", "message": {"role": "assistant", "content": "x"}}) + "\n",
+        encoding="utf-8",
+    )
+    c = CheckpointCoordinator(session_id="terminal", cwd=cwd)
+    c.on_session_start()
+    captured = transcript.stat().st_size
+    c.on_turn_end(TurnRecord(user_message="hi"), TrajectoryReference("claude", str(transcript), 0, captured, 2))
+
+    # Provider flushes a trailing same-turn record; the session never restarts.
+    with transcript.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"type": "system", "subtype": "stop_hook_summary", "promptId": "p0"}) + "\n")
+    grown = transcript.stat().st_size
+
+    # A read-path consumer reanchors on demand.
+    changed = reanchor_last_turn_to_eof(c.store)
+    assert changed is True
+    assert c.store.read_manifest(0).trajectory_ref.end_offset == grown
+    # Idempotent: a second call is a no-op once the manifest already reaches EOF.
+    assert reanchor_last_turn_to_eof(c.store) is False
+
+
+def test_reanchor_respects_session_boundary_for_subagent_slice(tmp_path, monkeypatch):
+    """A subagent slice (boundary_mode=session_boundary) spans many turns, so its
+    trailing `task_complete` carries the LAST turn's id. reanchor must still
+    absorb it — the per_turn_key guard would reject it because the key differs
+    from the slice's first turn, leaving the stored manifest short of EOF."""
+    from checkpoint_plugin.coordinator import reanchor_last_turn_to_eof
+
+    home = tmp_path / "plugin"
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(home))
+    transcript = tmp_path / "rollout.jsonl"
+    # Multi-turn subagent body (turns t1, t2) — distinct keys within one slice.
+    transcript.write_text(
+        json.dumps({"type": "response_item", "turn_id": "t1", "payload": {"type": "message"}}) + "\n"
+        + json.dumps({"type": "response_item", "turn_id": "t2", "payload": {"type": "message"}}) + "\n",
+        encoding="utf-8",
+    )
+    c = CheckpointCoordinator(session_id="sub", cwd=cwd)
+    c.on_session_start()
+    captured = transcript.stat().st_size
+    c.on_turn_end(
+        TurnRecord(user_message="sub work"),
+        TrajectoryReference("codex", str(transcript), 0, captured, 2, boundary_mode="session_boundary"),
+    )
+
+    # Codex flushes the turn-closing record bearing the LAST turn's id (t2).
+    with transcript.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"type": "event_msg", "payload": {"type": "task_complete"}, "turn_id": "t2"}) + "\n")
+    grown = transcript.stat().st_size
+
+    assert reanchor_last_turn_to_eof(c.store) is True
+    assert c.store.read_manifest(0).trajectory_ref.end_offset == grown
+    # boundary_mode survives the manifest rewrite.
+    assert c.store.read_manifest(0).trajectory_ref.boundary_mode == "session_boundary"

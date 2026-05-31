@@ -231,8 +231,8 @@ def test_claude_subagent_inherits_parent_model(tmp_path, monkeypatch):
 
 
 def test_claude_subagent_without_sidechain_file_does_not_slice_parent(tmp_path, monkeypatch):
-    """F4: when no dedicated subagents/agent-*.jsonl exists, the subagent
-    checkpoint must record lineage but NOT a slice of the parent main thread."""
+    """P11-ZOMBIE-1: when no dedicated subagents/agent-*.jsonl exists, the subagent
+    checkpoint must record lineage metadata only — no manifest, no fs/env blobs."""
     plugin_home = tmp_path / "plugin"
     cwd = tmp_path / "work"
     cwd.mkdir()
@@ -256,17 +256,18 @@ def test_claude_subagent_without_sidechain_file_does_not_slice_parent(tmp_path, 
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
     assert claude_code_hook.main(["subagent_end"]) == 0
 
-    sub_store = CheckpointStore(plugin_home / "sessions" / "parent-session--subagent-ghost")
-    manifest = sub_store.list_manifests()[0]
-    ref = manifest.trajectory_ref
-    # Lineage is still recorded, but the trajectory ref is empty (no parent slice).
-    assert ref is not None
-    assert ref.transcript_path == ""
-    assert ref.record_count == 0
-    metadata = json.loads((sub_store.session_dir / "metadata.json").read_text(encoding="utf-8"))
+    sub_session_dir = plugin_home / "sessions" / "parent-session--subagent-ghost"
+    # Metadata is written with lineage (session_start was called)
+    metadata = json.loads((sub_session_dir / "metadata.json").read_text(encoding="utf-8"))
     assert metadata["lineage"]["parent_session_id"] == "parent-session"
     # P6-9: surface WHY the slice is empty so a reader doesn't mistake it for a bug.
     assert metadata["lineage"]["capture_status"] == "no_sidechain_file"
+    # P11-ZOMBIE-1: no manifest is written — no expensive fs/env snapshot.
+    sub_store = CheckpointStore(sub_session_dir)
+    assert sub_store.list_manifests() == []
+    # No blob files should be written (no fs/env collection ran).
+    blob_files = list((sub_session_dir / "blobs").rglob("*")) if (sub_session_dir / "blobs").exists() else []
+    assert all(f.is_dir() for f in blob_files), "Expected no blob files for zombie subagent"
 
 
 def test_claude_model_captured_from_session_start(tmp_path, monkeypatch):
@@ -338,3 +339,61 @@ def test_claude_seeds_payload_fields(tmp_path, monkeypatch):
     assert env.effort == "high"
     assert env.agent_type == "Explore"
 
+
+
+def test_claude_subagent_settle_captures_late_flushed_deliverable(tmp_path, monkeypatch):
+    """F12: SubagentStop can fire before the subagent's final assistant deliverable
+    is flushed. The hook now settles (polls until the tail is a complete assistant
+    record) before slicing, so the deliverable is captured rather than truncated."""
+    import threading
+    import time
+
+    plugin_home = tmp_path / "plugin"
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    parent_dir = tmp_path / "proj" / "parent-session"
+    sub_dir = parent_dir / "subagents"
+    sub_dir.mkdir(parents=True)
+    parent_transcript = parent_dir.with_suffix(".jsonl")
+    parent_transcript.write_text(
+        json.dumps({"type": "user", "promptId": "p-1", "message": {"role": "user", "content": "parent"}}) + "\n",
+        encoding="utf-8",
+    )
+    sub_transcript = sub_dir / "agent-late.jsonl"
+    # At SubagentStop time the deliverable (assistant/end_turn) is NOT yet present:
+    # the file ends with the user prompt + attachments, no closing assistant record.
+    sub_transcript.write_text(
+        json.dumps({"type": "user", "promptId": "sp-1", "isSidechain": True, "agentId": "late", "message": {"role": "user", "content": "do research"}}) + "\n",
+        encoding="utf-8",
+    )
+
+    def _flush_deliverable_late():
+        time.sleep(0.15)
+        with sub_transcript.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"type": "assistant", "isSidechain": True, "agentId": "late", "message": {"role": "assistant", "stop_reason": "end_turn", "content": [{"type": "text", "text": "FINDINGS"}]}}) + "\n")
+
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
+    monkeypatch.setenv("CLAUDE_SESSION_ID", "parent-session")
+    monkeypatch.setenv("CHECKPOINT_SIDECHAIN_SETTLE_TIMEOUT", "2.0")
+    monkeypatch.setenv("CHECKPOINT_SIDECHAIN_SETTLE_POLL", "0.02")
+    payload = {
+        "hook_event_name": "SubagentStop",
+        "session_id": "parent-session",
+        "cwd": str(cwd),
+        "agent_id": "late",
+        "agent_type": "general-purpose",
+        "transcript_path": str(parent_transcript),
+    }
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
+    t = threading.Thread(target=_flush_deliverable_late)
+    t.start()
+    try:
+        assert claude_code_hook.main(["subagent_end"]) == 0
+    finally:
+        t.join()
+
+    sub_store = CheckpointStore(plugin_home / "sessions" / "parent-session--subagent-late")
+    ref = sub_store.list_manifests()[0].trajectory_ref
+    captured = sub_store.read_trajectory_slice(ref)
+    assert b"FINDINGS" in captured, "late-flushed deliverable must be captured after settle"
+    assert ref.end_offset == sub_transcript.stat().st_size

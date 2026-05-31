@@ -19,7 +19,7 @@ from .env.restorer import restore_environment
 from .fs.ignore import IgnoreMatcher
 from .fs.restorer import diff_filesystems, render_fs_diff, restore_cwd
 from .fs.snapshot import filesystem_from_blob, snapshot_cwd
-from .integrations._trajectory_slicer import claude_key, codex_key, jsonl_count_records
+from .integrations._trajectory_slicer import claude_key, codex_key, jsonl_count_records, recover_trailing_tail
 from .paths import backups_dir, ensure_home, load_config, session_dir
 from .store import CheckpointStore
 from .types import CheckpointManifest, ResumePlan, ResumeReport, TrajectoryReference
@@ -112,7 +112,7 @@ class ResumeOrchestrator:
             backup_root / "filesystem",
             ignore,
         )
-        new_session_id = _new_resume_session_id()
+        new_session_id = _new_resume_session_id(provider.name)
         trajectory = _trajectory_prefix(original_store, plan)
         source_meta = _codex_source_session_meta(plan) if provider.name == "codex" else None
         # P6-14: an inherited fork prefix is present when the earliest captured turn
@@ -280,8 +280,33 @@ def _manifest_references_agent(manifest: CheckpointManifest, agent_id: str) -> b
     return agent_id.encode("utf-8") in data
 
 
-def _new_resume_session_id() -> str:
+def _new_resume_session_id(provider_name: str | None = None) -> str:
+    # B1: native codex session ids are uuidv7 (time-ordered, version nibble 7), so the
+    # rollout filename, `id`, and session_index entry sort chronologically in the
+    # picker. uuid4 (version nibble 4) sorts randomly and is a byte-distinguishable
+    # fingerprint. Native CLAUDE ids are uuid4 (verified), so only codex needs v7.
+    if provider_name == "codex":
+        return _uuid7()
     return str(uuid.uuid4())
+
+
+def _uuid7() -> str:
+    """Generate a UUID version 7 (RFC 9562): 48-bit unix-ms timestamp + random.
+
+    Python's stdlib gained `uuid.uuid7()` in 3.14; this back-fills it so resumed
+    codex ids match native codex's time-ordered format on older interpreters.
+    """
+    if hasattr(uuid, "uuid7"):
+        return str(uuid.uuid7())  # type: ignore[attr-defined]
+    unix_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    rand_a = int.from_bytes(os.urandom(2), "big") & 0x0FFF
+    rand_b = int.from_bytes(os.urandom(8), "big") & ((1 << 62) - 1)
+    value = (unix_ms & ((1 << 48) - 1)) << 80
+    value |= 0x7 << 76  # version 7
+    value |= rand_a << 64
+    value |= 0b10 << 62  # RFC 4122 variant
+    value |= rand_b
+    return str(uuid.UUID(int=value))
 
 
 def _coerce_resume_options(value: bool | ResumeOptions) -> ResumeOptions:
@@ -609,68 +634,13 @@ def _read_trajectory_slice_for_manifest(
 def _recover_trailing_tail(ref: TrajectoryReference) -> bytes:
     """Recover bytes flushed after the hook captured `end_offset`.
 
-    Guarded so we don't pull in records from a new turn or a mid-flush write:
-    - the candidate tail must end with a newline (no truncated JSON line);
-    - no record in the tail may carry a per-turn key distinct from `ref`'s
-      anchor key (no new turn started).
+    Delegates to the shared `recover_trailing_tail`, whose guard is selected by
+    `ref.boundary_mode`: per-turn-key for single-turn slices, session-boundary
+    for multi-turn subagent slices (whose closing record carries the LAST turn's
+    key, not the first). Coordinator's `_trailing_same_turn_tail` shares the same
+    primitive so the stored manifest and a resume always agree.
     """
-    if not ref.transcript_path:
-        return b""
-    path = Path(ref.transcript_path).expanduser()
-    try:
-        size = path.stat().st_size
-    except OSError:
-        return b""
-    if size <= ref.end_offset:
-        return b""
-    try:
-        with path.open("rb") as handle:
-            handle.seek(ref.end_offset)
-            tail = handle.read(size - ref.end_offset)
-    except OSError:
-        return b""
-    if not tail.endswith(b"\n"):
-        return b""
-    extractor = claude_key if ref.provider == "claude" else codex_key if ref.provider == "codex" else None
-    if extractor is None:
-        return tail
-    anchor = _anchor_key(ref, extractor)
-    for line in tail.splitlines():
-        if not line.strip():
-            continue
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(record, dict):
-            continue
-        key = extractor(record)
-        if key is not None and key != anchor:
-            return b""
-    return tail
-
-
-def _anchor_key(ref: TrajectoryReference, extractor: Callable[[dict[str, object]], object]) -> object:
-    path = Path(ref.transcript_path).expanduser()
-    try:
-        with path.open("rb") as handle:
-            handle.seek(ref.start_offset)
-            data = handle.read(ref.end_offset - ref.start_offset)
-    except OSError:
-        return None
-    for line in data.splitlines():
-        if not line.strip():
-            continue
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(record, dict):
-            continue
-        key = extractor(record)
-        if key is not None:
-            return key
-    return None
+    return recover_trailing_tail(ref)
 
 
 def _write_resumed_metadata(
@@ -724,6 +694,7 @@ def _resumed_manifest(
             start_offset=start_offset,
             end_offset=end_offset,
             record_count=record_count,
+            boundary_mode=trajectory_ref.boundary_mode,
         )
         return replace(
             manifest,
@@ -847,7 +818,7 @@ def _append_codex_session_index(
     entry (rewriting the whole file atomically) so it shows up.
     """
     index_path = codex_home / "session_index.jsonl"
-    entry = {"id": new_session_id, "thread_name": title, "updated_at": _zulu_now()}
+    entry = {"id": new_session_id, "thread_name": title, "updated_at": _zulu_now_us()}
     try:
         existing = index_path.read_bytes() if index_path.exists() else b""
     except OSError:
@@ -992,6 +963,17 @@ def _rewrite_codex_trajectory(
             record["id"] = new_session_id
         if "session_id" in record:
             record["session_id"] = new_session_id
+        # N5: native codex forks re-stamp every inlined body record's RECORD-level
+        # `timestamp` to the fork moment (verified: native bf0/be9/bea each have 0/N
+        # body records preceding the head meta; the whole inlined parent history is
+        # bumped to the fork second, while genuine post-fork turns keep later times).
+        # A plugin resume reconstructs a file that is ENTIRELY pre-resume history (no
+        # live post-resume turns exist yet), so every body record is "inherited" and
+        # must be bumped — otherwise captured turns keep their original (earlier)
+        # times and sort BEFORE the head meta (temporal inversion). The payload-
+        # internal timestamps/turn_ids are left untouched (native preserves them).
+        if "timestamp" in record:
+            record["timestamp"] = now
         lines.append(_json_line(record))
     return b"".join(lines)
 
@@ -1034,8 +1016,16 @@ def _rewrite_codex_record_cwd(record: dict[str, object], source_cwd: str, target
 
 def _rewrite_cwd_in_value(value: object, source_cwd: str, target_cwd: str) -> object:
     if isinstance(value, dict):
+        # N4: rewrite KEYS as well as values. Codex `patch_apply_begin/end.changes`
+        # is keyed by absolute file path, so the source cwd survives as a dict key
+        # (a residual F5 leak) unless the key itself is rewritten. Rebuild the dict
+        # so key order is preserved while both keys and values are path-rewritten.
+        rebuilt: dict[object, object] = {}
         for key, item in list(value.items()):
-            value[key] = _rewrite_cwd_in_value(item, source_cwd, target_cwd)
+            new_key = _rewrite_cwd_in_string(key, source_cwd, target_cwd) if isinstance(key, str) else key
+            rebuilt[new_key] = _rewrite_cwd_in_value(item, source_cwd, target_cwd)
+        value.clear()
+        value.update(rebuilt)
         return value
     if isinstance(value, list):
         for i, item in enumerate(value):
@@ -1090,20 +1080,64 @@ def _codex_head_meta(
     original_session_id: str | None,
     now: str,
 ) -> dict[str, object]:
-    """A fresh codex head session_meta forked from the source (F2/F14).
+    """A fresh codex head session_meta forked from the source (F2/F14/N2).
 
-    Native head metas place `forked_from_id` immediately after `id` (idx1) and carry
-    their own creation timestamp as payload `timestamp`; the inlined source chain is
-    kept separately by the caller.
+    Native head metas place `forked_from_id` immediately after `id` (idx1), carry
+    their own creation timestamp as payload `timestamp`, and serialize the remaining
+    fields in a FIXED interleave (verified byte-for-byte against native bf0):
+    `id, forked_from_id, timestamp, cwd, originator, cli_version, source,
+    thread_source, model_provider, base_instructions, dynamic_tools`. The old
+    two-phase fill (preserved fields then provenance defaults) emitted
+    `cwd, cli_version, model_provider, …, originator, source, thread_source` — a
+    byte-distinguishable order drift. Build the payload directly in native order.
     """
     payload: dict[str, object] = {"id": new_session_id}
     if original_session_id:
         payload["forked_from_id"] = original_session_id  # F14: right after id
     payload["timestamp"] = now
     payload["cwd"] = str(cwd)
-    _apply_preserved_meta_fields(payload, source_meta)
-    _mark_codex_session_visible(payload)
+    _fill_codex_meta_provenance_in_native_order(payload, source_meta)
     return {"timestamp": now, "type": "session_meta", "payload": payload}
+
+
+# N2: native codex meta interleave for the provenance fields that follow `cwd`.
+_CODEX_META_NATIVE_ORDER = (
+    "originator",
+    "cli_version",
+    "source",
+    "thread_source",
+    "model_provider",
+    "base_instructions",
+    "dynamic_tools",
+)
+_CODEX_META_PROVENANCE_DEFAULTS = {
+    "originator": "Codex Desktop",
+    "source": "vscode",
+    "thread_source": "user",
+}
+
+
+def _fill_codex_meta_provenance_in_native_order(
+    payload: dict[str, object], source_meta: dict[str, object] | None
+) -> None:
+    """Append provenance fields after `cwd` in native key order (N2).
+
+    Each field is taken from the source meta when present, else the
+    Desktop/vscode/user default for the three provenance keys. Any other preserved
+    field (e.g. `git`, `agent_nickname`) the source carried but native's canonical
+    order doesn't enumerate is appended afterwards so no source data is dropped.
+    """
+    for key in _CODEX_META_NATIVE_ORDER:
+        if key in payload:
+            continue
+        if source_meta and key in source_meta:
+            payload[key] = source_meta[key]
+        elif key in _CODEX_META_PROVENANCE_DEFAULTS:
+            payload[key] = _CODEX_META_PROVENANCE_DEFAULTS[key]
+    # Carry any remaining preserved fields the canonical order doesn't list.
+    for key in _PRESERVED_CODEX_META_FIELDS:
+        if key not in payload and source_meta and key in source_meta:
+            payload[key] = source_meta[key]
 
 
 def _codex_session_meta(
@@ -1308,11 +1342,30 @@ def _rewrite_claude_trajectory(
                 nested = snapshot.get("messageId")
                 if isinstance(nested, str) and nested in uuid_map:
                     snapshot["messageId"] = uuid_map[nested]
+        # N1: a native claude resume LINEARIZES the inherited region into a single
+        # parent spine — every uuid-bearing record's parentUuid points at the
+        # immediately-PRECEDING emitted uuid record (verified byte-for-byte against
+        # native 62a9ea3c: 0/42 records deviate from "parent == previous uuid record
+        # of any content type"). The source can branch (parallel subagents, an
+        # edit-and-resend); a real --resume follows the active leaf's ancestry and
+        # re-tiles it into one chain. The identity uuid_map preserves every source
+        # parentUuid verbatim, so on the fork path we MUST re-point to `last_uuid`
+        # (the previous emitted record) instead of keeping the mapped source parent —
+        # otherwise the resumed file keeps the branch (2 leaves) where native has one.
+        # The legacy (non-fork, remap) path keeps following the remapped source DAG.
         if isinstance(record.get("parentUuid"), str):
-            record["parentUuid"] = uuid_map.get(str(record["parentUuid"]), last_uuid)
+            if is_fork_shaped:
+                record["parentUuid"] = last_uuid if last_uuid is not None else str(record["parentUuid"])
+            else:
+                record["parentUuid"] = uuid_map.get(str(record["parentUuid"]), last_uuid)
         elif "parentUuid" in record and record.get("type") not in {"summary", "permission-mode"}:
             record["parentUuid"] = last_uuid
-        if isinstance(record.get("uuid"), str) and record.get("type") in {"user", "assistant"}:
+        # Advance the spine pointer. Native chains through ALL content record types
+        # (user/assistant/system/attachment), so re-pointing only across user/assistant
+        # would mis-parent an interior system/attachment record (verified: native idx8
+        # `system` parents the previous `system`, not the last assistant). Exclude only
+        # the summary/permission-mode meta records, preserving the summary-skip rule.
+        if isinstance(record.get("uuid"), str) and record.get("type") not in {"summary", "permission-mode"}:
             last_uuid = str(record["uuid"])
         # F1: stamp forkedFrom on every inherited record, pointing messageUuid at the
         # record's OWN (preserved) uuid so it resolves INTO the parent session — the
@@ -1451,13 +1504,29 @@ def _now() -> str:
 
 
 def _zulu_now() -> str:
-    """RFC3339 UTC timestamp with a `Z` suffix (P6-4).
+    """RFC3339 UTC timestamp with a `Z` suffix and millisecond precision (P6-4/N3).
 
     Codex writes `...Z` in both `session_meta.timestamp` and the
     `session_index.jsonl` `updated_at` field; `_now()`'s `+00:00` form would be a
     representation drift from native entries the picker reads.
+
+    N3: native codex timestamps carry 3-digit MILLISECONDS (`…653Z`), but
+    `datetime.isoformat()` emits 6-digit microseconds (`…006924Z`) — a 100%-vs-0%
+    fingerprint distinguishing resumed records from native ones. Truncate to ms.
     """
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    now = datetime.now(timezone.utc)
+    return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
+
+
+def _zulu_now_us() -> str:
+    """RFC3339 UTC timestamp with 6-digit microsecond precision (CFORK-IDX-1).
+
+    Native codex `session_index.jsonl` entries use microsecond precision
+    (e.g. `.505647Z`). The rollout-level `_zulu_now()` correctly truncates to
+    3-digit ms for record timestamps, but the index must match native precision.
+    """
+    now = datetime.now(timezone.utc)
+    return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond:06d}Z"
 
 
 def _resume_command(provider_name: str, new_session_id: str) -> str | None:
@@ -1502,16 +1571,21 @@ def _carry_claude_subagents(
     `sessionId` is rewritten to the new parent id (H3) — hardlinking verbatim
     left the content pointing at the OLD parent, so Claude couldn't associate
     the sidechain with the resumed session.
+
+    P11-SUBAGENT-CARRY-1: the destination project_dir must be computed from the
+    TARGET cwd (not inherited from the source), so that `--target` resumes place
+    subagents where Claude will look for them.
     """
     projects_root = provider_home / "projects"
     if not projects_root.exists() or not projects_root.is_dir():
         return
+    dst_project_dir = projects_root / _claude_project_dir_name(cwd)
     for project_dir in projects_root.iterdir():
         if not project_dir.is_dir():
             continue
         src = project_dir / old_session_id / "subagents"
         if src.exists() and src.is_dir():
-            _carry_subagent_tree(src, project_dir / new_session_id / "subagents", new_session_id, cwd)
+            _carry_subagent_tree(src, dst_project_dir / new_session_id / "subagents", new_session_id, cwd)
 
 
 def _carry_subagent_tree(src: Path, dst: Path, new_session_id: str, cwd: Path) -> None:

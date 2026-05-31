@@ -107,6 +107,11 @@ def jsonl_after_leading_metas(
     Consistent with resume: `_inherited_fork_prefix` reads `[0:start_offset]`, so
     the inherited metas are still reproduced (then collapsed to one by H1). Zero
     leading metas -> start=0 (whole file), a safe fallback.
+
+    The slice spans MANY turns, so its closing record (codex `task_complete`)
+    carries the LAST turn's key, not the first. Tag it `session_boundary` so
+    read-time tail recovery accepts that trailing record instead of rejecting it
+    as a "different turn" (the bug a per-turn-key guard hits on multi-turn slices).
     """
     try:
         data = path.expanduser().read_bytes()
@@ -121,7 +126,113 @@ def jsonl_after_leading_metas(
             start = line_end
             continue
         break
-    return _build_ref(provider, path, data, start, len(data))
+    return _build_ref(provider, path, data, start, len(data), boundary_mode="session_boundary")
+
+
+def recover_trailing_tail(ref: TrajectoryReference) -> bytes:
+    """Bytes flushed after `ref.end_offset` that still belong to this slice.
+
+    A provider can flush a turn-closing record (codex `task_complete`, claude's
+    final assistant deliverable) moments after the Stop/SubagentStop hook reads
+    the file, leaving the captured slice short of EOF. This recovers that tail at
+    read time so resume and `show`/`diff` see the complete slice. All-or-nothing:
+    the candidate tail must end on a newline (no truncated JSON line); if any
+    record violates the boundary guard we return b"" rather than a partial tail.
+
+    The guard depends on `ref.boundary_mode`:
+      - "per_turn_key": single-turn slices. Reject when a tail record carries a
+        per-turn key distinct from the slice's anchor key (a new turn started).
+      - "session_boundary": multi-turn subagent slices. The closing record
+        legitimately carries the LAST turn's key, so a per-turn-key guard would
+        wrongly reject it; instead reject only on a `session_meta` (a new
+        session, which never appends to a per-agent subagent rollout).
+    """
+    if not ref.transcript_path:
+        return b""
+    path = Path(ref.transcript_path).expanduser()
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return b""
+    if size <= ref.end_offset:
+        return b""
+    try:
+        with path.open("rb") as handle:
+            handle.seek(ref.end_offset)
+            tail = handle.read(size - ref.end_offset)
+    except OSError:
+        return b""
+    if not tail.endswith(b"\n"):
+        return b""
+    if ref.boundary_mode == "session_boundary":
+        return tail if _tail_within_session(tail) else b""
+    extractor = _key_extractor_for(ref.provider)
+    if extractor is None:
+        return tail
+    anchor = _anchor_key(ref, extractor)
+    for line in tail.splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        key = extractor(record)
+        if key is not None and key != anchor:
+            return b""
+    return tail
+
+
+def _tail_within_session(tail: bytes) -> bool:
+    """True unless the tail opens a NEW session (a `session_meta` record).
+
+    Subagent rollouts are per-agent files that are never reused, so in practice
+    the tail is just the last turn's closing records. A `session_meta` would mean
+    a different session's bytes — refuse the whole tail then.
+    """
+    for line in tail.splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, dict) and record.get("type") == "session_meta":
+            return False
+    return True
+
+
+def _key_extractor_for(provider: str) -> KeyExtractor | None:
+    if provider == "claude":
+        return claude_key
+    if provider == "codex":
+        return codex_key
+    return None
+
+
+def _anchor_key(ref: TrajectoryReference, extractor: KeyExtractor) -> Any:
+    """First per-turn key inside the slice — the key the tail must match."""
+    path = Path(ref.transcript_path).expanduser()
+    try:
+        with path.open("rb") as handle:
+            handle.seek(ref.start_offset)
+            data = handle.read(ref.end_offset - ref.start_offset)
+    except OSError:
+        return None
+    for line in data.splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, dict):
+            key = extractor(record)
+            if key is not None:
+                return key
+    return None
 
 
 def _parse_jsonl_lines(data: bytes) -> list[tuple[int, int, Any]]:
@@ -139,13 +250,22 @@ def _parse_jsonl_lines(data: bytes) -> list[tuple[int, int, Any]]:
     return lines
 
 
-def _build_ref(provider: str, path: Path, data: bytes, start: int, end: int) -> TrajectoryReference:
+def _build_ref(
+    provider: str,
+    path: Path,
+    data: bytes,
+    start: int,
+    end: int,
+    *,
+    boundary_mode: str = "per_turn_key",
+) -> TrajectoryReference:
     return TrajectoryReference(
         provider=provider,
         transcript_path=str(path.expanduser().resolve()),
         start_offset=start,
         end_offset=end,
         record_count=jsonl_count_records(data[start:end]),
+        boundary_mode=boundary_mode,
     )
 
 

@@ -815,6 +815,46 @@ def test_resume_empty_trajectory_ref_does_not_crash(tmp_path, monkeypatch, capsy
     assert "trajectory unavailable" in capsys.readouterr().err
 
 
+def test_resume_subagent_session_recovers_session_boundary_tail(tmp_path, monkeypatch):
+    """A subagent slice (session_boundary) whose stored end_offset trails EOF — a
+    late `task_complete` carrying the LAST turn's id — is recovered at read time.
+    The per_turn_key guard would drop it (key != the slice's first turn), so the
+    resume prefix would be short a record without session_boundary mode."""
+    from checkpoint_plugin.resume import _read_trajectory_slice_for_manifest
+
+    plugin_home = tmp_path / "plugin"
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    _isolate_provider_env(monkeypatch)
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
+
+    rollout = tmp_path / "rollout.jsonl"
+    body = (
+        json.dumps({"type": "response_item", "turn_id": "t1", "payload": {"type": "message"}}) + "\n"
+        + json.dumps({"type": "response_item", "turn_id": "t2", "payload": {"type": "message"}}) + "\n"
+    )
+    rollout.write_text(body, encoding="utf-8")
+    captured = rollout.stat().st_size
+
+    coordinator = CheckpointCoordinator(session_id="parent--subagent-x", cwd=cwd)
+    coordinator.on_session_start(source="subagent", lineage={"parent_session_id": "parent", "agent_id": "x"})
+    coordinator.on_turn_end(
+        TurnRecord(user_message="sub work"),
+        TrajectoryReference("codex", str(rollout), 0, captured, 2, boundary_mode="session_boundary"),
+    )
+
+    # The turn-closing record (LAST turn's id) flushes after capture.
+    with rollout.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"type": "event_msg", "payload": {"type": "task_complete"}, "turn_id": "t2"}) + "\n")
+
+    manifest = coordinator.store.read_manifest(0)
+    extended = _read_trajectory_slice_for_manifest(coordinator.store, manifest, extend_to_eof=True)
+    assert b"task_complete" in extended
+    # Without extend_to_eof the stored (short) slice is returned verbatim.
+    stored = _read_trajectory_slice_for_manifest(coordinator.store, manifest, extend_to_eof=False)
+    assert b"task_complete" not in stored
+
+
 def _settings_without_plugin_hooks() -> str:
     return json.dumps({"hooks": {}, "model": "sonnet"}, indent=2, sort_keys=True) + "\n"
 
@@ -2092,3 +2132,146 @@ def test_claude_resume_is_fork_shaped_even_from_startup():
     assert all(r["forkedFrom"]["sessionId"] == "SOURCE" for r in recs)
     assert {r["uuid"] for r in recs} == {"u1", "a1"}
     assert not any(r.get("type") == "permission-mode" for r in recs)
+
+
+def test_claude_fork_resume_linearizes_branched_inherited_region():
+    """N1: a native claude resume LINEARIZES the inherited DAG into a single parent
+    spine — every uuid-bearing record's parentUuid points at the immediately-
+    preceding emitted uuid record. A source can branch (parallel subagents / an
+    edit-and-resend); preserving the source parentUuid under the identity uuid_map
+    left two leaves where native has one. Verified against native oracle 62a9ea3c."""
+    from checkpoint_plugin.resume import _rewrite_claude_trajectory
+
+    # Source with a BRANCH: both `a2` (idx3) and `u2` (idx4) point at `a1` (idx2).
+    traj = (
+        json.dumps({"type": "user", "uuid": "u1", "parentUuid": None, "promptId": "P1", "message": {"role": "user", "content": "one"}}) + "\n"
+        + json.dumps({"type": "assistant", "uuid": "a1", "parentUuid": "u1", "message": {"role": "assistant", "content": []}}) + "\n"
+        + json.dumps({"type": "assistant", "uuid": "a2", "parentUuid": "a1", "message": {"role": "assistant", "content": []}}) + "\n"
+        + json.dumps({"type": "user", "uuid": "u2", "parentUuid": "a1", "promptId": "P2", "message": {"role": "user", "content": "two"}}) + "\n"
+    ).encode("utf-8")
+    out = _rewrite_claude_trajectory(traj, "NEW", Path("/new"), None, None, source_session_id="SRC")
+    recs = [json.loads(l) for l in out.splitlines()]
+    by_uuid = {r["uuid"]: r for r in recs}
+    # The branching record u2 is re-pointed to the PREVIOUS emitted record (a2),
+    # collapsing the branch into a single spine: u1 -> a1 -> a2 -> u2.
+    assert by_uuid["a1"]["parentUuid"] == "u1"
+    assert by_uuid["a2"]["parentUuid"] == "a1"
+    assert by_uuid["u2"]["parentUuid"] == "a2", "branch must linearize to previous record"
+    # Exactly one leaf (u2 is unreferenced; everything else is a parent).
+    referenced = {r.get("parentUuid") for r in recs if isinstance(r.get("parentUuid"), str)}
+    leaves = [u for u in by_uuid if u not in referenced]
+    assert leaves == ["u2"], f"expected single leaf, got {leaves}"
+
+
+def test_claude_linearization_chains_through_all_content_types():
+    """N1 detail: native chains parentUuid through EVERY content record (system,
+    attachment, user, assistant), not just user/assistant. A system record between
+    two assistants parents the previous record, not the last assistant."""
+    from checkpoint_plugin.resume import _rewrite_claude_trajectory
+
+    traj = (
+        json.dumps({"type": "user", "uuid": "u1", "parentUuid": None, "promptId": "P", "message": {"role": "user", "content": "hi"}}) + "\n"
+        + json.dumps({"type": "assistant", "uuid": "a1", "parentUuid": "u1", "message": {"role": "assistant", "content": []}}) + "\n"
+        + json.dumps({"type": "system", "uuid": "s1", "parentUuid": "a1", "content": "note"}) + "\n"
+        + json.dumps({"type": "assistant", "uuid": "a2", "parentUuid": "wrong-branch", "message": {"role": "assistant", "content": []}}) + "\n"
+    ).encode("utf-8")
+    out = _rewrite_claude_trajectory(traj, "NEW", Path("/new"), None, None, source_session_id="SRC")
+    by_uuid = {r["uuid"]: r for r in (json.loads(l) for l in out.splitlines())}
+    assert by_uuid["s1"]["parentUuid"] == "a1"
+    # a2 chains to the previous emitted record (the system record), NOT the last assistant.
+    assert by_uuid["a2"]["parentUuid"] == "s1"
+
+
+def test_codex_resume_id_is_uuidv7_but_claude_is_uuid4(tmp_path, monkeypatch):
+    """B1: native codex session ids are uuidv7 (time-ordered, version nibble 7);
+    native claude ids are uuid4 (version 4). Resume must match each provider."""
+    import uuid as _uuid
+    from checkpoint_plugin.resume import _new_resume_session_id
+
+    codex_id = _new_resume_session_id("codex")
+    claude_id = _new_resume_session_id("claude")
+    assert _uuid.UUID(codex_id).version == 7, "codex resume id must be uuidv7"
+    assert _uuid.UUID(claude_id).version == 4, "claude resume id must be uuid4"
+    # uuidv7 is time-ordered: a later-generated id sorts after an earlier one.
+    import time
+    first = _new_resume_session_id("codex")
+    time.sleep(0.002)
+    second = _new_resume_session_id("codex")
+    assert second > first, "uuidv7 ids must be monotonically sortable"
+
+
+def test_codex_head_meta_native_key_order():
+    """N2: the fresh head session_meta serializes provenance fields in native order
+    (id, forked_from_id, timestamp, cwd, originator, cli_version, source,
+    thread_source, model_provider, base_instructions, dynamic_tools), not the
+    two-phase preserved-then-defaults order. Verified against native bf0."""
+    from collections import OrderedDict
+    from checkpoint_plugin.resume import _rewrite_codex_trajectory
+
+    src_meta = {
+        "id": "old", "timestamp": "t", "cwd": "/old",
+        "originator": "Codex Desktop", "cli_version": "1.2.3", "source": "vscode",
+        "thread_source": "user", "model_provider": "prov",
+        "base_instructions": {"text": "x"}, "dynamic_tools": [],
+    }
+    traj = (json.dumps({"timestamp": "t", "type": "session_meta", "payload": src_meta}) + "\n").encode("utf-8")
+    out = _rewrite_codex_trajectory(traj, "NEW", Path("/new"), None, None, src_meta)
+    head = json.loads(out.splitlines()[0], object_pairs_hook=OrderedDict)
+    assert list(head["payload"].keys()) == [
+        "id", "forked_from_id", "timestamp", "cwd", "originator", "cli_version",
+        "source", "thread_source", "model_provider", "base_instructions", "dynamic_tools",
+    ]
+
+
+def test_codex_resume_timestamps_are_millisecond_precision():
+    """N3: native codex record/payload timestamps are 3-digit milliseconds (…653Z),
+    not 6-digit microseconds. The synthetic head meta's record-ts must be ms-Z."""
+    import re
+    from checkpoint_plugin.resume import _rewrite_codex_trajectory
+
+    traj = (json.dumps({"timestamp": "t", "type": "session_meta", "payload": {"id": "old", "cwd": "/old"}}) + "\n").encode("utf-8")
+    out = _rewrite_codex_trajectory(traj, "NEW", Path("/new"), None, None, None)
+    head = json.loads(out.splitlines()[0])
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z", head["timestamp"]), head["timestamp"]
+
+
+def test_codex_resume_restamps_body_record_ts_no_temporal_inversion():
+    """N5: native codex forks re-stamp every inlined body record's record-level
+    timestamp to the fork moment (0 body records precede the head meta), while
+    preserving payload-internal timestamps. Plugin must do the same so a resumed
+    file has no record sorting before its head meta."""
+    from checkpoint_plugin.resume import _rewrite_codex_trajectory
+
+    traj = (
+        json.dumps({"timestamp": "2020-01-01T00:00:00.000Z", "type": "session_meta", "payload": {"id": "old", "timestamp": "2020-01-01T00:00:00.000Z", "cwd": "/old"}}) + "\n"
+        + json.dumps({"timestamp": "2020-01-01T00:00:01.000Z", "type": "response_item", "payload": {"type": "message", "turn_id": "t-1"}}) + "\n"
+        + json.dumps({"timestamp": "2020-01-01T00:00:02.000Z", "type": "turn_context", "payload": {"turn_id": "t-1", "model": "m"}}) + "\n"
+    ).encode("utf-8")
+    out = _rewrite_codex_trajectory(traj, "NEW", Path("/new"), None, None, None)
+    recs = [json.loads(l) for l in out.splitlines()]
+    head_ts = recs[0]["timestamp"]
+    body = [r for r in recs if r.get("type") != "session_meta"]
+    # No body record carries a record-ts earlier than the head meta.
+    assert all(r["timestamp"] >= head_ts for r in body), "temporal inversion: body precedes head"
+    # All body record-ts equal the resume moment (== head record-ts).
+    assert all(r["timestamp"] == head_ts for r in body)
+    # Payload-internal timestamps untouched on inlined ancestor metas.
+    inlined = [r for r in recs if r.get("type") == "session_meta"][1:]
+    assert all(m["payload"].get("timestamp") == "2020-01-01T00:00:00.000Z" for m in inlined)
+
+
+def test_codex_resume_rewrites_cwd_in_dict_keys():
+    """N4: codex patch_apply changes are keyed by absolute file path, so the source
+    cwd survives as a dict KEY unless keys are rewritten too (a residual F5 leak)."""
+    from checkpoint_plugin.resume import _rewrite_codex_trajectory
+
+    src_meta = {"id": "old", "cwd": "/src/work"}
+    traj = (
+        json.dumps({"timestamp": "t", "type": "session_meta", "payload": src_meta}) + "\n"
+        + json.dumps({"timestamp": "t", "type": "event_msg", "payload": {"type": "patch_apply_end", "changes": {"/src/work/README.md": {"add": 1}}}}) + "\n"
+    ).encode("utf-8")
+    out = _rewrite_codex_trajectory(traj, "NEW", Path("/dst/copy"), None, None, src_meta)
+    assert b"/src/work" not in out, "source cwd must not survive (incl. dict keys)"
+    # The path key was rewritten to the target cwd.
+    changes_rec = [json.loads(l) for l in out.splitlines() if json.loads(l).get("payload", {}).get("type") == "patch_apply_end"][0]
+    assert "/dst/copy/README.md" in changes_rec["payload"]["changes"]

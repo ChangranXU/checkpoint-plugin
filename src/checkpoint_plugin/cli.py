@@ -10,7 +10,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from .coordinator import CheckpointCoordinator, TurnRecord
+from .coordinator import CheckpointCoordinator, TurnRecord, reanchor_last_turn_to_eof
 from .env.collector import environment_from_blob
 from .fs.snapshot import filesystem_from_blob
 from .integrations.hook_installer import install_hooks, uninstall_hooks
@@ -93,6 +93,10 @@ def _dispatch(args: argparse.Namespace) -> int:
     if args.command == "show":
         return _cmd_show(args.session, args.turn)
     if args.command == "diff":
+        # F13: a terminal/forked session never restarts under its own id, so its
+        # last stored turn may trail EOF. Reanchor on read so the diff reflects the
+        # full final turn.
+        reanchor_last_turn_to_eof(CheckpointStore(sessions_dir() / args.session))
         orchestrator = ResumeOrchestrator()
         try:
             print(orchestrator.plan(args.session, args.turn).render())
@@ -144,7 +148,9 @@ def _cmd_list(session: str | None) -> int:
                 metadata = _read_session_metadata(child)
                 title = _display_metadata_value(metadata.get("session_title"))
                 source = _display_metadata_value(metadata.get("source"))
-                print(f"{child.name}  {title}  {source}")
+                marker = _session_marker(metadata, child)
+                suffix = f"  {_colorize(marker, 'yellow')}" if marker else ""
+                print(f"{child.name}  {title}  {source}{suffix}")
         return 0
 
     store = CheckpointStore(root / session)
@@ -169,8 +175,23 @@ def _display_metadata_value(value: Any) -> str:
     return str(value) if value not in (None, "") else "-"
 
 
+def _session_marker(metadata: dict[str, Any], session_path: Path) -> str:
+    """Return a short marker for sessions with no meaningful content (P11-ZOMBIE-2).
+
+    Only marks subagent sessions that have capture_status=no_sidechain_file.
+    Regular sessions without manifests are normal (session_start fired, no turn yet).
+    """
+    lineage = metadata.get("lineage") or {}
+    if lineage.get("capture_status") == "no_sidechain_file":
+        return "[no capture]"
+    return ""
+
+
 def _cmd_show(session: str, turn: int) -> int:
     store = CheckpointStore(sessions_dir() / session)
+    # F13: reanchor the last turn to EOF on read so `show` of a terminal/forked
+    # session reports the full final turn rather than the capture-time under-count.
+    reanchor_last_turn_to_eof(store)
     manifest = store.read_manifest(turn)
     env = environment_from_blob(manifest.env_ref, store)
     fs = filesystem_from_blob(manifest.fs_ref, store)

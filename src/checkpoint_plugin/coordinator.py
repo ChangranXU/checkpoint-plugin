@@ -13,7 +13,7 @@ from .env.collector import collect_environment, environment_to_blob
 from .env.providers import detect_provider
 from .fs.ignore import IgnoreMatcher
 from .fs.snapshot import filesystem_to_blob, snapshot_cwd
-from .integrations._trajectory_slicer import claude_key, codex_key
+from .integrations._trajectory_slicer import recover_trailing_tail
 from .paths import ensure_home, load_config, session_dir
 from .store import CheckpointStore
 from .types import CheckpointManifest, TrajectoryReference
@@ -217,32 +217,11 @@ class CheckpointCoordinator:
         """Extend the last stored turn's end_offset to the transcript EOF (F13).
 
         Called at session_start, when the prior run's transcript is fully flushed.
-        Only extends when the bytes between the stored end_offset and EOF are a
-        same-turn complete tail (newline-terminated, no record bearing a DIFFERENT
-        per-turn key) — the identical guard resume uses in `_recover_trailing_tail`,
-        so we never absorb a later turn's records. A no-op when there are no
-        manifests, the transcript is gone, or the slice already reaches EOF.
+        Delegates to the module-level `reanchor_last_turn_to_eof` so read-path
+        consumers (show/diff/resume of a terminal or forked session that never
+        restarts under its own id) can trigger the same lazy fix.
         """
-        try:
-            with self.store.session_lock():
-                latest = self.store.latest_manifest()
-                if latest is None or latest.trajectory_ref is None:
-                    return
-                ref = latest.trajectory_ref
-                tail = _trailing_same_turn_tail(ref)
-                if not tail:
-                    return
-                new_end = ref.end_offset + len(tail)
-                refreshed = _ref_with_end_offset(ref, new_end)
-                self.store.write_manifest(
-                    replace(
-                        latest,
-                        trajectory_end_offset=refreshed.end_offset,
-                        trajectory_ref=refreshed,
-                    )
-                )
-        except OSError:
-            return
+        reanchor_last_turn_to_eof(self.store)
 
     def _refresh_metadata_title(
         self,
@@ -495,6 +474,7 @@ def _ref_with_end_offset(ref: TrajectoryReference, end_offset: int) -> Trajector
         start_offset=ref.start_offset,
         end_offset=end_offset,
         record_count=record_count,
+        boundary_mode=ref.boundary_mode,
     )
 
 
@@ -502,70 +482,55 @@ def _count_jsonl_records(data: bytes) -> int:
     return sum(1 for line in data.splitlines() if line.strip())
 
 
-def _trailing_same_turn_tail(ref: TrajectoryReference) -> bytes:
-    """Bytes flushed after `ref.end_offset` that still belong to `ref`'s turn (F13).
+def reanchor_last_turn_to_eof(store: CheckpointStore) -> bool:
+    """Extend a session's last stored turn end_offset to the transcript EOF (F13).
 
-    Mirrors resume's `_recover_trailing_tail` guard so the stored manifest and a
-    resume agree: the candidate tail must end with a newline (no truncated JSON) and
-    contain no record carrying a per-turn key distinct from the turn's anchor key (no
-    new turn started). Returns b"" when there is nothing safe to absorb.
+    The last turn of a run never gets its end_offset back-filled at capture time
+    (`_close_previous_trajectory_ref` only extends a turn against the NEXT turn's
+    start, and the last turn has no successor), so it stops short of EOF when the
+    provider flushed a trailing record after the Stop hook read the file. A resume
+    recovers that tail at read time, but a terminal/forked session that never
+    restarts under its own id leaves the STORED manifest short for non-resume
+    consumers (show/diff/rewind). This runs the same lazy fix on demand.
+
+    Only extends when the bytes between the stored end_offset and EOF are a
+    same-turn complete tail (newline-terminated, no record bearing a DIFFERENT
+    per-turn key) — the identical guard resume uses in `_recover_trailing_tail`,
+    so we never absorb a later turn's records. Returns True when it extended the
+    manifest, False otherwise (no manifests, transcript gone, already at EOF).
     """
-    if not ref.transcript_path:
-        return b""
-    path = Path(ref.transcript_path).expanduser()
     try:
-        size = path.stat().st_size
+        with store.session_lock():
+            latest = store.latest_manifest()
+            if latest is None or latest.trajectory_ref is None:
+                return False
+            ref = latest.trajectory_ref
+            tail = _trailing_same_turn_tail(ref)
+            if not tail:
+                return False
+            new_end = ref.end_offset + len(tail)
+            refreshed = _ref_with_end_offset(ref, new_end)
+            store.write_manifest(
+                replace(
+                    latest,
+                    trajectory_end_offset=refreshed.end_offset,
+                    trajectory_ref=refreshed,
+                )
+            )
+            return True
     except OSError:
-        return b""
-    if size <= ref.end_offset:
-        return b""
-    try:
-        with path.open("rb") as handle:
-            handle.seek(ref.end_offset)
-            tail = handle.read(size - ref.end_offset)
-    except OSError:
-        return b""
-    if not tail.endswith(b"\n"):
-        return b""
-    extractor = claude_key if ref.provider == "claude" else codex_key if ref.provider == "codex" else None
-    if extractor is None:
-        return tail
-    anchor = _anchor_key_for_ref(ref, extractor)
-    for line in tail.splitlines():
-        if not line.strip():
-            continue
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(record, dict):
-            continue
-        key = extractor(record)
-        if key is not None and key != anchor:
-            return b""
-    return tail
+        return False
 
 
-def _anchor_key_for_ref(ref: TrajectoryReference, extractor: Any) -> Any:
-    path = Path(ref.transcript_path).expanduser()
-    try:
-        with path.open("rb") as handle:
-            handle.seek(ref.start_offset)
-            data = handle.read(ref.end_offset - ref.start_offset)
-    except OSError:
-        return None
-    for line in data.splitlines():
-        if not line.strip():
-            continue
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(record, dict):
-            key = extractor(record)
-            if key is not None:
-                return key
-    return None
+def _trailing_same_turn_tail(ref: TrajectoryReference) -> bytes:
+    """Bytes flushed after `ref.end_offset` that still belong to this slice (F13).
+
+    Delegates to the shared `recover_trailing_tail` so the stored manifest and a
+    resume agree byte-for-byte. The guard it applies is selected by
+    `ref.boundary_mode`: per-turn-key for ordinary single-turn slices, session
+    boundary for multi-turn subagent slices.
+    """
+    return recover_trailing_tail(ref)
 
 
 def _user_message_preview(turn_record: TurnRecord, trajectory_ref: TrajectoryReference) -> str:

@@ -74,6 +74,17 @@ class TrajectoryReference:
     start_offset: int
     end_offset: int
     record_count: int
+    # How read-time tail recovery decides which trailing records belong to this
+    # slice (see `recover_trailing_tail`):
+    #   "per_turn_key"     — single-turn slices (`jsonl_ref_for_turn`): a trailing
+    #                        record may not carry a per-turn key distinct from the
+    #                        slice's anchor.
+    #   "session_boundary" — subagent slices (`jsonl_after_leading_metas`) that
+    #                        span all of the agent's own turns: accept every
+    #                        trailing record up to the next `session_meta`, since
+    #                        the closing record legitimately carries the LAST
+    #                        turn's key, not the slice's first.
+    boundary_mode: str = "per_turn_key"
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
@@ -86,6 +97,9 @@ class TrajectoryReference:
             start_offset=int(data.get("start_offset", 0)),
             end_offset=int(data.get("end_offset", 0)),
             record_count=int(data.get("record_count", 0)),
+            # Stored manifests predating this field get the safe default, so their
+            # tail-recovery behavior is unchanged.
+            boundary_mode=str(data.get("boundary_mode", "per_turn_key")),
         )
 
 

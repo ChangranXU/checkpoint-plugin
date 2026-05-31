@@ -2,13 +2,15 @@
 
 **Turn-boundary checkpointing for Claude Code, Codex, and similar agent CLIs.**
 
-Automatically saves your agent's state at each turn: environment config, project files, and conversation trajectory. Restore to any previous checkpoint with a diff preview and automatic backups.
+Automatically saves your agent's state at each turn: environment config, project files, and conversation trajectory. Restore to any previous checkpoint with a diff preview and automatic backups, then continue the session in your agent right where it left off.
 
-## TODO
+## Features
 
-- [ ] Checkpoint modify-and-resume
-- [ ] Other provider support
-- [ ] Verify on Claude Code (very soon)
+- **Automatic checkpoints** at every turn, for both Claude Code and Codex
+- **Diff-first resume** — preview environment and filesystem changes before restoring
+- **Resume into your agent** — rebuilds a native provider session so you can keep going
+- **Forks & subagents** — captures forked threads and subagent runs faithfully
+- **Restore in place or into a copy** — leave your current workspace untouched
 
 ## Quick Start
 
@@ -46,9 +48,9 @@ Checkpoints capture three things at each turn:
 
 - **Environment**: Provider settings, memory files, MCP config, skills
 - **Filesystem**: All project files (respects `.gitignore` and excludes `.git`, `node_modules`, `.env`*, etc.)
-- **Trajectory**: Append-only turn history in JSONL format
+- **Trajectory**: The conversation transcript through that turn
 
-Restoring a checkpoint shows a summary diff and creates backups before modifying files. At the resume prompt, enter `d` to inspect detailed environment and filesystem diffs before choosing whether to proceed.
+Restoring a checkpoint shows a summary diff and creates backups before modifying files. At the resume prompt, enter `d` to inspect detailed environment and filesystem diffs before choosing whether to proceed. On confirm, the plugin restores your files and writes a native provider session you can reopen with the printed `codex resume` / `claude --resume` command — continuing the conversation from that turn.
 
 ## Common Commands
 
@@ -79,8 +81,10 @@ checkpoint config set . key value
 `checkpoint list` shows one row per session:
 
 ```text
-<session-id>  <session-title>  <source>
+<session-id>  <session-title>  <source>  [marker]
 ```
+
+Sessions with `[no capture]` had no sidechain file at capture time (phantom subagent events) and contain metadata only.
 
 Use `checkpoint list --session <session-id>` to list that session's checkpoint turns.
 
@@ -103,6 +107,16 @@ After confirming with `y`, choose whether to restore in place or restore into a 
 1. Run `checkpoint hooks install` and restart your agent
 2. Start a new session and send a prompt
 3. Verify with `checkpoint list`
+
+**Subagent capture incomplete?**
+
+A subagent's closing record sometimes flushes just after the plugin reads its transcript. The plugin handles this two ways: it waits briefly at capture time (up to 3.5s), and — if the record still lands late — it recovers the trailing bytes automatically the next time the checkpoint is read (`show`, `diff`, or `resume`). So a late flush is no longer lost.
+
+To shorten the capture-time wait (the read-time recovery still backstops it):
+
+```bash
+export CHECKPOINT_SIDECHAIN_SETTLE_TIMEOUT=0
+```
 
 ## Development
 

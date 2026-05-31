@@ -492,3 +492,52 @@ def test_codex_resume_resolves_ancestor_not_self_and_anchors_on_parent(tmp_path,
     assert metadata["forked_at_offset"] == parent.stat().st_size
     assert metadata["forked_at_record_count"] == 3
     assert metadata["forked_at_offset"] < own.stat().st_size  # self-file would overshoot
+
+
+def test_codex_subagent_settle_captures_late_flushed_task_complete(tmp_path, monkeypatch):
+    """F12-codex: SubagentStop fires before codex flushes the turn-closing
+    `task_complete` event. The hook settles (polls until the tail is task_complete)
+    before the slice, so the closing event is captured rather than truncated."""
+    import threading
+    import time
+
+    plugin_home = tmp_path / "plugin"
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    (cwd / "AGENTS.md").write_text("agent", encoding="utf-8")
+    agent_transcript = tmp_path / "agent-rollout.jsonl"
+    # At SubagentStop time the closing task_complete is NOT yet present.
+    agent_transcript.write_text(
+        json.dumps({"type": "event_msg", "payload": {"turn_id": "t-1", "type": "task_started"}}) + "\n"
+        + json.dumps({"type": "response_item", "payload": {"type": "message", "role": "assistant", "content": "DELIVERABLE"}}) + "\n",
+        encoding="utf-8",
+    )
+
+    def _flush_task_complete_late():
+        time.sleep(0.15)
+        with agent_transcript.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"type": "event_msg", "payload": {"type": "task_complete", "turn_id": "t-1"}}) + "\n")
+
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
+    monkeypatch.setenv("CHECKPOINT_SIDECHAIN_SETTLE_TIMEOUT", "2.0")
+    monkeypatch.setenv("CHECKPOINT_SIDECHAIN_SETTLE_POLL", "0.02")
+    payload = {
+        "hook_event_name": "SubagentStop",
+        "session_id": "codex-parent",
+        "cwd": str(cwd),
+        "agent_id": "agent-late",
+        "agent_transcript_path": str(agent_transcript),
+    }
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
+    t = threading.Thread(target=_flush_task_complete_late)
+    t.start()
+    try:
+        assert codex_hook.main([]) == 0
+    finally:
+        t.join()
+
+    sub_store = CheckpointStore(plugin_home / "sessions" / "codex-parent--subagent-agent-late")
+    ref = sub_store.list_manifests()[0].trajectory_ref
+    sliced = sub_store.read_trajectory_slice(ref)
+    assert b"task_complete" in sliced, "late-flushed task_complete must be captured after settle"
+    assert ref.end_offset == agent_transcript.stat().st_size
