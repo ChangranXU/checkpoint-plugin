@@ -25,18 +25,25 @@ from ._trajectory_slicer import codex_key, jsonl_after_leading_metas, jsonl_ref_
 
 # F12-codex: SubagentStop fires before codex flushes the turn-closing `task_complete`
 # event to the subagent rollout (verified: 6a3a slice ended 709B before EOF, missing
-# the trailing task_complete). Settle the file before slicing. Read the timing from
-# the env at call time (not import) so tests can tune/disable it per-case.
-# P11-SUB-1: observed flush latency ~2.3s exceeds the old 2.0s budget; raise to 3.5s.
+# the trailing task_complete). This is STRUCTURAL, not jitter: codex dispatches the
+# SubagentStop hook inside run_turn, before the spawn site flushes the rollout and
+# writes TurnComplete (openai/codex codex-rs core: turn.rs run_turn -> tasks/mod.rs
+# flush_rollout -> TurnComplete). So the settle CANNOT guarantee completeness — it only
+# front-loads it. Correctness comes from read-time tail recovery instead: every read
+# path (`list`/`show`/`diff`/`resume`) calls recover_trailing_tail / reanchor, and by
+# read time the rollout is fully flushed to the OS page cache (codex writes with
+# write_all+flush, no fsync, so a co-located reader sees the bytes immediately). The
+# settle is therefore a latency optimization (so an immediate read is already complete),
+# NOT a correctness mechanism. Read timing from the env at call time so tests can tune it.
 _SETTLE_TIMEOUT_ENV = "CHECKPOINT_SIDECHAIN_SETTLE_TIMEOUT"
 _SETTLE_POLL_ENV = "CHECKPOINT_SIDECHAIN_SETTLE_POLL"
 
 
 def _settle_timeout_s() -> float:
     try:
-        return float(os.environ.get(_SETTLE_TIMEOUT_ENV, "3.5"))
+        return float(os.environ.get(_SETTLE_TIMEOUT_ENV, "1.0"))
     except ValueError:
-        return 3.5
+        return 1.0
 
 
 def _settle_poll_s() -> float:
@@ -121,11 +128,16 @@ def _on_subagent_end(payload: dict[str, Any], cwd: Path, parent_session_id: str)
 def _settle_subagent_rollout(transcript_path: Path) -> None:
     """Block (bounded) for codex's turn-closing `task_complete` to flush (F12-codex).
 
-    The subagent's final `event_msg`/`task_complete` lands moments after SubagentStop.
-    Poll until the last non-blank record is a `task_complete` event, or the timeout
-    elapses. We do NOT bail on a stable size: while awaiting the delayed flush the
-    file is stable precisely because the closing record hasn't landed yet, so a
-    stable-size bail would give up exactly when we must keep waiting. Best-effort.
+    LATENCY OPTIMIZATION ONLY — not a correctness mechanism. The subagent's final
+    `event_msg`/`task_complete` lands moments after SubagentStop, and the hook
+    fires before codex even enqueues it (structural ordering, see module comment),
+    so this poll cannot guarantee the record is present. Read-time tail recovery
+    (`recover_trailing_tail` on every read path) is what guarantees completeness;
+    this merely front-loads it so a `show`/`list` immediately after capture is
+    already at EOF without a recovery write. Poll until the last non-blank record is
+    a `task_complete`, or the (short) timeout elapses. We do NOT bail on a stable
+    size: while awaiting the delayed flush the file is stable precisely because the
+    closing record hasn't landed yet. Best-effort.
     """
     if _settle_timeout_s() <= 0:
         return

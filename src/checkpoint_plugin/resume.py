@@ -8,7 +8,7 @@ import shutil
 import sys
 import uuid
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -667,6 +667,22 @@ def _write_resumed_metadata(
     if provider_session_path is not None:
         metadata["provider_session_path"] = str(provider_session_path)
     metadata["cwd"] = str(cwd)
+    # FK1: the source metadata is inherited wholesale, so a resume kept the SOURCE's
+    # `source` (startup/fork), its stale `start_ts`, and — for a codex source — its
+    # `forked_*` lineage fields. That made `list` (cli.py reads metadata["source"])
+    # mislabel every resume as a fork/startup, and left a `forked_at_offset` that is a
+    # boundary in the SOURCE file but overshoots both the resume's own file and the
+    # parent it names. This function is provider-agnostic, so the bug hit codex (t1/t2)
+    # AND claude (t3) resumes alike. Stamp the true resume identity: source="resume" and
+    # a fresh start_ts (the resume moment), and drop the stale source-relative fork
+    # anchor — the real lineage already lives in resumed_from_session_id /
+    # resumed_from_turn_id (claude sources carry no forked_* fields, so the drops are a
+    # harmless no-op there). session_title/session_env are left inherited: they describe
+    # the resumed content (same conversation prefix, same model) and remain accurate.
+    metadata["source"] = "resume"
+    metadata["start_ts"] = _now()
+    for stale_key in ("forked_from_transcript", "forked_at_offset", "forked_at_record_count"):
+        metadata.pop(stale_key, None)
     target_store._atomic_write(
         target_store.session_dir / "metadata.json",
         json.dumps(metadata, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
@@ -909,7 +925,11 @@ def _rewrite_codex_trajectory(
     else:
         # No source meta to inline: emit the single synthetic head (legacy shape).
         lines.append(_json_line(_codex_session_meta(new_session_id, cwd, source_meta)))
-    for record in records:
+    for record_index, record in enumerate(records):
+        # TS1: spread the inherited prefix across adjacent ms at native burst density
+        # (offset 0 for the first DENSITY records, then +1ms each block) instead of one
+        # reused value. Monotonic and deterministic; small prefixes stay on a single ms.
+        record_now = _bump_zulu_ms(now, record_index // _TS_BURST_DENSITY)
         # F11: native forks REPLAY thread_rolled_back verbatim — a67e (fork-of-fork)
         # keeps it at idx 35 & 55 in its inlined prefix, 8c17 at idx 34, and both
         # reload fine. The old M1 strip-everywhere both diverged from native and
@@ -924,7 +944,7 @@ def _rewrite_codex_trajectory(
             _apply_preserved_meta_fields(payload, source_meta)
             _mark_codex_session_visible(payload)
             payload["cwd"] = str(cwd)
-            record["timestamp"] = now  # F9: record-ts = resume moment
+            record["timestamp"] = record_now  # F9: record-ts = resume moment (TS1: bursted)
             # payload["timestamp"] (the meta's original creation time) is preserved.
             lines.append(_json_line(record))
             continue
@@ -973,7 +993,7 @@ def _rewrite_codex_trajectory(
         # times and sort BEFORE the head meta (temporal inversion). The payload-
         # internal timestamps/turn_ids are left untouched (native preserves them).
         if "timestamp" in record:
-            record["timestamp"] = now
+            record["timestamp"] = record_now
         lines.append(_json_line(record))
     return b"".join(lines)
 
@@ -1000,18 +1020,49 @@ def _codex_source_cwd(
 
 
 def _rewrite_codex_record_cwd(record: dict[str, object], source_cwd: str, target_cwd: str) -> None:
-    """Replace the source cwd path with the resume cwd inside one codex record (F5).
+    """Replace the source cwd with the resume cwd in the LIVE-STATE fields of one
+    codex record (F5), leaving historical content untouched (ER2).
 
-    Uses exact path-prefix matching (`== source` or `startswith(source + "/")`) on
-    string leaves, never blind substring replace — the source cwd is a literal prefix
-    of the resume copy dir name, so a substring replace would double-append the
-    suffix. Walks nested dicts/lists (turn_context sandbox/permission write-roots) and
-    rewrites the `<cwd>...</cwd>` body plus developer "writable roots are ..." text in
-    message records.
+    F5's real safety goal is that a reloaded resume must not (re)grant sandbox writes
+    to the source workspace. Codex derives those grants ONLY from the STRUCTURED
+    `turn_context` sandbox/permission write-roots (+ `turn_context.cwd`) and the
+    `session_meta.cwd`, so those are rewritten. `event_msg` `patch_apply` change-sets
+    are keyed by absolute path (N4) and describe where edits land on reload, so those
+    keys are rewritten too.
+
+    ER2: the OLD code walked EVERY string leaf, so it also rewrote `function_call_output`
+    output (e.g. a recorded `pwd` result), `function_call.arguments`, and message/
+    developer text — falsifying command history with a path the command never produced
+    and diverging from claude (which leaves historical content verbatim). Those are
+    advisory/historical, never re-derived into OS grants (leaving them stale fails
+    closed), so we now SKIP them and rewrite only the live-state fields above. This
+    aligns codex with claude while preserving the F5 write-root rewrite and N4.
     """
     if source_cwd == target_cwd:
         return
-    _rewrite_cwd_in_value(record, source_cwd, target_cwd)
+    record_type = record.get("type")
+    payload = record.get("payload")
+    if record_type == "session_meta":
+        # session_meta.cwd is re-pinned by the caller already; rewrite any residual
+        # cwd embedded in the payload (defensive — keeps the meta self-consistent).
+        if isinstance(payload, dict) and isinstance(payload.get("cwd"), str):
+            payload["cwd"] = _rewrite_cwd_in_string(payload["cwd"], source_cwd, target_cwd)
+        return
+    if record_type == "turn_context" and isinstance(payload, dict):
+        # The whole turn_context payload is live state: cwd + structured
+        # sandbox_policy/permission_profile write-root entries. Walk it fully.
+        _rewrite_cwd_in_value(payload, source_cwd, target_cwd)
+        return
+    if record_type == "event_msg" and isinstance(payload, dict):
+        # N4: patch_apply_begin/end `changes` is keyed by absolute file path — the
+        # edit targets on reload. Rewrite the changes map (keys + values); leave any
+        # other event_msg text (e.g. task_complete summaries) historical.
+        changes = payload.get("changes")
+        if isinstance(changes, (dict, list)):
+            _rewrite_cwd_in_value(changes, source_cwd, target_cwd)
+        return
+    # response_item (function_call / function_call_output / message) and everything
+    # else is historical content: leave it verbatim (ER2), matching claude.
 
 
 def _rewrite_cwd_in_value(value: object, source_cwd: str, target_cwd: str) -> object:
@@ -1518,15 +1569,52 @@ def _zulu_now() -> str:
     return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
 
 
-def _zulu_now_us() -> str:
-    """RFC3339 UTC timestamp with 6-digit microsecond precision (CFORK-IDX-1).
+# TS1: native codex re-stamps an inlined fork prefix to a tight BURST of adjacent
+# milliseconds (write-time stamping packs ~15–46 records per ms), not one identical
+# value. Approximate that density so a resumed prefix is not byte-distinguishable by a
+# single-valued timestamp block. Deterministic by record index (no wall-clock in the
+# loop — that stays sub-ms on fast interpreters and would both fail to spread and break
+# the no-inversion invariant flakily). Records 0..DENSITY-1 share `now` (offset 0), so
+# small prefixes keep a single ms exactly like a short native fork.
+_TS_BURST_DENSITY = 20
 
-    Native codex `session_index.jsonl` entries use microsecond precision
-    (e.g. `.505647Z`). The rollout-level `_zulu_now()` correctly truncates to
-    3-digit ms for record timestamps, but the index must match native precision.
+
+def _bump_zulu_ms(zulu: str, millis: int) -> str:
+    """Return a `_zulu_now()`-shaped stamp advanced by `millis` ms (TS1).
+
+    Parses the `...THH:MM:SS.mmmZ` form, adds the offset via datetime (so second/
+    minute rollover is correct), and re-emits 3-digit ms with the `Z` suffix. On any
+    parse failure (defensive) returns the input unchanged.
+    """
+    if millis <= 0:
+        return zulu
+    try:
+        base = datetime.strptime(zulu, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return zulu
+    bumped = base + timedelta(milliseconds=millis)
+    return bumped.strftime("%Y-%m-%dT%H:%M:%S.") + f"{bumped.microsecond // 1000:03d}Z"
+
+
+def _zulu_now_us() -> str:
+    """RFC3339 UTC timestamp matching native codex `session_index.jsonl` precision.
+
+    Native codex `updated_at` is serialized by serde_json/chrono, which formats the
+    fractional second at microsecond precision and then strips ALL trailing zeros
+    (and omits the fraction entirely when microseconds are zero). Verified against
+    the live index: of 296 modern uuidv7 entries, ZERO end in a trailing-zero digit;
+    the distribution is 5- and 6-digit fractions only. So `.500000`→`.5Z`,
+    `.172580`→`.17258Z`, `.505647`→`.505647Z`, and `.000000`→`Z` (no fraction).
+
+    TS2: the old code always emitted 6 digits, so ~10% of resumed entries (those whose
+    microseconds ended in a zero) were a byte-distinguishable fingerprint vs native.
+    A "strip one trailing zero" rule would still diverge ~1% AND create a never-native
+    `…0Z` shape, so we mirror native exactly with rstrip('0').
     """
     now = datetime.now(timezone.utc)
-    return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond:06d}Z"
+    fraction = f"{now.microsecond:06d}".rstrip("0")
+    stamp = now.strftime("%Y-%m-%dT%H:%M:%S")
+    return f"{stamp}.{fraction}Z" if fraction else f"{stamp}Z"
 
 
 def _resume_command(provider_name: str, new_session_id: str) -> str | None:

@@ -108,6 +108,18 @@ def _dispatch(args: argparse.Namespace) -> int:
         cwd = Path(args.target).expanduser() if args.target else None
         orchestrator = ResumeOrchestrator(cwd=cwd)
         store = CheckpointStore(sessions_dir() / args.session)
+        # F2: warn when resuming a turn that an edit-send superseded — the target
+        # reconstructs the pre-edit world, which is valid but easy to pick by
+        # mistake. Surfaced as a note; the resume still proceeds.
+        replaced_by = _edit_send_replaced_turns(store, store.list_manifests()).get(args.turn)
+        if replaced_by is not None:
+            print(
+                _colorize(
+                    f"Note: turn {args.turn} was replaced by turn {replaced_by} via edit-send "
+                    f"(resuming it restores the pre-edit state).",
+                    "yellow",
+                )
+            )
         try:
             plan = orchestrator.plan(args.session, args.turn)
             confirm = _auto_confirm if args.yes else lambda text: _interactive_resume_confirm(text, plan, store)
@@ -154,9 +166,110 @@ def _cmd_list(session: str | None) -> int:
         return 0
 
     store = CheckpointStore(root / session)
-    for manifest in store.list_manifests():
+    # F1: a terminal/forked/subagent session whose last turn trailed EOF at capture
+    # time (the provider flushed its turn-closing record just after the Stop hook
+    # read the file) leaves the STORED manifest short. show/diff/resume already
+    # reanchor on read; `list` was the one read path that did not. Recover here too
+    # so every read path is consistent. This is timeout-free: by the time anything
+    # reads, the transcript is fully flushed (codex writes to the OS page cache, which
+    # a co-located reader sees immediately), so the settle timeout is not relied upon.
+    reanchor_last_turn_to_eof(store)
+    manifests = store.list_manifests()
+    replaced = _edit_send_replaced_turns(store, manifests)
+    carries_pre_fork = _turns_carrying_pre_fork_rollback(manifests, replaced)
+    for manifest in manifests:
         preview = manifest.user_message_preview.replace("\n", " ")
-        print(f"{manifest.turn_id:04d}  {manifest.created_ts}  {preview}")
+        if manifest.turn_id in replaced:
+            marker = _colorize("  [replaced by turn {}]".format(replaced[manifest.turn_id]), "yellow")
+        elif manifest.turn_id in carries_pre_fork:
+            # ES3: this turn's slice carries a thread_rolled_back whose victim turns
+            # live in the uncaptured inherited prefix (a forked resume), so they have
+            # no manifest row to mark. Note the inherited relationship instead.
+            marker = _colorize("  [carries pre-fork rolled-back turn(s)]", "yellow")
+        else:
+            marker = ""
+        print(f"{manifest.turn_id:04d}  {manifest.created_ts}  {preview}{marker}")
+    return 0
+
+
+def _edit_send_replaced_turns(store: CheckpointStore, manifests: list[Any]) -> dict[int, int]:
+    """Map each edit-send-replaced turn_id to the turn_id that replaced it (F2).
+
+    When a user edits an already-sent message and resends ("edit-send"), codex
+    records a `thread_rolled_back` event at the head of the replacement turn's
+    slice with `num_turns=K`: the K turns immediately preceding it are dead and
+    were superseded by this turn. The plugin stores those turns linearly (matching
+    native codex), so resuming the replaced turn reconstructs the pre-edit world
+    and resuming the replacement reconstructs the post-edit world — both are valid.
+    `list` surfaces the relationship so a replaced turn is not mistaken for live.
+
+    Returns {replaced_turn_id: replacing_turn_id}. Empty when no rollback is found
+    (the common case) or for non-codex sessions (claude edit-send has no marker).
+    """
+    replaced: dict[int, int] = {}
+    by_turn = {m.turn_id: m for m in manifests}
+    for manifest in manifests:
+        num_turns = _rolled_back_count(manifest)
+        if num_turns <= 0:
+            continue
+        # The K turns with ids strictly below this one, nearest first, are dead.
+        dead = sorted((tid for tid in by_turn if tid < manifest.turn_id), reverse=True)[:num_turns]
+        for tid in dead:
+            replaced[tid] = manifest.turn_id
+    return replaced
+
+
+def _turns_carrying_pre_fork_rollback(
+    manifests: list[Any], replaced: dict[int, int]
+) -> set[int]:
+    """Turns whose `thread_rolled_back` rolled back MORE turns than are captured (ES3).
+
+    On a forked resume, codex replays a `thread_rolled_back num_turns=K` at the head of
+    a captured turn whose K victims were edit-sent away BEFORE the fork — so they live
+    in the uncaptured inherited prefix, not in any manifest row. `_edit_send_replaced_turns`
+    can only mark victims that exist as captured turns (ids below the marker turn); when
+    K exceeds that count, the surplus victims are invisible. We flag the carrier turn so
+    `list` can note the inherited relationship rather than silently dropping it.
+
+    Returns the set of carrier turn_ids whose rollback reaches into the inherited prefix.
+    Empty for the common case (a fully-captured in-session edit-send, already covered by
+    `replaced`).
+    """
+    carriers: set[int] = set()
+    ids = sorted(m.turn_id for m in manifests)
+    for manifest in manifests:
+        num_turns = _rolled_back_count(manifest)
+        if num_turns <= 0:
+            continue
+        captured_below = sum(1 for tid in ids if tid < manifest.turn_id)
+        if num_turns > captured_below:
+            carriers.add(manifest.turn_id)
+    return carriers
+
+
+def _rolled_back_count(manifest: Any) -> int:
+    """`num_turns` from a `thread_rolled_back` event inside this turn's slice (F2)."""
+    ref = manifest.trajectory_ref
+    if ref is None or ref.provider != "codex" or not ref.transcript_path:
+        return 0
+    path = Path(ref.transcript_path).expanduser()
+    try:
+        with path.open("rb") as handle:
+            handle.seek(ref.start_offset)
+            data = handle.read(max(0, ref.end_offset - ref.start_offset))
+    except OSError:
+        return 0
+    for line in data.splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        payload = record.get("payload") if isinstance(record, dict) else None
+        if isinstance(payload, dict) and payload.get("type") == "thread_rolled_back":
+            count = payload.get("num_turns")
+            return count if isinstance(count, int) and count > 0 else 0
     return 0
 
 

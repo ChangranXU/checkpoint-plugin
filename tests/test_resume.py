@@ -299,6 +299,17 @@ def test_resume_materializes_codex_native_session(tmp_path, monkeypatch):
     metadata = json.loads((resumed_store.session_dir / "metadata.json").read_text(encoding="utf-8"))
     assert metadata["session_id"] == report.new_session_id
     assert metadata["resumed_from_session_id"] == "s1"
+    # FK1: a resume stamps its own identity rather than inheriting the source's.
+    # The source s1 was source="startup"; the resume must report source="resume",
+    # carry a fresh start_ts (not s1's), and drop any stale codex fork anchor.
+    assert metadata["source"] == "resume"
+    source_meta = json.loads((CheckpointStore(plugin_home / "sessions" / "s1").session_dir / "metadata.json").read_text(encoding="utf-8"))
+    assert metadata["start_ts"] != source_meta["start_ts"]
+    # start_ts is stamped at the resume moment, so it tracks resumed_ts (same UTC day).
+    assert metadata["start_ts"][:10] == metadata["resumed_ts"][:10]
+    assert "forked_from_transcript" not in metadata
+    assert "forked_at_offset" not in metadata
+    assert "forked_at_record_count" not in metadata
 
 
 def test_resume_copy_materializes_codex_session_with_copy_cwd(tmp_path, monkeypatch):

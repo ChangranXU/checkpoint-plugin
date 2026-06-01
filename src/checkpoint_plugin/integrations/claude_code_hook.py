@@ -24,19 +24,22 @@ from ._trajectory_slicer import claude_key, jsonl_ref_for_turn
 
 # F12: SubagentStop can fire before the subagent's final assistant deliverable is
 # flushed to its sidechain file (verified: a50fb captured 3/4 records, the end_turn
-# deliverable flushed moments later). We settle-and-re-slice: poll until the tail is
-# a complete assistant deliverable or the budget is exhausted, then slice. Read from
-# the env at call time (not import) so tests can tune/disable it per-case.
-# P11-SUB-1: observed flush latency ~2.3s exceeds the old 2.0s budget; raise to 3.5s.
+# deliverable flushed moments later). Claude's docs give NO flush/durability guarantee
+# for any hook, so this is unguaranteed by construction. Correctness comes from
+# read-time tail recovery instead (every read path calls recover_trailing_tail /
+# reanchor, and by read time the file is fully flushed). The settle below only
+# front-loads completeness so an immediate read is already at EOF — a latency
+# optimization, NOT a correctness mechanism. Read from the env at call time (not
+# import) so tests can tune/disable it per-case.
 _SETTLE_TIMEOUT_ENV = "CHECKPOINT_SIDECHAIN_SETTLE_TIMEOUT"
 _SETTLE_POLL_ENV = "CHECKPOINT_SIDECHAIN_SETTLE_POLL"
 
 
 def _settle_timeout_s() -> float:
     try:
-        return float(os.environ.get(_SETTLE_TIMEOUT_ENV, "3.5"))
+        return float(os.environ.get(_SETTLE_TIMEOUT_ENV, "1.0"))
     except ValueError:
-        return 3.5
+        return 1.0
 
 
 def _settle_poll_s() -> float:
@@ -88,6 +91,24 @@ def _on_subagent_end(payload: dict[str, Any], cwd: Path, parent_session_id: str)
     transcript_path = _subagent_transcript_path(payload, agent_id)
     if agent_id is None and transcript_path is None:
         return 0  # Not enough to attribute this subagent; skip rather than guess.
+    agent_type = _first_string(payload, "agent_type", "agentType")
+    # SUB2: a resume/fork replays the parent's inherited `SubagentStop` events for
+    # subagents that ran in the ORIGINAL session. Those replayed events carry an
+    # `agent_id` but no sidechain file (it lives under the original session) AND no
+    # `agent_type` — observed: phantom shells a2b78a8b / a0a18620 on a forked 3f913f6c
+    # had agent_type=None and no file, while every genuine Task-spawned subagent
+    # (a4f9c5d9 / afcd1cf3) carried agent_type="general-purpose". Without a file there
+    # is nothing to checkpoint, so a typeless, fileless SubagentStop would only write a
+    # noise `no_sidechain_file` shell for a subagent that isn't ours. Skip it.
+    # We can't instead confirm a genuine fileless subagent via the parent manifest:
+    # SubagentStop fires while the parent turn is still open, so the parent manifest
+    # that references this agent_id is not written until ~tens of seconds later (its
+    # turn ends after the child stops) — a capture-time parent lookup would wrongly
+    # drop real in-turn subagents. `agent_type` IS present at capture time, so it is
+    # the safe discriminator. A genuine fileless subagent still carries an agent_type
+    # and is recorded as before.
+    if transcript_path is None and agent_id is not None and agent_type is None:
+        return 0
     sub_session_id = f"{parent_session_id}--subagent-{agent_id or _stem(transcript_path)}"
     coordinator = CheckpointCoordinator(session_id=sub_session_id, cwd=cwd)
     # SubagentStop omits `model` (SessionStart-only); inherit the parent's pinned
@@ -99,7 +120,7 @@ def _on_subagent_end(payload: dict[str, Any], cwd: Path, parent_session_id: str)
     lineage: dict[str, Any] = {
         "parent_session_id": parent_session_id,
         "agent_id": agent_id,
-        "agent_type": _first_string(payload, "agent_type", "agentType"),
+        "agent_type": agent_type,
     }
     if transcript_path is not None:
         lineage["sidechain_stem"] = transcript_path.stem
