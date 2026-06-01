@@ -1188,7 +1188,7 @@ def test_codex_rewrite_repoints_forked_from_id():
         json.dumps({"type": "session_meta", "payload": {"id": "ORIGINAL", "forked_from_id": "STALE-ANCESTOR", "cwd": "/old"}}) + "\n"
         + json.dumps({"type": "turn_context", "payload": {"turn_id": "t-1", "model": "m"}}) + "\n"
     ).encode("utf-8")
-    out = _rewrite_codex_trajectory(trajectory, "NEW", Path("/new"), None, None, None)
+    out = _rewrite_codex_trajectory(trajectory, "NEW", Path("/new"), None, None, None, None)
     metas = [json.loads(l)["payload"] for l in out.splitlines() if json.loads(l).get("type") == "session_meta"]
     assert metas, "expected a session_meta record"
     meta = metas[0]
@@ -1223,7 +1223,7 @@ def test_codex_rewrite_preserves_structured_permission_profile():
         + "\n"
     ).encode("utf-8")
 
-    out = _rewrite_codex_trajectory(trajectory, "NEW", Path("/new"), "gpt-target", "acceptEdits", None)
+    out = _rewrite_codex_trajectory(trajectory, "NEW", Path("/new"), "gpt-target", "acceptEdits", None, None)
     records = [json.loads(line) for line in out.splitlines()]
     turn_context = next(r["payload"] for r in records if r.get("type") == "turn_context")
     # Structured profile is preserved verbatim; model is re-pinned; sandbox/approval untouched.
@@ -1242,7 +1242,7 @@ def test_codex_rewrite_repins_model_on_real_turn_context_shape():
         json.dumps({"type": "session_meta", "payload": {"id": "old", "cwd": "/old"}}) + "\n"
         + json.dumps({"type": "turn_context", "payload": {"turn_id": "t-1", "model": "old-model"}}) + "\n"
     ).encode("utf-8")
-    out = _rewrite_codex_trajectory(trajectory, "NEW", Path("/new"), "gpt-target", None, None)
+    out = _rewrite_codex_trajectory(trajectory, "NEW", Path("/new"), "gpt-target", None, None, None)
     tc = next(json.loads(l)["payload"] for l in out.splitlines() if json.loads(l).get("type") == "turn_context")
     assert tc["model"] == "gpt-target"
 
@@ -1258,7 +1258,7 @@ def test_codex_rewrite_repins_string_permission_profile():
         )
         + "\n"
     ).encode("utf-8")
-    out = _rewrite_codex_trajectory(trajectory, "NEW", Path("/new"), None, "acceptEdits", None)
+    out = _rewrite_codex_trajectory(trajectory, "NEW", Path("/new"), None, "acceptEdits", None, None)
     tc = next(json.loads(l)["payload"] for l in out.splitlines() if json.loads(l).get("type") == "turn_context")
     assert tc["permission_profile"] == "acceptEdits"
     assert tc["sandbox_policy"] == "workspace-write"
@@ -1275,7 +1275,7 @@ def test_claude_rewrite_repins_model_on_assistant_message():
         + json.dumps({"type": "assistant", "sessionId": "old", "uuid": "a1", "parentUuid": "u1", "message": {"role": "assistant", "model": "claude-opus-4-8", "content": []}}) + "\n"
         + json.dumps({"type": "file-history-snapshot", "messageId": "a1", "snapshot": {}, "isSnapshotUpdate": False}) + "\n"
     ).encode("utf-8")
-    out = _rewrite_claude_trajectory(trajectory, "NEW", Path("/new"), "claude-sonnet-4-6", None)
+    out = _rewrite_claude_trajectory(trajectory, "NEW", Path("/new"), "claude-sonnet-4-6", None, None)
     records = [json.loads(line) for line in out.splitlines()]
     assistant = next(r for r in records if r.get("type") == "assistant")
     assert assistant["message"]["model"] == "claude-sonnet-4-6"
@@ -1299,7 +1299,7 @@ def test_claude_rewrite_remaps_file_history_message_id():
         + json.dumps({"type": "assistant", "uuid": "a1", "parentUuid": "u1", "message": {"role": "assistant", "content": []}}) + "\n"
         + json.dumps({"type": "last-prompt", "leafUuid": "a1"}) + "\n"
     ).encode("utf-8")
-    out = _rewrite_claude_trajectory(trajectory, "NEW", Path("/new"), None, None)
+    out = _rewrite_claude_trajectory(trajectory, "NEW", Path("/new"), None, None, None)
     records = [json.loads(line) for line in out.splitlines()]
     new_uuids = {r["uuid"] for r in records if isinstance(r.get("uuid"), str)}
     fhs = next(r for r in records if r.get("type") == "file-history-snapshot")
@@ -1323,7 +1323,7 @@ def test_claude_rewrite_remaps_nested_snapshot_message_id():
         # nested snapshot.messageId points at the assistant uuid a1
         + json.dumps({"type": "file-history-snapshot", "messageId": "a1", "snapshot": {"messageId": "a1", "files": {}}}) + "\n"
     ).encode("utf-8")
-    out = _rewrite_claude_trajectory(trajectory, "NEW", Path("/new"), None, None)
+    out = _rewrite_claude_trajectory(trajectory, "NEW", Path("/new"), None, None, None)
     records = [json.loads(line) for line in out.splitlines()]
     assistant = next(r for r in records if r.get("type") == "assistant")
     fhs = next(r for r in records if r.get("type") == "file-history-snapshot")
@@ -1523,7 +1523,7 @@ def test_codex_rewrite_preserves_session_meta_chain():
         + json.dumps({"type": "session_meta", "payload": {"id": "GRAND", "cwd": "/old"}}) + "\n"
         + json.dumps({"type": "turn_context", "payload": {"turn_id": "t-1", "model": "m"}}) + "\n"
     ).encode("utf-8")
-    out = _rewrite_codex_trajectory(trajectory, "NEW", Path("/new"), None, None, None)
+    out = _rewrite_codex_trajectory(trajectory, "NEW", Path("/new"), None, None, None, None)
     records = [json.loads(line) for line in out.splitlines()]
     metas = [r for r in records if r.get("type") == "session_meta"]
     # Fresh head + the three inlined source metas.
@@ -1556,7 +1556,7 @@ def test_rewrite_preserves_source_key_order_not_alphabetical():
     claude_src = (
         json.dumps({"type": "user", "sessionId": "old", "uuid": "u1", "parentUuid": None, "promptId": "p1", "cwd": "/old", "message": {"role": "user", "content": "hi"}}) + "\n"
     ).encode("utf-8")
-    claude_out = _rewrite_claude_trajectory(claude_src, "NEW", Path("/new"), "m", None)
+    claude_out = _rewrite_claude_trajectory(claude_src, "NEW", Path("/new"), "m", None, None)
     claude_keys = _key_order(claude_out.splitlines()[0])
     assert claude_keys == ["type", "sessionId", "uuid", "parentUuid", "promptId", "cwd", "message"]
     assert claude_keys != sorted(claude_keys), "claude record must NOT be alphabetized"
@@ -1566,7 +1566,7 @@ def test_rewrite_preserves_source_key_order_not_alphabetical():
         json.dumps({"timestamp": "t", "type": "session_meta", "payload": {"id": "old", "timestamp": "t", "cwd": "/old", "originator": "X"}}) + "\n"
         + json.dumps({"type": "turn_context", "payload": {"turn_id": "t-1", "model": "m"}}) + "\n"
     ).encode("utf-8")
-    codex_out = _rewrite_codex_trajectory(codex_src, "NEW", Path("/new"), "m", None, None)
+    codex_out = _rewrite_codex_trajectory(codex_src, "NEW", Path("/new"), "m", None, None, None)
     codex_top = _key_order(codex_out.splitlines()[0])
     assert codex_top == ["timestamp", "type", "payload"]
     assert codex_top != sorted(codex_top), "codex meta must NOT be alphabetized"
@@ -1614,7 +1614,7 @@ def test_codex_rewrite_keeps_full_inlined_meta_chain_with_original_ids():
         + json.dumps({"type": "turn_context", "payload": {"turn_id": "t-3", "model": "m"}}) + "\n"
     ).encode("utf-8")
 
-    out = _rewrite_codex_trajectory(trajectory, "NEW", Path("/new"), None, None, None)
+    out = _rewrite_codex_trajectory(trajectory, "NEW", Path("/new"), None, None, None, None)
     records = [json.loads(line) for line in out.splitlines()]
     metas = [r for r in records if r.get("type") == "session_meta"]
     # Fresh head (id=NEW) + all four inlined source metas preserved with original ids.
@@ -1643,7 +1643,7 @@ def test_codex_rewrite_keeps_thread_rolled_back():
         + json.dumps({"type": "event_msg", "payload": {"type": "thread_rolled_back", "num_turns": 1}}) + "\n"
         + json.dumps({"type": "event_msg", "payload": {"type": "task_started"}}) + "\n"
     ).encode("utf-8")
-    out = _rewrite_codex_trajectory(trajectory, "NEW", Path("/new"), None, None, None)
+    out = _rewrite_codex_trajectory(trajectory, "NEW", Path("/new"), None, None, None, None)
     assert b"thread_rolled_back" in out
     assert b"task_started" in out
 
@@ -1673,7 +1673,7 @@ def test_codex_rewrite_preserves_structured_source_and_provenance():
         + "\n"
         + json.dumps({"type": "turn_context", "payload": {"turn_id": "t-1", "model": "m"}}) + "\n"
     ).encode("utf-8")
-    out = _rewrite_codex_trajectory(trajectory, "NEW", Path("/new"), None, None, None)
+    out = _rewrite_codex_trajectory(trajectory, "NEW", Path("/new"), None, None, None, None)
     metas = [json.loads(l)["payload"] for l in out.splitlines() if json.loads(l).get("type") == "session_meta"]
     # F2: the structured-source meta is kept as the INLINED source meta (records[1]),
     # under its original id; the fresh head (records[0]) is the new session.
@@ -1690,7 +1690,7 @@ def test_codex_rewrite_preserves_structured_source_and_provenance():
         json.dumps({"type": "session_meta", "payload": {"id": "old", "cwd": "/old"}}) + "\n"
         + json.dumps({"type": "turn_context", "payload": {"turn_id": "t-1", "model": "m"}}) + "\n"
     ).encode("utf-8")
-    out2 = _rewrite_codex_trajectory(bare, "NEW", Path("/new"), None, None, None)
+    out2 = _rewrite_codex_trajectory(bare, "NEW", Path("/new"), None, None, None, None)
     meta2 = next(json.loads(l)["payload"] for l in out2.splitlines() if json.loads(l).get("type") == "session_meta")
     assert meta2["source"] == "vscode"
     assert meta2["originator"] == "Codex Desktop"
@@ -1794,7 +1794,7 @@ def test_claude_rewrite_drops_dangling_trailing_pointer():
         + json.dumps({"type": "assistant", "uuid": "a-1", "parentUuid": "u-1", "sessionId": "old", "message": {"role": "assistant", "content": "yo"}}) + "\n"
         + json.dumps({"type": "file-history-snapshot", "messageId": "FORWARD-MISSING", "snapshot": {}}) + "\n"
     ).encode("utf-8")
-    out = _rewrite_claude_trajectory(trajectory, "NEW", Path("/new"), None, None)
+    out = _rewrite_claude_trajectory(trajectory, "NEW", Path("/new"), None, None, None)
     records = [json.loads(line) for line in out.splitlines()]
     assert all(r.get("type") != "file-history-snapshot" for r in records), "dangling snapshot must be dropped"
     # The real message records survive and are remapped.
@@ -2030,13 +2030,13 @@ def test_no_synthetic_permission_mode_for_fork_resume():
     ).encode("utf-8")
 
     # Normal resume (no inherited prefix) -> synthetic permission-mode injected.
-    normal = _rewrite_claude_trajectory(traj, "NEW", Path("/new"), None, "acceptEdits")
+    normal = _rewrite_claude_trajectory(traj, "NEW", Path("/new"), None, "acceptEdits", None)
     normal_recs = [json.loads(l) for l in normal.splitlines()]
     assert any(r.get("type") == "permission-mode" for r in normal_recs)
 
     # Fork-style resume (inherited prefix) -> NO synthetic permission-mode.
     forked = _rewrite_claude_trajectory(
-        traj, "NEW", Path("/new"), None, "acceptEdits", has_inherited_prefix=True
+        traj, "NEW", Path("/new"), None, "acceptEdits", None, has_inherited_prefix=True
     )
     forked_recs = [json.loads(l) for l in forked.splitlines()]
     assert not any(r.get("type") == "permission-mode" for r in forked_recs)
@@ -2064,7 +2064,7 @@ def test_claude_resume_stamps_forkedfrom_resolving_into_parent():
     source_uuids = {"src-u", "src-a", "src-u2"}
 
     out = _rewrite_claude_trajectory(
-        traj, "NEW", Path("/new"), None, None, source_session_id="SOURCE",
+        traj, "NEW", Path("/new"), None, None, None, source_session_id="SOURCE",
     )
     recs = [json.loads(l) for l in out.splitlines()]
     # Every uuid-bearing record is fork-stamped, uuid preserved byte-identical.
@@ -2094,7 +2094,7 @@ def test_claude_resume_of_resume_preserves_existing_forkedfrom():
     ).encode("utf-8")
 
     out = _rewrite_claude_trajectory(
-        traj, "NEW", Path("/new"), None, None,
+        traj, "NEW", Path("/new"), None, None, None,
         has_inherited_prefix=True, source_session_id="ANC",
         inherited_record_count=1,
     )
@@ -2122,7 +2122,7 @@ def test_claude_resume_repins_version_uniform_to_latest():
     assert _latest_claude_version([{"version": "2.1.150"}, {"version": "2.1.156"}]) == "2.1.156"
     assert _latest_claude_version([{"type": "x"}]) is None
 
-    out = _rewrite_claude_trajectory(traj, "NEW", Path("/new"), None, None)
+    out = _rewrite_claude_trajectory(traj, "NEW", Path("/new"), None, None, None)
     recs = [json.loads(line) for line in out.splitlines()]
     versions = {r["version"] for r in recs if "version" in r}
     assert versions == {"2.1.156"}, f"expected uniform latest version, got {versions}"
@@ -2138,7 +2138,7 @@ def test_claude_resume_is_fork_shaped_even_from_startup():
         json.dumps({"type": "user", "uuid": "u1", "parentUuid": None, "promptId": "P", "message": {"role": "user", "content": "hi"}}) + "\n"
         + json.dumps({"type": "assistant", "uuid": "a1", "parentUuid": "u1", "message": {"role": "assistant", "content": []}}) + "\n"
     ).encode("utf-8")
-    out = _rewrite_claude_trajectory(traj, "NEW", Path("/new"), None, "acceptEdits", source_session_id="SOURCE")
+    out = _rewrite_claude_trajectory(traj, "NEW", Path("/new"), None, "acceptEdits", None, source_session_id="SOURCE")
     recs = [json.loads(l) for l in out.splitlines()]
     # Fork-shaped: forkedFrom on every record, uuids preserved, no synthetic mode rec.
     assert all(r["forkedFrom"]["sessionId"] == "SOURCE" for r in recs)
@@ -2161,7 +2161,7 @@ def test_claude_fork_resume_linearizes_branched_inherited_region():
         + json.dumps({"type": "assistant", "uuid": "a2", "parentUuid": "a1", "message": {"role": "assistant", "content": []}}) + "\n"
         + json.dumps({"type": "user", "uuid": "u2", "parentUuid": "a1", "promptId": "P2", "message": {"role": "user", "content": "two"}}) + "\n"
     ).encode("utf-8")
-    out = _rewrite_claude_trajectory(traj, "NEW", Path("/new"), None, None, source_session_id="SRC")
+    out = _rewrite_claude_trajectory(traj, "NEW", Path("/new"), None, None, None, source_session_id="SRC")
     recs = [json.loads(l) for l in out.splitlines()]
     by_uuid = {r["uuid"]: r for r in recs}
     # The branching record u2 is re-pointed to the PREVIOUS emitted record (a2),
@@ -2187,7 +2187,7 @@ def test_claude_linearization_chains_through_all_content_types():
         + json.dumps({"type": "system", "uuid": "s1", "parentUuid": "a1", "content": "note"}) + "\n"
         + json.dumps({"type": "assistant", "uuid": "a2", "parentUuid": "wrong-branch", "message": {"role": "assistant", "content": []}}) + "\n"
     ).encode("utf-8")
-    out = _rewrite_claude_trajectory(traj, "NEW", Path("/new"), None, None, source_session_id="SRC")
+    out = _rewrite_claude_trajectory(traj, "NEW", Path("/new"), None, None, None, source_session_id="SRC")
     by_uuid = {r["uuid"]: r for r in (json.loads(l) for l in out.splitlines())}
     assert by_uuid["s1"]["parentUuid"] == "a1"
     # a2 chains to the previous emitted record (the system record), NOT the last assistant.
@@ -2227,7 +2227,7 @@ def test_codex_head_meta_native_key_order():
         "base_instructions": {"text": "x"}, "dynamic_tools": [],
     }
     traj = (json.dumps({"timestamp": "t", "type": "session_meta", "payload": src_meta}) + "\n").encode("utf-8")
-    out = _rewrite_codex_trajectory(traj, "NEW", Path("/new"), None, None, src_meta)
+    out = _rewrite_codex_trajectory(traj, "NEW", Path("/new"), None, None, None, src_meta)
     head = json.loads(out.splitlines()[0], object_pairs_hook=OrderedDict)
     assert list(head["payload"].keys()) == [
         "id", "forked_from_id", "timestamp", "cwd", "originator", "cli_version",
@@ -2242,7 +2242,7 @@ def test_codex_resume_timestamps_are_millisecond_precision():
     from checkpoint_plugin.resume import _rewrite_codex_trajectory
 
     traj = (json.dumps({"timestamp": "t", "type": "session_meta", "payload": {"id": "old", "cwd": "/old"}}) + "\n").encode("utf-8")
-    out = _rewrite_codex_trajectory(traj, "NEW", Path("/new"), None, None, None)
+    out = _rewrite_codex_trajectory(traj, "NEW", Path("/new"), None, None, None, None)
     head = json.loads(out.splitlines()[0])
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z", head["timestamp"]), head["timestamp"]
 
@@ -2259,7 +2259,7 @@ def test_codex_resume_restamps_body_record_ts_no_temporal_inversion():
         + json.dumps({"timestamp": "2020-01-01T00:00:01.000Z", "type": "response_item", "payload": {"type": "message", "turn_id": "t-1"}}) + "\n"
         + json.dumps({"timestamp": "2020-01-01T00:00:02.000Z", "type": "turn_context", "payload": {"turn_id": "t-1", "model": "m"}}) + "\n"
     ).encode("utf-8")
-    out = _rewrite_codex_trajectory(traj, "NEW", Path("/new"), None, None, None)
+    out = _rewrite_codex_trajectory(traj, "NEW", Path("/new"), None, None, None, None)
     recs = [json.loads(l) for l in out.splitlines()]
     head_ts = recs[0]["timestamp"]
     body = [r for r in recs if r.get("type") != "session_meta"]
@@ -2282,7 +2282,7 @@ def test_codex_resume_rewrites_cwd_in_dict_keys():
         json.dumps({"timestamp": "t", "type": "session_meta", "payload": src_meta}) + "\n"
         + json.dumps({"timestamp": "t", "type": "event_msg", "payload": {"type": "patch_apply_end", "changes": {"/src/work/README.md": {"add": 1}}}}) + "\n"
     ).encode("utf-8")
-    out = _rewrite_codex_trajectory(traj, "NEW", Path("/dst/copy"), None, None, src_meta)
+    out = _rewrite_codex_trajectory(traj, "NEW", Path("/dst/copy"), None, None, None, src_meta)
     assert b"/src/work" not in out, "source cwd must not survive (incl. dict keys)"
     # The path key was rewritten to the target cwd.
     changes_rec = [json.loads(l) for l in out.splitlines() if json.loads(l).get("payload", {}).get("type") == "patch_apply_end"][0]

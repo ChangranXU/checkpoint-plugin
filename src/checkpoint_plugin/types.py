@@ -11,6 +11,7 @@ class EnvironmentState:
     provider: str
     model: str | None = None
     permission_mode: str | None = None
+    mode: str | None = None
     effort: str | None = None
     agent_type: str | None = None
     memory_files: dict[str, str] = field(default_factory=dict)
@@ -33,6 +34,7 @@ class EnvironmentState:
             provider=str(data.get("provider", "generic")),
             model=data.get("model"),
             permission_mode=data.get("permission_mode"),
+            mode=data.get("mode"),
             effort=data.get("effort"),
             agent_type=data.get("agent_type"),
             memory_files=dict(data.get("memory_files") or {}),

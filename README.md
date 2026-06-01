@@ -118,22 +118,13 @@ Each checkpoint stores:
 
 ### FORK-TRUNCATION
 
-When forking a session, the fork offset is captured when the child session's `SessionStart` hook fires. However, the parent session may still be writing or flushing data at that moment. This race condition can cause the captured `forked_at_offset` to exceed the parent file's actual size by 36-52KB (observed range).
+Fork metadata can become stale if the parent session file is modified after the fork is captured. This occurs when the parent file is rewritten (e.g., edit-send rollback or compaction) after the plugin captures the fork offset at `SessionStart` time.
 
-**Impact**: Fork sessions may reference byte ranges that don't exist in the parent file at capture time. This can cause resume failures or incorrect trajectory reconstruction for deep fork chains.
+**Impact**: The `forked_at_offset` in metadata may exceed the parent file's current size. This field is metadata-only (used for lineage tracking) and does not affect resume functionality, but it means fork lineage information can be inaccurate.
 
-**Workaround**: None currently. This is a known limitation with no planned fix due to the structural timing of provider hooks.
+**Workaround**: None. The original fork-point data no longer exists after parent file modification.
 
-**Detection**: The plugin does not currently validate that `forked_at_offset <= parent_file_size`. You may see this issue when resuming from forks of forks.
-
-### MANIFEST-OFFSET Behavior
-
-Checkpoint manifests store trajectory offsets relative to the fork session's own file (which includes inherited content from the parent). The metadata `forked_at_offset` field references the parent file's offset. This is expected behavior:
-
-- **Manifest offsets**: Used for reading the fork session's trajectory file
-- **Metadata offsets**: Used for tracking lineage and parent relationships
-
-Both are needed for different purposes and the difference is not a bug.
+**Note**: This is a documentation-only limitation. The plugin correctly captures fork offsets at fork time; subsequent parent modifications are outside the plugin's control.
 
 ## Troubleshooting
 

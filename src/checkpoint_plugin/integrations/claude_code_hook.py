@@ -176,6 +176,9 @@ def _seed_claude_env(session_id: str, payload: dict[str, Any]) -> None:
     permission_mode = _first_string(payload, "permission_mode", "permissionMode")
     if permission_mode:
         os.environ.setdefault("CLAUDE_PERMISSION_MODE", permission_mode)
+    mode = _first_string(payload, "mode")
+    if mode:
+        os.environ.setdefault("CLAUDE_MODE", mode)
     effort = _effort_level(payload)
     if effort:
         os.environ.setdefault("CLAUDE_EFFORT", effort)
@@ -199,10 +202,14 @@ def _effort_level(payload: dict[str, Any]) -> str | None:
 
 
 def _session_env(payload: dict[str, Any]) -> dict[str, str]:
-    """Provider fields delivered at SessionStart but not at Stop (e.g. model)."""
+    """Provider fields delivered at SessionStart but not at Stop (e.g. model).
+
+    SA2: capture mode field for plan mode support.
+    """
     fields = {
         "model": _first_string(payload, "model"),
         "permission_mode": _first_string(payload, "permission_mode", "permissionMode"),
+        "mode": _first_string(payload, "mode"),
         "effort": _effort_level(payload),
         "agent_type": _first_string(payload, "agent_type", "agentType"),
     }

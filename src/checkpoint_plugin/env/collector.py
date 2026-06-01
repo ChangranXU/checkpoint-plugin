@@ -107,6 +107,7 @@ def collect_environment(
         or session_env.get("model"),
         permission_mode=_first_env("CLAUDE_PERMISSION_MODE", "CODEX_PERMISSION_MODE", "CODEX_SANDBOX_MODE")
         or session_env.get("permission_mode"),
+        mode=_first_env("CLAUDE_MODE", "CODEX_MODE") or session_env.get("mode"),
         effort=_first_env("CLAUDE_EFFORT") or session_env.get("effort") or _codex_effort(provider, cwd),
         agent_type=_first_env("CLAUDE_AGENT_TYPE", "CODEX_AGENT_TYPE") or session_env.get("agent_type"),
         memory_files=_collect_tree(provider.memory_dir, store),

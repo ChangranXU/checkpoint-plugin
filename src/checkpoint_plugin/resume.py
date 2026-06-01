@@ -126,6 +126,7 @@ class ResumeOrchestrator:
             trajectory.data,
             plan.target_env.model,
             plan.target_env.permission_mode,
+            plan.target_env.mode,
             source_meta,
             has_inherited_prefix,
             plan.session_id,
@@ -737,6 +738,7 @@ def _write_provider_session(
     trajectory: bytes,
     model: str | None,
     permission_mode: str | None,
+    mode: str | None,
     source_meta: dict[str, object] | None = None,
     has_inherited_prefix: bool = False,
     source_session_id: str | None = None,
@@ -746,12 +748,12 @@ def _write_provider_session(
         return None
     if provider_name == "codex":
         return _write_codex_session(
-            provider_home, cwd, new_session_id, trajectory, model, permission_mode,
+            provider_home, cwd, new_session_id, trajectory, model, permission_mode, mode,
             source_meta, inherited_record_count,
         )
     if provider_name == "claude":
         return _write_claude_session(
-            provider_home, cwd, new_session_id, trajectory, model, permission_mode,
+            provider_home, cwd, new_session_id, trajectory, model, permission_mode, mode,
             has_inherited_prefix, source_session_id, inherited_record_count,
         )
     return None
@@ -851,6 +853,7 @@ def _write_codex_session(
     trajectory: bytes,
     model: str | None,
     permission_mode: str | None,
+    mode: str | None,
     source_meta: dict[str, object] | None,
     inherited_record_count: int = 0,
 ) -> Path:
@@ -865,7 +868,7 @@ def _write_codex_session(
     _write_bytes_atomic(
         path,
         _rewrite_codex_trajectory(
-            trajectory, new_session_id, cwd, model, permission_mode, source_meta,
+            trajectory, new_session_id, cwd, model, permission_mode, mode, source_meta,
             inherited_record_count, is_resume=True,
         ),
     )
@@ -879,6 +882,7 @@ def _write_claude_session(
     trajectory: bytes,
     model: str | None,
     permission_mode: str | None,
+    mode: str | None,
     has_inherited_prefix: bool = False,
     source_session_id: str | None = None,
     inherited_record_count: int = 0,
@@ -887,7 +891,7 @@ def _write_claude_session(
     _write_bytes_atomic(
         path,
         _rewrite_claude_trajectory(
-            trajectory, new_session_id, cwd, model, permission_mode,
+            trajectory, new_session_id, cwd, model, permission_mode, mode,
             has_inherited_prefix=has_inherited_prefix,
             source_session_id=source_session_id,
             inherited_record_count=inherited_record_count,
@@ -902,6 +906,7 @@ def _rewrite_codex_trajectory(
     cwd: Path,
     model: str | None,
     permission_mode: str | None,
+    mode: str | None,
     source_meta: dict[str, object] | None,
     inherited_record_count: int = 0,
     is_resume: bool = False,
@@ -974,6 +979,9 @@ def _rewrite_codex_trajectory(
                 # itself a string (legacy/simple form).
                 if permission_mode and isinstance(payload.get("permission_profile"), str):
                     payload["permission_profile"] = permission_mode
+            # SA2: inject mode (collaboration_mode_kind) into task_started events
+            if record.get("type") == "task_started" and mode:
+                payload["collaboration_mode_kind"] = mode
         # F5: rewrite the SOURCE cwd to the resume cwd everywhere it is embedded, not
         # just payload["cwd"]: the structured sandbox/permission write-roots and the
         # environment_context / developer message bodies still named the source
@@ -1318,6 +1326,7 @@ def _rewrite_claude_trajectory(
     cwd: Path,
     model: str | None,
     permission_mode: str | None,
+    mode: str | None,
     *,
     has_inherited_prefix: bool = False,
     source_session_id: str | None = None,
@@ -1378,6 +1387,16 @@ def _rewrite_claude_trajectory(
     latest_version = _latest_claude_version(records)
     last_uuid: str | None = None
     lines: list[bytes] = []
+    # SA2: inject mode record at the beginning if mode is provided
+    if mode:
+        mode_record = {
+            "type": "mode",
+            "mode": mode,
+            "sessionId": new_session_id,
+        }
+        if latest_version:
+            mode_record["version"] = latest_version
+        lines.append(_json_line(mode_record))
     for record in records:
         # F8: file-history-snapshot/summary records carry no sessionId natively; gate
         # the re-pin on field presence so we don't add a non-native key.

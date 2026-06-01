@@ -199,6 +199,9 @@ def _seed_codex_env(session_id: str, payload: dict[str, Any]) -> None:
     permission_mode = _first_string(payload, "permission_mode", "permissionMode")
     if permission_mode:
         os.environ.setdefault("CODEX_PERMISSION_MODE", permission_mode)
+    mode = _first_string(payload, "collaboration_mode_kind", "collaborationModeKind", "mode")
+    if mode:
+        os.environ.setdefault("CODEX_MODE", mode)
 
 
 def _session_env(payload: dict[str, Any]) -> dict[str, str]:
@@ -210,10 +213,13 @@ def _session_env(payload: dict[str, Any]) -> dict[str, str]:
     `session_env` makes the checkpoint metadata self-describing rather than only
     listing the coarse `permission_mode`. Best-effort: codex does not always deliver
     these at the hook, so they're included only when present.
+
+    SA2: capture collaboration_mode_kind (plan mode) from task_started events.
     """
     fields = {
         "model": _first_string(payload, "model"),
         "permission_mode": _first_string(payload, "permission_mode", "permissionMode"),
+        "mode": _first_string(payload, "collaboration_mode_kind", "collaborationModeKind", "mode"),
         "approval_policy": _first_string(payload, "approval_policy", "approvalPolicy"),
         "sandbox_mode": _first_string(payload, "sandbox_mode", "sandboxMode", "sandbox_policy", "sandboxPolicy"),
     }
