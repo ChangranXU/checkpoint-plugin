@@ -11,3 +11,5 @@ htmlcov/
 .ruff_cache/
 raw_sessions/
 .DS_Store
+.plan.md
+.claude/
