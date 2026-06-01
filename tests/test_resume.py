@@ -2287,3 +2287,138 @@ def test_codex_resume_rewrites_cwd_in_dict_keys():
     # The path key was rewritten to the target cwd.
     changes_rec = [json.loads(l) for l in out.splitlines() if json.loads(l).get("payload", {}).get("type") == "patch_apply_end"][0]
     assert "/dst/copy/README.md" in changes_rec["payload"]["changes"]
+
+
+def test_resume_fork_truncation_recovery_from_blob(tmp_path, monkeypatch, capsys):
+    """FORK-TRUNCATION recovery: when parent file is rewritten/truncated after fork
+    (forked_at_offset > parent file size), recover from fork_point_trajectory_ref blob."""
+    plugin_home = tmp_path / "plugin"
+    home = tmp_path / "home"
+    claude_home = home / ".claude"
+    cwd = tmp_path / "work"
+    parent_transcript = tmp_path / "parent.jsonl"
+    cwd.mkdir()
+
+    # Original parent trajectory at fork time
+    inherited = (
+        json.dumps({"type": "mode", "mode": "normal", "sessionId": "parent"}) + "\n"
+        + json.dumps({"type": "user", "sessionId": "parent", "uuid": "u1", "parentUuid": None, "promptId": "p1", "cwd": "/old", "message": {"role": "user", "content": "PARENT-TURN-1"}}) + "\n"
+        + json.dumps({"type": "assistant", "sessionId": "parent", "uuid": "a1", "parentUuid": "u1", "cwd": "/old", "message": {"role": "assistant", "content": []}}) + "\n"
+        + json.dumps({"type": "user", "sessionId": "parent", "uuid": "u2", "parentUuid": "a1", "promptId": "p2", "cwd": "/old", "message": {"role": "user", "content": "PARENT-TURN-2"}}) + "\n"
+        + json.dumps({"type": "assistant", "sessionId": "parent", "uuid": "a2", "parentUuid": "u2", "cwd": "/old", "message": {"role": "assistant", "content": []}}) + "\n"
+    )
+    fork_offset = len(inherited.encode("utf-8"))
+    original_parent_data = inherited.encode("utf-8")
+
+    # Write full parent trajectory
+    parent_transcript.write_bytes(original_parent_data)
+
+    # Forked turn
+    forked_turn = json.dumps({"type": "user", "sessionId": "parent", "uuid": "fu", "parentUuid": "a2", "promptId": "fork-p", "cwd": "/old", "message": {"role": "user", "content": "FORKED-PROMPT"}}) + "\n"
+    fork_transcript = tmp_path / "fork.jsonl"
+    fork_transcript.write_text(inherited + forked_turn, encoding="utf-8")
+
+    (cwd / "file.txt").write_text("v1", encoding="utf-8")
+    _isolate_provider_env(monkeypatch)
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
+    monkeypatch.setenv("TEST_HOME", str(home))
+    monkeypatch.setenv("CHECKPOINT_PROVIDER", "claude")
+
+    # Capture fork session with fork_point_trajectory_ref
+    coordinator = CheckpointCoordinator(session_id="forked", cwd=cwd)
+    coordinator.on_session_start(source="resume", source_transcript_path=str(fork_transcript))
+    coordinator.on_turn_end(
+        TurnRecord(user_message="forked"),
+        TrajectoryReference("claude", str(fork_transcript), fork_offset, fork_transcript.stat().st_size, 1),
+    )
+
+    # Verify fork_point_trajectory_ref was stored
+    store = CheckpointStore(plugin_home / "sessions" / "forked")
+    metadata = json.loads((store.session_dir / "metadata.json").read_text(encoding="utf-8"))
+    assert "fork_point_trajectory_ref" in metadata, "fork_point_trajectory_ref should be stored"
+    fork_point_ref = metadata["fork_point_trajectory_ref"]
+
+    # Verify the blob contains the original parent data
+    fork_point_blob = store.load_blob(fork_point_ref)
+    assert fork_point_blob == original_parent_data + forked_turn.encode("utf-8")
+
+    # Simulate parent file truncation (rewritten after fork, now shorter)
+    truncated_parent = (
+        json.dumps({"type": "mode", "mode": "normal", "sessionId": "parent"}) + "\n"
+        + json.dumps({"type": "user", "sessionId": "parent", "uuid": "u1", "parentUuid": None, "promptId": "p1", "cwd": "/old", "message": {"role": "user", "content": "PARENT-TURN-1"}}) + "\n"
+    )
+    fork_transcript.write_text(truncated_parent, encoding="utf-8")
+
+    # Now fork_offset > file size, triggering recovery
+    assert fork_offset > len(truncated_parent.encode("utf-8"))
+
+    # Resume should recover from blob
+    capsys.readouterr()  # Clear any previous output
+    report = ResumeOrchestrator(cwd=cwd).execute(
+        ResumeOrchestrator(cwd=cwd).plan("forked", 0),
+        lambda _text: True
+    )
+
+    # Check that recovery message was printed
+    captured = capsys.readouterr()
+    assert "Fork lineage truncation detected" in captured.err
+    assert "Successfully recovered" in captured.err
+    assert "from stored fork-point blob" in captured.err
+
+    # Verify materialized session includes inherited content from blob
+    materialized = Path(report.provider_session_path).read_text(encoding="utf-8")
+    assert "PARENT-TURN-1" in materialized, "Should recover parent turn 1 from blob"
+    assert "PARENT-TURN-2" in materialized, "Should recover parent turn 2 from blob"
+    # The forked turn is captured separately in the manifest, not part of inherited prefix
+    # The key test is that the inherited prefix (before fork_offset) was recovered
+
+
+def test_resume_fork_without_recovery_blob_shows_warning(tmp_path, monkeypatch, capsys):
+    """FORK-TRUNCATION: when truncation detected but no fork_point_trajectory_ref exists
+    (old session), show appropriate warning about backward compatibility."""
+    plugin_home = tmp_path / "plugin"
+    home = tmp_path / "home"
+    cwd = tmp_path / "work"
+    transcript = tmp_path / "fork.jsonl"
+    cwd.mkdir()
+
+    # Minimal forked session
+    inherited = json.dumps({"type": "mode", "mode": "normal", "sessionId": "old"}) + "\n"
+    fork_offset = len(inherited.encode("utf-8"))
+    forked_turn = json.dumps({"type": "user", "sessionId": "old", "uuid": "fu", "parentUuid": None, "promptId": "fork-p", "cwd": "/old", "message": {"role": "user", "content": "FORKED"}}) + "\n"
+    transcript.write_text(inherited + forked_turn, encoding="utf-8")
+
+    (cwd / "file.txt").write_text("v1", encoding="utf-8")
+    _isolate_provider_env(monkeypatch)
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
+    monkeypatch.setenv("TEST_HOME", str(home))
+    monkeypatch.setenv("CHECKPOINT_PROVIDER", "claude")
+
+    # Manually create session without fork_point_trajectory_ref (simulating old capture)
+    coordinator = CheckpointCoordinator(session_id="old-fork", cwd=cwd)
+    coordinator.on_session_start(source="resume", source_transcript_path=str(transcript))
+    coordinator.on_turn_end(
+        TurnRecord(user_message="forked"),
+        TrajectoryReference("claude", str(transcript), fork_offset, transcript.stat().st_size, 1),
+    )
+
+    # Remove fork_point_trajectory_ref to simulate old session
+    store = CheckpointStore(plugin_home / "sessions" / "old-fork")
+    metadata_path = store.session_dir / "metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata.pop("fork_point_trajectory_ref", None)
+    metadata_path.write_text(json.dumps(metadata, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+
+    # Truncate the transcript
+    transcript.write_text("", encoding="utf-8")
+
+    # Resume should show warning about missing recovery blob
+    capsys.readouterr()
+    report = ResumeOrchestrator(cwd=cwd).execute(
+        ResumeOrchestrator(cwd=cwd).plan("old-fork", 0),
+        lambda _text: True
+    )
+
+    captured = capsys.readouterr()
+    assert "No fork_point_trajectory_ref found in metadata" in captured.err
+    assert "before recovery feature was added" in captured.err

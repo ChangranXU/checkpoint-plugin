@@ -95,6 +95,9 @@ class CheckpointCoordinator:
                     if anchor is not None:
                         metadata["forked_at_offset"] = anchor[0]
                         metadata["forked_at_record_count"] = anchor[1]
+                        # Store fork-point trajectory as blob
+                        trajectory_sha = self.store.store_blob(anchor[2])
+                        metadata["fork_point_trajectory_ref"] = trajectory_sha
             else:
                 ancestor = _resolve_fork_ancestor_transcript(
                     provider.name, source_transcript_path, self.session_id
@@ -109,6 +112,9 @@ class CheckpointCoordinator:
                     if anchor is not None:
                         metadata["forked_at_offset"] = anchor[0]
                         metadata["forked_at_record_count"] = anchor[1]
+                        # Store fork-point trajectory as blob
+                        trajectory_sha = self.store.store_blob(anchor[2])
+                        metadata["fork_point_trajectory_ref"] = trajectory_sha
         # M2: Codex forks ("fork chat") arrive with source="startup" (or a
         # structured subagent source), so the resume/compact guard never fires.
         # Detect the fork structurally from the new rollout's first session_meta
@@ -127,6 +133,9 @@ class CheckpointCoordinator:
                 if anchor is not None:
                     metadata["forked_at_offset"] = anchor[0]
                     metadata["forked_at_record_count"] = anchor[1]
+                    # Store fork-point trajectory as blob
+                    trajectory_sha = self.store.store_blob(anchor[2])
+                    metadata["fork_point_trajectory_ref"] = trajectory_sha
         clean_env = {key: value for key, value in (session_env or {}).items() if value}
         if clean_env:
             metadata["session_env"] = clean_env
@@ -333,11 +342,12 @@ def _claude_forked_from_session_id(transcript_path: Path) -> str | None:
     return None
 
 
-def _fork_anchor(transcript_path: str) -> tuple[int, int] | None:
-    """(byte offset, record count) of a forked-from transcript at fork time (F5).
+def _fork_anchor(transcript_path: str) -> tuple[int, int, bytes] | None:
+    """(byte offset, record count, trajectory_bytes) of a forked-from transcript at fork time (F5).
 
     The byte size is the point in the parent's history this session branched from;
     pairing it with a record count lets lineage be traced to an exact turn later.
+    The trajectory_bytes is the full content at fork time for faithful reconstruction.
     Returns None when the transcript is absent/unreadable.
     """
     path = Path(transcript_path).expanduser()
@@ -346,13 +356,13 @@ def _fork_anchor(transcript_path: str) -> tuple[int, int] | None:
     except OSError:
         return None
     record_count = sum(1 for line in data.splitlines() if line.strip())
-    return len(data), record_count
+    return len(data), record_count, data
 
 
 def _codex_fork_lineage(
     codex_home: Path,
     own_transcript_path: str | None,
-) -> tuple[str, tuple[int, int] | None, str | None] | None:
+) -> tuple[str, tuple[int, int, bytes] | None, str | None] | None:
     """Lineage for a Codex fork detected via its own session_meta (M2).
 
     Codex "fork chat" sessions arrive at SessionStart with source="startup", so
@@ -400,8 +410,8 @@ def _codex_fork_lineage(
     return str(matches[0]), anchor, forked_from_id
 
 
-def _codex_inlined_prefix_anchor(fork_path: Path) -> tuple[int, int] | None:
-    """(byte offset, record count) of the inlined ancestor prefix in a codex fork (P6-10).
+def _codex_inlined_prefix_anchor(fork_path: Path) -> tuple[int, int, bytes] | None:
+    """(byte offset, record count, trajectory_bytes) of the inlined ancestor prefix in a codex fork (P6-10).
 
     A codex fork inlines the parent's history at the head of its OWN rollout. The
     branch point is the end of that inlined prefix, measured in the fork's own file,
@@ -416,14 +426,14 @@ def _codex_inlined_prefix_anchor(fork_path: Path) -> tuple[int, int] | None:
     count = sum(1 for line in data.splitlines() if line.strip())
     if count == 0:
         return None
-    return len(data), count
+    return len(data), count, data
 
 
 def _codex_resume_lineage(
     codex_home: Path,
     own_transcript_path: str | None,
     own_session_id: str,
-) -> tuple[str, tuple[int, int] | None, str | None] | None:
+) -> tuple[str, tuple[int, int, bytes] | None, str | None] | None:
     """Lineage for a Codex RESUME, anchored on the true parent (F6/F7).
 
     A codex resume's SessionStart `transcript_path` is the resume session's OWN

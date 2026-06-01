@@ -375,7 +375,7 @@ def _trajectory_prefix(store: CheckpointStore, plan: ResumePlan) -> TrajectoryPr
     # (the new promptId), but the inherited pre-fork history lives inline in the
     # SAME transcript at [0:first_start_offset]. Prepend it so the resumed
     # provider session reproduces the full context rather than starting amnesiac.
-    inherited = _inherited_fork_prefix(manifests)
+    inherited = _inherited_fork_prefix(manifests, store)
     inherited_record_count = 0
     if inherited:
         chunks.append(inherited)
@@ -465,14 +465,19 @@ def _first_record_key(chunk: bytes, key_extractor) -> object:
     return None
 
 
-def _inherited_fork_prefix(manifests: list[CheckpointManifest]) -> bytes:
+def _inherited_fork_prefix(manifests: list[CheckpointManifest], store: CheckpointStore) -> bytes:
     """Bytes of inherited history preceding the first captured turn (F3).
 
     When the earliest turn's slice begins past byte 0, the records before it are
     pre-fork context the provider wrote inline into the same transcript. We read
     `[0:start_offset]` from that transcript so resume restores the full thread.
+
+    FORK-TRUNCATION recovery: If the parent file has been rewritten/truncated after
+    fork (forked_at_offset > parent file size), attempt to recover from the
+    fork_point_trajectory_ref blob stored at fork capture time.
+
     Returns b"" for normal sessions (first turn anchored at byte 0) or when the
-    transcript is gone.
+    transcript is gone and no recovery blob exists.
     """
     first = next((m for m in manifests if m.trajectory_ref is not None), None)
     if first is None or first.trajectory_ref is None:
@@ -481,11 +486,68 @@ def _inherited_fork_prefix(manifests: list[CheckpointManifest]) -> bytes:
     if not ref.transcript_path or ref.start_offset <= 0:
         return b""
     path = Path(ref.transcript_path).expanduser()
+
+    # Try to read from parent file first
+    prefix = b""
+    truncation_detected = False
     try:
         with path.open("rb") as handle:
-            prefix = handle.read(ref.start_offset)
+            # Check if we can read the expected range
+            handle.seek(0, 2)  # Seek to end
+            file_size = handle.tell()
+
+            # FORK-TRUNCATION detection: forked_at_offset exceeds current file size
+            if ref.start_offset > file_size:
+                truncation_detected = True
+                print(
+                    f"Warning: Fork lineage truncation detected - parent file {path.name} "
+                    f"is {file_size} bytes but fork point was at {ref.start_offset} bytes. "
+                    f"Attempting recovery from stored fork-point blob...",
+                    file=sys.stderr
+                )
+            else:
+                handle.seek(0)
+                prefix = handle.read(ref.start_offset)
     except OSError:
-        return b""
+        truncation_detected = True
+
+    # If truncation detected or file unavailable, try recovery from blob
+    if truncation_detected or not prefix:
+        metadata = _read_session_metadata(store)
+        fork_point_ref = metadata.get("fork_point_trajectory_ref")
+
+        if fork_point_ref and isinstance(fork_point_ref, str):
+            try:
+                # Load the fork-point trajectory blob
+                fork_point_data = store.load_blob(fork_point_ref)
+
+                # Extract the prefix up to start_offset
+                if len(fork_point_data) >= ref.start_offset:
+                    prefix = fork_point_data[:ref.start_offset]
+                    print(
+                        f"Note: Successfully recovered {len(prefix)} bytes of fork lineage "
+                        f"from stored fork-point blob (ref: {fork_point_ref[:12]}...)",
+                        file=sys.stderr
+                    )
+                else:
+                    print(
+                        f"Warning: Fork-point blob is {len(fork_point_data)} bytes, "
+                        f"shorter than expected offset {ref.start_offset}",
+                        file=sys.stderr
+                    )
+            except (FileNotFoundError, OSError) as exc:
+                print(
+                    f"Warning: Could not load fork-point trajectory blob {fork_point_ref}: {exc}",
+                    file=sys.stderr
+                )
+        elif truncation_detected:
+            print(
+                "Warning: No fork_point_trajectory_ref found in metadata. "
+                "Fork lineage cannot be recovered (session may have been captured "
+                "before recovery feature was added).",
+                file=sys.stderr
+            )
+
     # start_offset is a line boundary; guard against a partial trailing line.
     if prefix and not prefix.endswith(b"\n"):
         cut = prefix.rfind(b"\n")

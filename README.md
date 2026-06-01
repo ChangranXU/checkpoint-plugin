@@ -116,15 +116,13 @@ Each checkpoint stores:
 
 ## Known Limitations
 
-### FORK-TRUNCATION
+### FORK-TRUNCATION (Fixed in current version)
 
-Fork metadata can become stale if the parent session file is modified after the fork is captured. This occurs when the parent file is rewritten (e.g., edit-send rollback or compaction) after the plugin captures the fork offset at `SessionStart` time.
+**Historical issue**: In earlier versions, fork metadata could become stale if the parent session file was modified after the fork was captured. This occurred when the parent file was rewritten (e.g., edit-send rollback or compaction) after the plugin captured the fork offset at `SessionStart` time.
 
-**Impact**: The `forked_at_offset` in metadata may exceed the parent file's current size. This field is metadata-only (used for lineage tracking) and does not affect resume functionality, but it means fork lineage information can be inaccurate.
+**Current behavior**: The plugin now preserves fork-point trajectory data at capture time by storing it as a blob (`fork_point_trajectory_ref` in metadata). When a parent file is rewritten and the original `forked_at_offset` becomes invalid, the plugin automatically recovers the fork lineage from the preserved blob.
 
-**Workaround**: None. The original fork-point data no longer exists after parent file modification.
-
-**Note**: This is a documentation-only limitation. The plugin correctly captures fork offsets at fork time; subsequent parent modifications are outside the plugin's control.
+**Backward compatibility**: Sessions created before this fix may still have stale fork offsets. The plugin detects this condition and shows a warning, but resume functionality is unaffected (fork lineage tracking may be incomplete for these old sessions).
 
 ## Troubleshooting
 
