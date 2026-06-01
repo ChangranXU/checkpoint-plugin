@@ -266,11 +266,12 @@ def test_resume_materializes_codex_native_session(tmp_path, monkeypatch):
     assert records[0]["payload"]["cli_version"] == "1.2.3"
     assert records[0]["payload"]["model_provider"] == "test-provider"
     assert records[0]["payload"]["base_instructions"] == {"text": "be helpful"}
-    # F14: the fresh head meta places forked_from_id immediately after id (idx1).
+    # RF2: resumed sessions should NOT have forked_from_id in HEAD meta (native behavior).
+    # Only forks and subagents have forked_from_id; resumes are like startup sessions.
     head_keys = list(records[0]["payload"].keys())
     assert head_keys[0] == "id"
-    assert head_keys[1] == "forked_from_id"
-    assert records[0]["payload"]["forked_from_id"] == "old"
+    assert head_keys[1] == "timestamp"  # RF2: no forked_from_id for resumes
+    assert "forked_from_id" not in records[0]["payload"]
     # F2: native codex resume keeps the inlined source meta chain (depth-scaled count
     # = 2 for a resume of a startup), rather than collapsing to one head meta.
     metas = [r for r in records if r.get("type") == "session_meta"]

@@ -866,7 +866,7 @@ def _write_codex_session(
         path,
         _rewrite_codex_trajectory(
             trajectory, new_session_id, cwd, model, permission_mode, source_meta,
-            inherited_record_count,
+            inherited_record_count, is_resume=True,
         ),
     )
     return path
@@ -904,6 +904,7 @@ def _rewrite_codex_trajectory(
     permission_mode: str | None,
     source_meta: dict[str, object] | None,
     inherited_record_count: int = 0,
+    is_resume: bool = False,
 ) -> bytes:
     lines: list[bytes] = []
     records = _jsonl_records(trajectory)
@@ -920,8 +921,9 @@ def _rewrite_codex_trajectory(
     # its ORIGINAL id, forked_from_id and payload timestamp, only re-stamping the
     # record-level timestamp to the resume moment (F9) — exactly mirroring native
     # a67e (record-ts=fork moment on all metas; payload-ts=each meta's creation).
+    # RF2: is_resume=True suppresses forked_from_id in HEAD meta (native resume behavior).
     if records and records[0].get("type") == "session_meta":
-        lines.append(_json_line(_codex_head_meta(new_session_id, cwd, source_meta, original_session_id, now)))
+        lines.append(_json_line(_codex_head_meta(new_session_id, cwd, source_meta, original_session_id, now, is_resume)))
     else:
         # No source meta to inline: emit the single synthetic head (legacy shape).
         lines.append(_json_line(_codex_session_meta(new_session_id, cwd, source_meta)))
@@ -1130,8 +1132,9 @@ def _codex_head_meta(
     source_meta: dict[str, object] | None,
     original_session_id: str | None,
     now: str,
+    is_resume: bool = False,
 ) -> dict[str, object]:
-    """A fresh codex head session_meta forked from the source (F2/F14/N2).
+    """A fresh codex head session_meta forked from the source (F2/F14/N2/RF2).
 
     Native head metas place `forked_from_id` immediately after `id` (idx1), carry
     their own creation timestamp as payload `timestamp`, and serialize the remaining
@@ -1141,9 +1144,19 @@ def _codex_head_meta(
     two-phase fill (preserved fields then provenance defaults) emitted
     `cwd, cli_version, model_provider, …, originator, source, thread_source` — a
     byte-distinguishable order drift. Build the payload directly in native order.
+
+    RF2: Only add `forked_from_id` for forks and subagents, NOT for resumes. A resume
+    operation creates a fresh session with no fork lineage (native codex resume/startup
+    sessions have no `forked_from_id` in HEAD meta). Use the same discriminator as
+    `_codex_session_meta`: subagents have a structured `source` dict and need
+    `forked_from_id` to maintain lineage; resumes are explicitly marked via is_resume.
     """
     payload: dict[str, object] = {"id": new_session_id}
-    if original_session_id:
+    # RF2: discriminate subagent (needs forked_from_id) from resume (does not).
+    # Subagents have source={subagent:{...}} dict; resumes are marked is_resume=True.
+    source_value = source_meta.get("source") if source_meta else None
+    is_subagent = isinstance(source_value, dict)
+    if original_session_id and (is_subagent or not is_resume):
         payload["forked_from_id"] = original_session_id  # F14: right after id
     payload["timestamp"] = now
     payload["cwd"] = str(cwd)
