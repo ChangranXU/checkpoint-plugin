@@ -262,12 +262,86 @@ def test_claude_subagent_without_sidechain_file_does_not_slice_parent(tmp_path, 
     assert metadata["lineage"]["parent_session_id"] == "parent-session"
     # P6-9: surface WHY the slice is empty so a reader doesn't mistake it for a bug.
     assert metadata["lineage"]["capture_status"] == "no_sidechain_file"
+    # SA4: timestamp and reason fields are present
+    assert "no_sidechain_file_timestamp" in metadata["lineage"]
+    assert isinstance(metadata["lineage"]["no_sidechain_file_timestamp"], (int, float))
+    assert metadata["lineage"]["no_sidechain_file_reason"] == "no_transcript_path"
     # P11-ZOMBIE-1: no manifest is written — no expensive fs/env snapshot.
     sub_store = CheckpointStore(sub_session_dir)
     assert sub_store.list_manifests() == []
     # No blob files should be written (no fs/env collection ran).
     blob_files = list((sub_session_dir / "blobs").rglob("*")) if (sub_session_dir / "blobs").exists() else []
     assert all(f.is_dir() for f in blob_files), "Expected no blob files for zombie subagent"
+
+
+def test_no_sidechain_file_reasons(tmp_path, monkeypatch):
+    """SA4: no_sidechain_file metadata includes timestamp and reason."""
+    plugin_home = tmp_path / "plugin"
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
+    monkeypatch.setenv("CLAUDE_SESSION_ID", "parent-session")
+
+    # Case 1: no_transcript_path (transcript_path resolves to None)
+    parent_transcript = tmp_path / "proj" / "parent-session.jsonl"
+    parent_transcript.parent.mkdir(parents=True)
+    parent_transcript.write_text(
+        json.dumps({"type": "user", "promptId": "p-1", "message": {"role": "user", "content": "hi"}}) + "\n",
+        encoding="utf-8",
+    )
+    payload1 = {
+        "hook_event_name": "SubagentStop",
+        "session_id": "parent-session",
+        "cwd": str(cwd),
+        "agent_id": "agent1",
+        "agent_type": "Explore",
+        "transcript_path": str(parent_transcript),
+    }
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload1)))
+    assert claude_code_hook.main(["subagent_end"]) == 0
+
+    metadata1 = json.loads((plugin_home / "sessions" / "parent-session--subagent-agent1" / "metadata.json").read_text(encoding="utf-8"))
+    assert metadata1["lineage"]["capture_status"] == "no_sidechain_file"
+    assert metadata1["lineage"]["no_sidechain_file_reason"] == "no_transcript_path"
+    assert "no_sidechain_file_timestamp" in metadata1["lineage"]
+
+    # Case 2: file_not_found (transcript_path exists but file doesn't)
+    subagent_path = tmp_path / "proj" / "parent-session" / "subagents" / "agent-agent2.jsonl"
+    payload2 = {
+        "hook_event_name": "SubagentStop",
+        "session_id": "parent-session",
+        "cwd": str(cwd),
+        "agent_id": "agent2",
+        "agent_type": "Explore",
+        "transcript_path": str(subagent_path),
+    }
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload2)))
+    assert claude_code_hook.main(["subagent_end"]) == 0
+
+    metadata2 = json.loads((plugin_home / "sessions" / "parent-session--subagent-agent2" / "metadata.json").read_text(encoding="utf-8"))
+    assert metadata2["lineage"]["capture_status"] == "no_sidechain_file"
+    assert metadata2["lineage"]["no_sidechain_file_reason"] == "file_not_found"
+    assert "no_sidechain_file_timestamp" in metadata2["lineage"]
+
+    # Case 3: file_empty_or_unreadable (file exists but is empty)
+    subagent_path3 = tmp_path / "proj" / "parent-session" / "subagents" / "agent-agent3.jsonl"
+    subagent_path3.parent.mkdir(parents=True, exist_ok=True)
+    subagent_path3.write_text("", encoding="utf-8")
+    payload3 = {
+        "hook_event_name": "SubagentStop",
+        "session_id": "parent-session",
+        "cwd": str(cwd),
+        "agent_id": "agent3",
+        "agent_type": "Explore",
+        "transcript_path": str(subagent_path3),
+    }
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload3)))
+    assert claude_code_hook.main(["subagent_end"]) == 0
+
+    metadata3 = json.loads((plugin_home / "sessions" / "parent-session--subagent-agent3" / "metadata.json").read_text(encoding="utf-8"))
+    assert metadata3["lineage"]["capture_status"] == "no_sidechain_file"
+    assert metadata3["lineage"]["no_sidechain_file_reason"] == "file_empty_or_unreadable"
+    assert "no_sidechain_file_timestamp" in metadata3["lineage"]
 
 
 def test_claude_model_captured_from_session_start(tmp_path, monkeypatch):

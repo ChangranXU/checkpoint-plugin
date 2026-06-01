@@ -100,6 +100,41 @@ The diff viewer opens a terminal UI grouped like the summary diff: `Environment`
 
 After confirming with `y`, choose whether to restore in place or restore into a new folder copy. Copy mode duplicates the current workspace to a sibling folder, applies the checkpoint there, and leaves the original workspace untouched. The resumed provider session and checkpoint metadata point at the copied workspace; the command also prints the copied `Workspace:` path.
 
+## Checkpoint Metadata Structure
+
+Each checkpoint stores:
+
+- **metadata.json**: Session metadata including provider, source (startup/fork/resume), parent lineage, timestamps, and file references
+- **manifests/**: Turn-by-turn manifests with trajectory offsets, environment snapshots, and filesystem state
+- **env-snapshots/**: Environment configuration at each turn (provider settings, memory files, MCP config)
+- **fs-snapshots/**: Compressed project filesystem at each turn
+- **trajectory reference**: Points to the raw provider transcript file with byte offsets for each turn
+
+**Fork and resume sessions**: Metadata includes `forked_from_transcript` path and `forked_at_offset` pointing to the parent session's fork point. Manifests reference the fork session's own file (which includes inherited content), while metadata offsets reference the parent file.
+
+**Subagent sessions**: Metadata includes `parent_session_id` linking to the parent session. Subagents with `capture_status='no_sidechain_file'` indicate the sidechain file was not found at capture time.
+
+## Known Limitations
+
+### FORK-TRUNCATION
+
+When forking a session, the fork offset is captured when the child session's `SessionStart` hook fires. However, the parent session may still be writing or flushing data at that moment. This race condition can cause the captured `forked_at_offset` to exceed the parent file's actual size by 36-52KB (observed range).
+
+**Impact**: Fork sessions may reference byte ranges that don't exist in the parent file at capture time. This can cause resume failures or incorrect trajectory reconstruction for deep fork chains.
+
+**Workaround**: None currently. This is a known limitation with no planned fix due to the structural timing of provider hooks.
+
+**Detection**: The plugin does not currently validate that `forked_at_offset <= parent_file_size`. You may see this issue when resuming from forks of forks.
+
+### MANIFEST-OFFSET Behavior
+
+Checkpoint manifests store trajectory offsets relative to the fork session's own file (which includes inherited content from the parent). The metadata `forked_at_offset` field references the parent file's offset. This is expected behavior:
+
+- **Manifest offsets**: Used for reading the fork session's trajectory file
+- **Metadata offsets**: Used for tracking lineage and parent relationships
+
+Both are needed for different purposes and the difference is not a bug.
+
 ## Troubleshooting
 
 **Empty checkpoint list?**
@@ -110,13 +145,17 @@ After confirming with `y`, choose whether to restore in place or restore into a 
 
 **Subagent capture incomplete?**
 
-A subagent's closing record sometimes flushes just after the plugin reads its transcript. The plugin handles this two ways: it waits briefly at capture time (up to 3.5s), and — if the record still lands late — it recovers the trailing bytes automatically the next time the checkpoint is read (`show`, `diff`, or `resume`). So a late flush is no longer lost.
+A subagent's closing record sometimes flushes just after the plugin reads its transcript. The plugin handles this two ways: it waits briefly at capture time (up to 1.0s), and — if the record still lands late — it recovers the trailing bytes automatically the next time the checkpoint is read (`show`, `diff`, or `resume`). So a late flush is no longer lost.
 
-To shorten the capture-time wait (the read-time recovery still backstops it):
+To disable the capture-time wait (the read-time recovery still backstops it):
 
 ```bash
 export CHECKPOINT_SIDECHAIN_SETTLE_TIMEOUT=0
 ```
+
+**Fork resume failures?**
+
+If resuming from a fork fails with trajectory errors, you may be hitting the FORK-TRUNCATION limitation (see above). Try resuming from an earlier turn in the fork chain, or from the original parent session.
 
 ## Development
 

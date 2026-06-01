@@ -135,7 +135,15 @@ def _on_subagent_end(payload: dict[str, Any], cwd: Path, parent_session_id: str)
         # into blobs that serve no purpose — there's no trajectory to associate them
         # with. Write metadata so the session is discoverable, but skip the expensive
         # checkpoint.
+        # SA4: record timestamp and reason for missing sidechain file
         lineage["capture_status"] = "no_sidechain_file"
+        lineage["no_sidechain_file_timestamp"] = time.time()
+        if transcript_path is None:
+            lineage["no_sidechain_file_reason"] = "no_transcript_path"
+        elif not transcript_path.exists():
+            lineage["no_sidechain_file_reason"] = "file_not_found"
+        else:
+            lineage["no_sidechain_file_reason"] = "file_empty_or_unreadable"
         coordinator.on_session_start(
             source="subagent",
             session_env=sub_env,

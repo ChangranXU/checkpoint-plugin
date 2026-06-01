@@ -88,8 +88,10 @@ class CheckpointCoordinator:
             if provider.name == "codex":
                 resumed = _codex_resume_lineage(provider.home, source_transcript_path, self.session_id)
                 if resumed is not None:
-                    parent_transcript, anchor = resumed
+                    parent_transcript, anchor, forked_from_id = resumed
                     metadata["forked_from_transcript"] = parent_transcript
+                    if forked_from_id:
+                        metadata["forked_from_id"] = forked_from_id
                     if anchor is not None:
                         metadata["forked_at_offset"] = anchor[0]
                         metadata["forked_at_record_count"] = anchor[1]
@@ -99,6 +101,10 @@ class CheckpointCoordinator:
                 )
                 if ancestor is not None:
                     metadata["forked_from_transcript"] = ancestor
+                    # SA2: Extract forked_from_id from transcript path for Claude
+                    forked_from_id = _extract_session_id_from_path(ancestor)
+                    if forked_from_id:
+                        metadata["forked_from_id"] = forked_from_id
                     anchor = _fork_anchor(ancestor)
                     if anchor is not None:
                         metadata["forked_at_offset"] = anchor[0]
@@ -110,8 +116,10 @@ class CheckpointCoordinator:
         if provider.name == "codex" and "forked_from_transcript" not in metadata:
             fork = _codex_fork_lineage(provider.home, source_transcript_path)
             if fork is not None:
-                parent_transcript, anchor = fork
+                parent_transcript, anchor, forked_from_id = fork
                 metadata["forked_from_transcript"] = parent_transcript
+                if forked_from_id:
+                    metadata["forked_from_id"] = forked_from_id
                 # P6-16: a structurally-detected codex fork arrives as
                 # source="startup"; normalize it to "fork" so readers (and the
                 # picker) don't mistake a branch for a cold start.
@@ -125,6 +133,18 @@ class CheckpointCoordinator:
         clean_lineage = {key: value for key, value in (lineage or {}).items() if value}
         if clean_lineage:
             metadata["lineage"] = clean_lineage
+        # SA3: Inherit parent fork lineage for subagents
+        if source == "subagent" and lineage and lineage.get("parent_session_id"):
+            parent_metadata = _load_parent_metadata(lineage["parent_session_id"], self.home)
+            if parent_metadata and "forked_from_transcript" in parent_metadata:
+                # Inherit fork lineage from parent
+                metadata["forked_from_transcript"] = parent_metadata["forked_from_transcript"]
+                if "forked_from_id" in parent_metadata:
+                    metadata["forked_from_id"] = parent_metadata["forked_from_id"]
+                if "forked_at_offset" in parent_metadata:
+                    metadata["forked_at_offset"] = parent_metadata["forked_at_offset"]
+                if "forked_at_record_count" in parent_metadata:
+                    metadata["forked_at_record_count"] = parent_metadata["forked_at_record_count"]
         self.store._atomic_write(
             metadata_path,
             canonical_json(metadata) + "\n",
@@ -332,18 +352,20 @@ def _fork_anchor(transcript_path: str) -> tuple[int, int] | None:
 def _codex_fork_lineage(
     codex_home: Path,
     own_transcript_path: str | None,
-) -> tuple[str, tuple[int, int] | None] | None:
+) -> tuple[str, tuple[int, int] | None, str | None] | None:
     """Lineage for a Codex fork detected via its own session_meta (M2).
 
     Codex "fork chat" sessions arrive at SessionStart with source="startup", so
     the resume/compact path misses them. The fork link lives in the NEW rollout's
     first `session_meta.forked_from_id`. We read that, discover the parent rollout
     by the `rollout-<ts>-<id>.jsonl` filename convention, and return
-    `(parent_transcript_path, anchor)` where anchor is `_fork_anchor(parent)`.
+    `(parent_transcript_path, anchor, forked_from_id)` where anchor is `_fork_anchor(parent)`.
 
     Returns None when this is not a fork (no forked_from_id) or the rollout can't
     be read. When the parent file can't be found we still return the bare
     forked_from_id as the transcript reference (no anchor) so lineage isn't lost.
+
+    SA2: Now returns a 3-tuple including the explicit forked_from_id.
     """
     if not own_transcript_path:
         return None
@@ -374,8 +396,8 @@ def _codex_fork_lineage(
     if anchor is None and matches:
         anchor = _fork_anchor(str(matches[0]))  # fallback: parent file (legacy)
     if not matches:
-        return forked_from_id, anchor
-    return str(matches[0]), anchor
+        return forked_from_id, anchor, forked_from_id
+    return str(matches[0]), anchor, forked_from_id
 
 
 def _codex_inlined_prefix_anchor(fork_path: Path) -> tuple[int, int] | None:
@@ -401,7 +423,7 @@ def _codex_resume_lineage(
     codex_home: Path,
     own_transcript_path: str | None,
     own_session_id: str,
-) -> tuple[str, tuple[int, int] | None] | None:
+) -> tuple[str, tuple[int, int] | None, str | None] | None:
     """Lineage for a Codex RESUME, anchored on the true parent (F6/F7).
 
     A codex resume's SessionStart `transcript_path` is the resume session's OWN
@@ -417,6 +439,8 @@ def _codex_resume_lineage(
     not the inflated self-file. Falls back to treating a distinct, non-self
     `transcript_path` as the ancestor directly (e.g. a bare prior rollout with no
     inlined meta), so a genuinely-distinct parent path is still recorded.
+
+    SA2: Now returns a 3-tuple including the explicit forked_from_id.
     """
     if not own_transcript_path:
         return None
@@ -425,10 +449,10 @@ def _codex_resume_lineage(
         matches = sorted(codex_home.glob(f"sessions/**/rollout-*-{forked_from_id}.jsonl"))
         if matches:
             parent = str(matches[0])
-            return parent, _fork_anchor(parent)
-        return forked_from_id, None  # parent file gone; keep the bare id as the ref
+            return parent, _fork_anchor(parent), forked_from_id
+        return forked_from_id, None, forked_from_id  # parent file gone; keep the bare id as the ref
     if _path_is_distinct_ancestor(own_transcript_path, own_session_id):
-        return own_transcript_path, _fork_anchor(own_transcript_path)
+        return own_transcript_path, _fork_anchor(own_transcript_path), None
     return None
 
 
@@ -669,3 +693,39 @@ def _claude_session_title(ref: TrajectoryReference) -> str | None:
         if isinstance(title, str) and title:
             return title
     return None
+
+
+def _extract_session_id_from_path(transcript_path: str) -> str | None:
+    """Extract session ID from a transcript path (SA2 helper).
+
+    Handles both codex paths (rollout-<ts>-<id>.jsonl) and claude paths (<id>.jsonl).
+    """
+    path = Path(transcript_path)
+    stem = path.stem
+
+    # Codex format: rollout-2026-06-01T20-17-09-019e831d-c729-7eb3-a4a0-94b8eb7a2bc7
+    if stem.startswith("rollout-"):
+        parts = stem.split("-")
+        if len(parts) >= 8:
+            # Session ID is the last 8 parts (UUID format)
+            return "-".join(parts[-8:])
+
+    # Claude format: just the session ID as filename
+    # UUID format: 8-4-4-4-12 hex digits
+    if len(stem) == 36 and stem.count("-") == 4:
+        return stem
+
+    return None
+
+
+def _load_parent_metadata(parent_session_id: str, home: Path) -> dict[str, Any] | None:
+    """Load metadata from parent session for lineage inheritance (SA3 helper)."""
+    parent_dir = session_dir(parent_session_id, home)
+    parent_metadata_path = parent_dir / "metadata.json"
+    if not parent_metadata_path.exists():
+        return None
+    try:
+        raw_metadata = json.loads(parent_metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return raw_metadata if isinstance(raw_metadata, dict) else None
