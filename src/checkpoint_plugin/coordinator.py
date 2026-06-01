@@ -15,7 +15,7 @@ from .fs.ignore import IgnoreMatcher
 from .fs.snapshot import filesystem_to_blob, snapshot_cwd
 from .integrations._trajectory_slicer import recover_trailing_tail
 from .paths import ensure_home, load_config, session_dir
-from .store import CheckpointStore
+from .store import CheckpointStore, canonical_json
 from .types import CheckpointManifest, TrajectoryReference
 
 
@@ -127,7 +127,7 @@ class CheckpointCoordinator:
             metadata["lineage"] = clean_lineage
         self.store._atomic_write(
             metadata_path,
-            json.dumps(metadata, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            canonical_json(metadata) + "\n",
         )
 
     def on_turn_end(
@@ -247,7 +247,7 @@ class CheckpointCoordinator:
         metadata["session_title"] = title
         self.store._atomic_write(
             metadata_path,
-            json.dumps(metadata, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            canonical_json(metadata) + "\n",
         )
 
 

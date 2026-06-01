@@ -71,14 +71,14 @@ class CheckpointStore:
         return json.loads(self.load_blob(sha).decode("utf-8"))
 
     def write_manifest(self, manifest: CheckpointManifest) -> None:
-        content = json.dumps(manifest.to_json(), ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        content = canonical_json(manifest.to_json()) + "\n"
         self._atomic_write(self._manifest_path(manifest.turn_id), content)
         index = {str(m.turn_id): f"turn_{m.turn_id:04d}.json" for m in self.list_manifests()}
         index[str(manifest.turn_id)] = f"turn_{manifest.turn_id:04d}.json"
         ordered = dict(sorted(index.items(), key=lambda item: int(item[0])))
         self._atomic_write(
             self.index_path,
-            json.dumps(ordered, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            canonical_json(ordered) + "\n",
         )
         self.write_env_snapshots()
 
@@ -111,7 +111,7 @@ class CheckpointStore:
         """Deprecated compatibility path for pre-reference checkpoints."""
         self.trajectory_path.parent.mkdir(parents=True, exist_ok=True)
         start_offset = self.trajectory_path.stat().st_size if self.trajectory_path.exists() else 0
-        line = json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
+        line = canonical_json(record) + "\n"
         encoded = line.encode("utf-8")
         with self.trajectory_path.open("ab") as handle:
             handle.write(encoded)
@@ -157,7 +157,7 @@ class CheckpointStore:
             stale_paths.discard(path)
             self._atomic_write(
                 path,
-                json.dumps(_env_snapshot_json(group, self), ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                canonical_json(_env_snapshot_json(group, self)) + "\n",
             )
         for path in stale_paths:
             path.unlink()

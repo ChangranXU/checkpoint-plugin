@@ -21,7 +21,7 @@ from .fs.restorer import diff_filesystems, render_fs_diff, restore_cwd
 from .fs.snapshot import filesystem_from_blob, snapshot_cwd
 from .integrations._trajectory_slicer import claude_key, codex_key, jsonl_count_records, recover_trailing_tail
 from .paths import backups_dir, ensure_home, load_config, session_dir
-from .store import CheckpointStore
+from .store import CheckpointStore, canonical_json
 from .types import CheckpointManifest, ResumePlan, ResumeReport, TrajectoryReference
 
 
@@ -685,7 +685,7 @@ def _write_resumed_metadata(
         metadata.pop(stale_key, None)
     target_store._atomic_write(
         target_store.session_dir / "metadata.json",
-        json.dumps(metadata, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        canonical_json(metadata) + "\n",
     )
 
 
@@ -1202,10 +1202,15 @@ def _codex_session_meta(
         "timestamp": now,
         "cwd": str(cwd),
     }
-    # P6-11: a forked source carries `forked_from_id`; preserve it on the synthetic
-    # meta so the resumed session records its ancestry (the in-place rewrite path at
-    # _rewrite_codex_trajectory repoints this to the original session id instead).
-    if source_meta and source_meta.get("forked_from_id"):
+    # P6-11/MISS-5: Preserve forked_from_id for subagents (which inherit their parent's
+    # fork ancestry), but NOT for resumes. A resume creates a fresh session with
+    # source='resume' in metadata.json and no forked_* fields (FK1 fix at line 684),
+    # so the trajectory's head meta should also have no forked_from_id. Subagents have
+    # source={subagent:{...}} and DO need forked_from_id to maintain lineage.
+    # Detect subagent by checking if source is a dict (structured subagent source).
+    source_value = source_meta.get("source") if source_meta else None
+    is_subagent = isinstance(source_value, dict)
+    if is_subagent and source_meta and source_meta.get("forked_from_id"):
         payload["forked_from_id"] = source_meta["forked_from_id"]
     _apply_preserved_meta_fields(payload, source_meta)
     _mark_codex_session_visible(payload)
@@ -1424,11 +1429,15 @@ def _rewrite_claude_trajectory(
         own_uuid = record.get("uuid")
         if is_fork_shaped and isinstance(own_uuid, str) and "forkedFrom" not in record:
             record["forkedFrom"] = {"sessionId": source_session_id, "messageUuid": own_uuid}
-        # A forkedFrom carried over from a prior generation already points at the
-        # (preserved) uuid; under the identity map it needs no remap, but on the legacy
-        # remap path re-point it so it doesn't dangle.
+        # RF1: A forkedFrom carried over from a prior generation (resume-of-fork or
+        # resume-of-resume) must point sessionId at the IMMEDIATE parent, not the
+        # grandparent. Native resume rewrites ALL forkedFrom.sessionId to the source.
+        # Under the identity map messageUuid needs no remap, but on the legacy remap
+        # path re-point it so it doesn't dangle.
         existing_fork = record.get("forkedFrom")
         if isinstance(existing_fork, dict):
+            if is_fork_shaped and source_session_id:
+                existing_fork["sessionId"] = source_session_id
             mu = existing_fork.get("messageUuid")
             if isinstance(mu, str) and mu in uuid_map:
                 existing_fork["messageUuid"] = uuid_map[mu]
