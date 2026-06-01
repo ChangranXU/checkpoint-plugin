@@ -46,7 +46,7 @@ checkpoint hooks uninstall codex  # remove Codex hooks only
 
 Checkpoints capture three things at each turn:
 
-- **Environment**: Provider settings, memory files, MCP config, skills
+- **Environment**: Provider settings (model, permission mode, collaboration mode), memory files, MCP config, skills
 - **Filesystem**: All project files (respects `.gitignore` and excludes `.git`, `node_modules`, `.env`*, etc.)
 - **Trajectory**: The conversation transcript through that turn
 
@@ -86,7 +86,7 @@ checkpoint config set . key value
 
 Sessions with `[no capture]` had no sidechain file at capture time (phantom subagent events) and contain metadata only.
 
-Use `checkpoint list --session <session-id>` to list that session's checkpoint turns.
+Use `checkpoint list --session <session-id>` to list that session's checkpoint turns. Turns marked with `[replaced by turn N]` were superseded by an edit-send operation. Both the replaced and replacement turns are valid resume points — the replaced turn restores the pre-edit state, while the replacement restores the post-edit state.
 
 During `checkpoint resume`, the confirmation prompt accepts:
 
@@ -108,21 +108,14 @@ Each checkpoint stores:
 - **manifests/**: Turn-by-turn manifests with trajectory offsets, environment snapshots, and filesystem state
 - **env-snapshots/**: Environment configuration at each turn (provider settings, memory files, MCP config)
 - **fs-snapshots/**: Compressed project filesystem at each turn
-- **trajectory reference**: Points to the raw provider transcript file with byte offsets for each turn
+- **trajectory reference**: Points to the raw provider transcript file with byte offsets for each turn. Fork and resume sessions also store `fork_point_trajectory_ref` blobs containing the inherited trajectory to handle parent transcript rewrites.
+- **blobs/**: Content-addressed storage for trajectory data, deduplicated across sessions
 
-**Fork and resume sessions**: Metadata includes `forked_from_transcript` path and `forked_at_offset` pointing to the parent session's fork point. Manifests reference the fork session's own file (which includes inherited content), while metadata offsets reference the parent file.
+All JSON records use compact formatting (`separators=(",", ":")`) to match native provider output byte-for-byte.
+
+**Fork and resume sessions**: Metadata includes `forked_from_transcript` path and `forked_at_offset` pointing to the parent session's fork point. The fork session writes its own transcript file containing both inherited and new content. Additionally, `fork_point_trajectory_ref` stores the inherited trajectory as a content-addressed blob to handle cases where the parent transcript is rewritten post-fork (e.g., due to edit-send rollback or compaction).
 
 **Subagent sessions**: Metadata includes `parent_session_id` linking to the parent session. Subagents with `capture_status='no_sidechain_file'` indicate the sidechain file was not found at capture time.
-
-## Known Limitations
-
-### FORK-TRUNCATION (Fixed in current version)
-
-**Historical issue**: In earlier versions, fork metadata could become stale if the parent session file was modified after the fork was captured. This occurred when the parent file was rewritten (e.g., edit-send rollback or compaction) after the plugin captured the fork offset at `SessionStart` time.
-
-**Current behavior**: The plugin now preserves fork-point trajectory data at capture time by storing it as a blob (`fork_point_trajectory_ref` in metadata). When a parent file is rewritten and the original `forked_at_offset` becomes invalid, the plugin automatically recovers the fork lineage from the preserved blob.
-
-**Backward compatibility**: Sessions created before this fix may still have stale fork offsets. The plugin detects this condition and shows a warning, but resume functionality is unaffected (fork lineage tracking may be incomplete for these old sessions).
 
 ## Troubleshooting
 
@@ -144,7 +137,7 @@ export CHECKPOINT_SIDECHAIN_SETTLE_TIMEOUT=0
 
 **Fork resume failures?**
 
-If resuming from a fork fails with trajectory errors, you may be hitting the FORK-TRUNCATION limitation (see above). Try resuming from an earlier turn in the fork chain, or from the original parent session.
+Fork sessions preserve their fork-point trajectory at capture time via `fork_point_trajectory_ref` blobs. If the parent transcript is rewritten after forking (e.g., due to edit-send rollback), the plugin automatically recovers from the stored blob. If you encounter trajectory errors, verify the checkpoint was captured with the current version (checkpoints created before commit 56351f8 may lack this recovery feature).
 
 ## Development
 
