@@ -101,9 +101,9 @@ def show_session_browser(
     return _show_tui(providers)
 
 
-def collect_provider_trees(root: Path | None = None) -> dict[str, list[SessionNode]]:
+def collect_provider_trees(root: Path | None = None, show_all: bool = False) -> dict[str, list[SessionNode]]:
     root = root or sessions_dir()
-    nodes = _load_nodes(root)
+    nodes = _load_nodes(root, show_all=show_all)
     _link_nodes(nodes, root)
     attached = {
         child.session_id
@@ -547,7 +547,7 @@ def _show_tui(providers: dict[str, list[SessionNode]]) -> BrowserAction | None:
     return Application(layout=Layout(root, focused_element=body), key_bindings=bindings, style=style, full_screen=True).run()
 
 
-def _load_nodes(root: Path) -> dict[str, SessionNode]:
+def _load_nodes(root: Path, show_all: bool = False) -> dict[str, SessionNode]:
     if not root.exists():
         return {}
     nodes: dict[str, SessionNode] = {}
@@ -557,9 +557,29 @@ def _load_nodes(root: Path) -> dict[str, SessionNode]:
         store = CheckpointStore(child)
         reanchor_last_turn_to_eof(store)
         metadata = _read_metadata(child)
+        manifests = store.list_manifests()
+
+        # Filter out empty sessions unless show_all is True
+        if not show_all and _is_empty_node(manifests, metadata):
+            continue
+
         marker = _session_marker(metadata)
-        nodes[child.name] = SessionNode(child.name, metadata, store.list_manifests(), marker=marker)
+        nodes[child.name] = SessionNode(child.name, metadata, manifests, marker=marker)
     return nodes
+
+
+def _is_empty_node(manifests: list[CheckpointManifest], metadata: dict[str, Any]) -> bool:
+    """Check if a session node is empty/dirty."""
+    # No turns at all
+    if not manifests:
+        return True
+
+    # All turns have empty trajectories (0 records)
+    for manifest in manifests:
+        if manifest.trajectory_ref and manifest.trajectory_ref.record_count > 0:
+            return False
+
+    return True
 
 
 def _link_nodes(nodes: dict[str, SessionNode], root: Path) -> None:

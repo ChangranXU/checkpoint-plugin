@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import shutil
 from pathlib import Path
 
 from .paths import sessions_dir
@@ -29,3 +31,77 @@ def clean_keep_last(keep_last: int, plugin_home: Path | None = None) -> int:
             + "}\n",
         )
     return removed
+
+
+def clean_empty_sessions(plugin_home: Path | None = None, dry_run: bool = False) -> dict[str, list[str]]:
+    """Remove sessions with no captured turns or only metadata shells.
+
+    Returns a dict with 'removed' and 'kept' lists of session IDs.
+    """
+    result = {"removed": [], "kept": [], "errors": []}
+    root = sessions_dir(plugin_home)
+
+    if not root.exists():
+        return result
+
+    for session_dir in sorted(root.iterdir()):
+        if not session_dir.is_dir():
+            continue
+
+        session_id = session_dir.name
+
+        try:
+            # Read session metadata
+            metadata_path = session_dir / "metadata.json"
+            if not metadata_path.exists():
+                result["errors"].append(f"{session_id}: no metadata.json")
+                continue
+
+            with metadata_path.open() as f:
+                metadata = json.load(f)
+
+            # Check if session has any captured turns
+            store = CheckpointStore(session_dir)
+            manifests = store.list_manifests()
+
+            # Determine if session should be removed
+            should_remove = False
+            reason = ""
+
+            if not manifests:
+                # No turns at all - check if it's a subagent with no_sidechain_file
+                lineage = metadata.get("lineage", {})
+                if lineage.get("capture_status") == "no_sidechain_file":
+                    should_remove = True
+                    reason = f"no capture ({lineage.get('no_sidechain_file_reason', 'unknown')})"
+                else:
+                    should_remove = True
+                    reason = "no turns captured"
+            else:
+                # Check if all turns have empty trajectories (0 records)
+                all_empty = True
+                for manifest in manifests:
+                    traj_ref = manifest.trajectory_ref
+                    # TrajectoryReference is a dataclass with record_count attribute
+                    record_count = traj_ref.record_count if traj_ref else 0
+                    if record_count > 0:
+                        all_empty = False
+                        break
+
+                if all_empty:
+                    should_remove = True
+                    reason = f"{len(manifests)} turns with 0 records"
+
+            if should_remove:
+                if dry_run:
+                    result["removed"].append(f"{session_id} [{reason}] (dry-run)")
+                else:
+                    shutil.rmtree(session_dir)
+                    result["removed"].append(f"{session_id} [{reason}]")
+            else:
+                result["kept"].append(session_id)
+
+        except Exception as e:
+            result["errors"].append(f"{session_id}: {e}")
+
+    return result

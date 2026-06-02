@@ -23,6 +23,10 @@ checkpoint hooks install
 
 # Restart your agent, then verify
 checkpoint
+
+# Optional: Clean up any empty sessions from testing
+checkpoint clean --empty --dry-run  # preview
+checkpoint clean --empty            # remove
 ```
 
 ## Configuration
@@ -58,35 +62,35 @@ Restoring a checkpoint shows a summary diff and creates backups before modifying
 # Open the interactive session browser
 checkpoint
 
-# Manual checkpoint (automatic via hooks in normal use)
-checkpoint save --session <session-id> --note "description"
-
-# List sessions, then list turns for one session
+# List sessions (hides empty sessions by default)
 checkpoint list
-checkpoint list --session <session-id>
+checkpoint list --all                    # show all sessions including empty ones
+checkpoint list --session <session-id>   # list turns for a specific session
 
 # Inspect a checkpoint
-checkpoint show <session-id> <turn>
-checkpoint diff <session-id> <turn>
+checkpoint show <session-id>             # show session overview with all turns
+checkpoint show <session-id> <turn>      # show specific turn details
+checkpoint show <session-id> --metadata-only  # quick metadata check
+checkpoint diff <session-id> <turn>      # preview restore changes
 
 # Restore (shows diff + confirmation prompt)
 checkpoint resume <session-id> <turn>
 checkpoint resume <session-id> <turn> --yes  # skip confirmation
 
-# Cleanup old checkpoints
-checkpoint clean --keep-last 100
+# Cleanup
+checkpoint clean --empty                 # remove empty/incomplete sessions
+checkpoint clean --empty --dry-run       # preview what would be removed
+checkpoint clean --keep-last 100         # keep only last N turns per session
+
+# Manual checkpoint (automatic via hooks in normal use)
+checkpoint save --session <session-id> --note "description"
 
 # View or modify config
 checkpoint config get .
-checkpoint config set . key value
+checkpoint config set key value
 ```
 
-`checkpoint` opens a terminal session browser grouped by provider. Use left/right
-or `h`/`l` to switch provider tabs, `j`/`k` or arrows to move, `PageUp`/`PageDown`
-to scroll, and `Enter` to expand a session or focus a turn. The tree shows
-session lineage, fork/resume branches under the parent turn where they split,
-subagents under the parent turn that spawned them, and each session's checkpoint
-timeline. Press `/` to run a command on the selected row:
+`checkpoint` opens a terminal session browser grouped by provider. **Empty sessions are hidden by default** to keep the view clean. Use left/right or `h`/`l` to switch provider tabs, `j`/`k` or arrows to move, `PageUp`/`PageDown` to scroll, and `Enter` to expand a session or focus a turn. The tree shows session lineage, fork/resume branches under the parent turn where they split, subagents under the parent turn that spawned them, and each session's checkpoint timeline. Press `/` to run a command on the selected row:
 
 ```text
 /show      show checkpoint metadata
@@ -103,13 +107,13 @@ command output is visible, `PageUp`/`PageDown` scrolls the output pane. When
 output is not a terminal, `checkpoint` prints the same provider/session/turn tree
 in a plain text form.
 
-`checkpoint list` remains the script-friendly view and shows one row per session:
+`checkpoint list` shows one row per session and **hides empty sessions by default** (those with no captured data). Use `--all` to see everything including empty sessions.
 
 ```text
 <session-id>  <session-title>  <source>  [marker]
 ```
 
-Sessions with `[no capture]` had no sidechain file at capture time (phantom subagent events) and contain metadata only.
+Sessions with `[no capture]` had no sidechain file at capture time and contain metadata only. Use `checkpoint clean --empty` to remove these automatically.
 
 Use `checkpoint list --session <session-id>` to list that session's checkpoint turns. Turns marked with `[replaced by turn N]` were superseded by an edit-send operation. Both the replaced and replacement turns are valid resume points — the replaced turn restores the pre-edit state, while the replacement restores the post-edit state.
 

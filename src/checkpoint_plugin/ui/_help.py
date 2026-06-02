@@ -55,5 +55,7 @@ COMMANDS (via / key)
   /quit              Exit browser
   /help              Display this help text
 
+NOTE: Use 'checkpoint clean --empty' CLI command to remove empty sessions
+
 Press ? or F1 to hide this help panel.
 """

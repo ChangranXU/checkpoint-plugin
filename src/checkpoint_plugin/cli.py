@@ -16,7 +16,7 @@ from .fs.snapshot import filesystem_from_blob
 from .integrations.hook_installer import install_hooks, uninstall_hooks
 from .paths import config_path, load_config, sessions_dir, write_config
 from .resume import ResumeOptions, ResumeOrchestrator
-from .retention import clean_keep_last
+from .retention import clean_empty_sessions, clean_keep_last
 from .store import CheckpointStore
 from .types import ResumePlan
 from .ui.diff_viewer import show_diff_viewer
@@ -51,10 +51,12 @@ def main(argv: list[str] | None = None) -> int:
 
     list_cmd = sub.add_parser("list", help="List sessions or turns")
     list_cmd.add_argument("--session")
+    list_cmd.add_argument("--all", action="store_true", help="Show all sessions including empty ones")
 
-    show = sub.add_parser("show", help="Show a checkpoint")
+    show = sub.add_parser("show", help="Show a checkpoint or session metadata")
     show.add_argument("session")
-    show.add_argument("turn", type=int)
+    show.add_argument("turn", type=int, nargs="?", help="Turn number (omit to show session overview)")
+    show.add_argument("--metadata-only", action="store_true", help="Show only session metadata, no turn details")
 
     diff = sub.add_parser("diff", help="Diff current state against a checkpoint")
     diff.add_argument("session")
@@ -66,8 +68,10 @@ def main(argv: list[str] | None = None) -> int:
     resume.add_argument("--yes", action="store_true")
     resume.add_argument("--target")
 
-    clean = sub.add_parser("clean", help="Apply retention")
-    clean.add_argument("--keep-last", type=int, default=100)
+    clean = sub.add_parser("clean", help="Apply retention or remove empty sessions")
+    clean.add_argument("--keep-last", type=int, help="Keep only last N turns per session")
+    clean.add_argument("--empty", action="store_true", help="Remove sessions with no captured turns")
+    clean.add_argument("--dry-run", action="store_true", help="Show what would be removed without removing")
 
     hooks = sub.add_parser("hooks", help="Install or uninstall agent lifecycle hooks")
     hooks.add_argument("action", choices=["install", "uninstall"])
@@ -92,9 +96,9 @@ def _dispatch(args: argparse.Namespace) -> int:
         print(f"Saved checkpoint {manifest.session_id} turn {manifest.turn_id}")
         return 0
     if args.command == "list":
-        return _cmd_list(args.session)
+        return _cmd_list(args.session, show_all=getattr(args, "all", False))
     if args.command == "show":
-        return _cmd_show(args.session, args.turn)
+        return _cmd_show(args.session, args.turn, metadata_only=getattr(args, "metadata_only", False))
     if args.command == "diff":
         # F13: a terminal/forked session never restarts under its own id, so its
         # last stored turn may trail EOF. Reanchor on read so the diff reflects the
@@ -143,9 +147,29 @@ def _dispatch(args: argparse.Namespace) -> int:
             print(f"Resume with: {_colorize(report.resume_command, 'bold green')}")
         return 0
     if args.command == "clean":
-        removed = clean_keep_last(args.keep_last)
-        print(f"Removed {removed} old manifest(s)")
-        return 0
+        if args.empty:
+            result = clean_empty_sessions(dry_run=args.dry_run)
+            if result["removed"]:
+                action = "Would remove" if args.dry_run else "Removed"
+                print(f"{action} {len(result['removed'])} empty session(s):")
+                for session in result["removed"]:
+                    print(f"  - {session}")
+            else:
+                print("No empty sessions found")
+            if result["kept"]:
+                print(f"Kept {len(result['kept'])} session(s) with data")
+            if result["errors"]:
+                print("Errors:")
+                for error in result["errors"]:
+                    print(f"  - {error}")
+            return 0
+        elif args.keep_last is not None:
+            removed = clean_keep_last(args.keep_last)
+            print(f"Removed {removed} old manifest(s)")
+            return 0
+        else:
+            print("Error: must specify --empty or --keep-last", file=sys.stderr)
+            return 1
     if args.command == "hooks":
         return _cmd_hooks(args.action, args.provider)
     if args.command == "config":
@@ -161,9 +185,10 @@ def _cmd_checkpoint() -> int:
 
 
 def _dispatch_browser_action(action: BrowserAction) -> int:
-    if action.session_id is None or action.turn_id is None:
+    if action.session_id is None:
         return 0
     if action.command == "show":
+        # Browser actions always have turn_id when command is show
         return _cmd_show(action.session_id, action.turn_id)
     if action.command == "diff":
         reanchor_last_turn_to_eof(CheckpointStore(sessions_dir() / action.session_id))
@@ -181,7 +206,31 @@ def _dispatch_browser_action(action: BrowserAction) -> int:
     return 0
 
 
-def _cmd_list(session: str | None) -> int:
+def _is_empty_session(session_dir: Path, metadata: dict[str, Any]) -> bool:
+    """Check if a session is empty/dirty and should be hidden by default."""
+    try:
+        store = CheckpointStore(session_dir)
+        manifests = store.list_manifests()
+
+        # No turns at all
+        if not manifests:
+            return True
+
+        # All turns have empty trajectories (0 records)
+        all_empty = True
+        for manifest in manifests:
+            traj_ref = manifest.trajectory_ref
+            if traj_ref and traj_ref.record_count > 0:
+                all_empty = False
+                break
+
+        return all_empty
+    except Exception:
+        # On error, show the session to be safe
+        return False
+
+
+def _cmd_list(session: str | None, show_all: bool = False) -> int:
     root = sessions_dir()
     if session is None:
         if not root.exists():
@@ -189,6 +238,11 @@ def _cmd_list(session: str | None) -> int:
         for child in sorted(root.iterdir()):
             if child.is_dir():
                 metadata = _read_session_metadata(child)
+
+                # Filter out empty/dirty sessions unless --all is specified
+                if not show_all and _is_empty_session(child, metadata):
+                    continue
+
                 title = _display_metadata_value(metadata.get("session_title"))
                 source = _display_metadata_value(metadata.get("source"))
                 marker = _session_marker(metadata, child)
@@ -331,20 +385,67 @@ def _session_marker(metadata: dict[str, Any], session_path: Path) -> str:
     return ""
 
 
-def _cmd_show(session: str, turn: int) -> int:
-    store = CheckpointStore(sessions_dir() / session)
+def _cmd_show(session: str, turn: int | None, metadata_only: bool = False) -> int:
+    session_dir = sessions_dir() / session
+    if not session_dir.exists():
+        print(f"Session not found: {session}", file=sys.stderr)
+        return 1
+
+    # Always show session metadata first
+    metadata = _read_session_metadata(session_dir)
+    print(_colorize("Session Metadata:", "bold"))
+    print(json.dumps(metadata, indent=2, sort_keys=True))
+    print()
+
+    store = CheckpointStore(session_dir)
     # F13: reanchor the last turn to EOF on read so `show` of a terminal/forked
     # session reports the full final turn rather than the capture-time under-count.
     reanchor_last_turn_to_eof(store)
-    manifest = store.read_manifest(turn)
+    manifests = store.list_manifests()
+
+    # Show turn summary
+    print(_colorize("Turns:", "bold"))
+    if not manifests:
+        print("  (no turns captured)")
+    else:
+        replaced = _edit_send_replaced_turns(store, manifests)
+        carries_pre_fork = _turns_carrying_pre_fork_rollback(manifests, replaced)
+        for manifest in manifests:
+            preview = manifest.user_message_preview.replace("\n", " ")[:80]
+            marker = ""
+            if manifest.turn_id in replaced:
+                marker = _colorize(" [replaced by turn {}]".format(replaced[manifest.turn_id]), "yellow")
+            elif manifest.turn_id in carries_pre_fork:
+                marker = _colorize(" [carries pre-fork rolled-back turn(s)]", "yellow")
+            print(f"  {manifest.turn_id:04d}  {manifest.created_ts}  {preview}{marker}")
+    print()
+
+    # If no specific turn requested or metadata-only, stop here
+    if turn is None or metadata_only:
+        if not manifests:
+            marker = _session_marker(metadata, session_dir)
+            if marker:
+                print(_colorize(f"Note: {marker}", "yellow"))
+        return 0
+
+    # Show specific turn details
+    try:
+        manifest = store.read_manifest(turn)
+    except (FileNotFoundError, KeyError):
+        print(f"Turn {turn} not found in session {session}", file=sys.stderr)
+        return 1
+
     env = environment_from_blob(manifest.env_ref, store)
     fs = filesystem_from_blob(manifest.fs_ref, store)
+
+    print(_colorize(f"Turn {turn} Details:", "bold"))
     print(json.dumps(manifest.to_json(), indent=2, sort_keys=True))
     print()
-    print("Environment:")
+    print(_colorize("Environment:", "bold"))
     print(json.dumps(env.to_json(), indent=2, sort_keys=True))
     print()
-    print(f"Filesystem: {len(fs.files)} files at {fs.cwd}")
+    print(_colorize("Filesystem:", "bold"))
+    print(f"{len(fs.files)} files at {fs.cwd}")
     return 0
 
 
