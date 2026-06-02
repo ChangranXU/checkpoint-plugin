@@ -91,17 +91,17 @@ timeline. Press `/` to run a command on the selected row:
 ```text
 /show      show checkpoint metadata
 /diff      preview restore changes
-/resume    preview restore changes inline, then confirm in the browser
+/resume    show the checkpoint resume command to run outside the browser
 /quit      exit
 ```
 
 `r` and `d` are shortcuts for resume and diff on the selected turn. Resume is
 offered only for valid parent-session checkpoint turns. Commands render in an
-inline output pane and keep the browser open; `/resume` shows the restore preview
-and waits for `y` confirmation before restoring in place. Once command output is
-visible, `PageUp`/`PageDown` scrolls the output pane. When output is not a
-terminal, `checkpoint` prints the same provider/session/turn tree in a plain text
-form.
+inline output pane and keep the browser open; `/resume` prints a copyable
+`checkpoint resume <session-id> <turn>` command instead of restoring inline. Once
+command output is visible, `PageUp`/`PageDown` scrolls the output pane. When
+output is not a terminal, `checkpoint` prints the same provider/session/turn tree
+in a plain text form.
 
 `checkpoint list` remains the script-friendly view and shows one row per session:
 

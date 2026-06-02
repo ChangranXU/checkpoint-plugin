@@ -17,7 +17,7 @@ NAVIGATION
 
 ACTIONS
   Enter              Toggle expand/collapse for selected session
-  r                  Resume selected checkpoint (if resumable)
+  r                  Show resume command for selected checkpoint
   d                  Show diff for selected turn
   /                  Enter command mode (type /show, /diff, /resume, /quit)
   ?  or F1           Toggle help panel
@@ -51,7 +51,7 @@ SYMBOLS
 COMMANDS (via / key)
   /show              Show full checkpoint manifest as JSON
   /diff              Show changes that would be applied by resume
-  /resume            Preview and confirm checkpoint restoration
+  /resume            Show the checkpoint resume command
   /quit              Exit browser
   /help              Display this help text
 

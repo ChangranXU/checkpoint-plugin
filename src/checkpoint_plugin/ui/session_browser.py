@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import sys
 from dataclasses import dataclass, field
@@ -21,9 +20,9 @@ from prompt_toolkit.styles import Style
 
 from checkpoint_plugin.coordinator import reanchor_last_turn_to_eof
 from checkpoint_plugin.paths import sessions_dir
-from checkpoint_plugin.resume import ResumeOptions, ResumeOrchestrator, _parent_turn_for_subagent
+from checkpoint_plugin.resume import ResumeOrchestrator, _parent_turn_for_subagent
 from checkpoint_plugin.store import CheckpointStore
-from checkpoint_plugin.types import CheckpointManifest, ResumePlan
+from checkpoint_plugin.types import CheckpointManifest
 from checkpoint_plugin.ui._helpers import format_timestamp, truncate_with_ellipsis
 from checkpoint_plugin.ui._rendering import render_tree_row
 from checkpoint_plugin.ui._help import render_help_text as _render_help_text
@@ -150,7 +149,6 @@ def _show_tui(providers: dict[str, list[SessionNode]]) -> BrowserAction | None:
         "output_visible": False,
         "output_scroll": 0,
         "tree_scroll": 0,
-        "pending_resume": None,
         "output_height": 8,
         "show_help": False,
     }
@@ -197,7 +195,6 @@ def _show_tui(providers: dict[str, list[SessionNode]]) -> BrowserAction | None:
 
     bindings = KeyBindings()
     browse_mode = Condition(lambda: state["mode"] == "browse")
-    resume_confirm_mode = Condition(lambda: state["mode"] == "resume_confirm")
 
     def invalidate(event) -> None:  # noqa: ANN001
         event.app.invalidate()
@@ -261,27 +258,16 @@ def _show_tui(providers: dict[str, list[SessionNode]]) -> BrowserAction | None:
             set_status("Diff result rendered inline.", event)
             return
         if action.command == "resume":
-            start_inline_resume(action, event)
-
-    def start_inline_resume(action: BrowserAction, event) -> None:  # noqa: ANN001
-        if action.session_id is None or action.turn_id is None:
-            return
-        title, text, plan = _resume_preview(action.session_id, action.turn_id)
-        state["pending_resume"] = plan
-        if plan is None:
-            set_output(title, text, event)
-            set_status("Resume preview failed.", event)
-            return
-        set_output(title, text + "\n\nPress y to restore in place, or Esc to cancel.", event)
-        state["mode"] = "resume_confirm"
-        set_status("Confirm inline resume: y restores in place; Esc cancels.", event)
+            set_output(*_resume_hint(action.session_id, action.turn_id), event)
+            set_status("Resume command shown. Run it outside the browser to restore.", event)
 
     def open_resume_for_selection(event) -> None:  # noqa: ANN001
         action = selected_turn_action("resume")
         if action is None or action.session_id is None or action.turn_id is None:
             set_status("Resume is available only for valid parent-session checkpoint turns.", event)
             return
-        start_inline_resume(action, event)
+        set_output(*_resume_hint(action.session_id, action.turn_id), event)
+        set_status("Resume command shown. Run it outside the browser to restore.", event)
 
     def selected_turn_action(command: str) -> BrowserAction | None:
         row = selected_row()
@@ -328,9 +314,6 @@ def _show_tui(providers: dict[str, list[SessionNode]]) -> BrowserAction | None:
                 return
             if action.command == "quit":
                 event.app.exit(result=None)
-                return
-            if action.command == "resume":
-                run_inline_action(action, event)
                 return
             run_inline_action(action, event)
             return
@@ -381,11 +364,6 @@ def _show_tui(providers: dict[str, list[SessionNode]]) -> BrowserAction | None:
             event.app.layout.focus(body)
             set_status("Command cancelled.", event)
             return
-        if state["mode"] == "resume_confirm":
-            state["mode"] = "browse"
-            state["pending_resume"] = None
-            set_status("Inline resume cancelled.", event)
-            return
         event.app.exit(result=None)
 
     @bindings.add("q", filter=browse_mode)
@@ -403,20 +381,6 @@ def _show_tui(providers: dict[str, list[SessionNode]]) -> BrowserAction | None:
             set_status("Select a checkpoint turn before diffing.", event)
             return
         run_inline_action(action, event)
-
-    @bindings.add("y", filter=resume_confirm_mode)
-    def _confirm_resume(event) -> None:  # noqa: ANN001
-        plan = state.get("pending_resume")
-        if plan is None:
-            state["mode"] = "browse"
-            set_status("No pending resume to confirm.", event)
-            return
-        set_status("Restoring checkpoint inline...", event)
-        title, text = _execute_resume(plan)
-        state["mode"] = "browse"
-        state["pending_resume"] = None
-        set_output(title, text, event)
-        set_status("Inline resume finished.", event)
 
     @bindings.add("pagedown")
     def _page_down(event) -> None:  # noqa: ANN001
@@ -565,6 +529,7 @@ def _show_tui(providers: dict[str, list[SessionNode]]) -> BrowserAction | None:
             # Output pane
             "output.title": "#00d7ff bold",
             "output.meta": "#808080",
+            "output.command": "bg:#005f00 #ffffff bold",
             # Help panel
             "help.header": "#00d7ff bold underline",
             "help.key": "#ffff00 bold",
@@ -861,7 +826,7 @@ def _detail_fragments(row: TreeRow | None, state: dict[str, Any]) -> list[tuple[
         can_resume = _can_resume_row(row)
         if can_resume:
             fragments.append(("class:badge.resumable", " ✓ RESUMABLE "))
-            fragments.append(("", "  Press r or /resume to restore\n"))
+            fragments.append(("", "  Press r or /resume to show the restore command\n"))
         else:
             if row.node.subagent_parent or row.node.source == "subagent":
                 fragments.append(("class:badge.blocked", " ✗ SUBAGENT "))
@@ -898,9 +863,7 @@ def _status_fragments(state: dict[str, Any]) -> list[tuple[str, str]]:
     mode = state.get("mode", "browse")
     status_text = str(state.get("status", ""))
 
-    if mode == "resume_confirm":
-        return [("class:status.confirm", f" ⚠ CONFIRM RESUME: {status_text} ")]
-    elif mode == "command":
+    if mode == "command":
         return [("class:status.command", f" COMMAND: {status_text} ")]
     else:
         return [("class:status", f" {status_text} ")]
@@ -921,7 +884,7 @@ def _help_fragments() -> list[tuple[str, str]]:
         ("class:help.key", "Tab / Shift+Tab"),
         ("class:help.text", "   Expand all / Collapse all\n"),
         ("class:help.key", "r"),
-        ("class:help.text", "                 Resume selected checkpoint\n"),
+        ("class:help.text", "                 Show resume command for selected checkpoint\n"),
         ("class:help.key", "d"),
         ("class:help.text", "                 Show diff for selected turn\n"),
         ("class:help.key", "/"),
@@ -1056,6 +1019,8 @@ def _output_scroll_status(state: dict[str, Any]) -> str:
 
 
 def _line_style(line: str) -> str:
+    if line.startswith("checkpoint resume "):
+        return "class:output.command"
     if line.startswith("+"):
         return "ansigreen"
     if line.startswith("-"):
@@ -1107,45 +1072,20 @@ def _diff_result(session_id: str, turn_id: int) -> tuple[str, str]:
         return f"Diff {session_id} turn {turn_id}", f"Error: {exc}"
 
 
-def _resume_preview(session_id: str, turn_id: int) -> tuple[str, str, ResumePlan | None]:
-    reanchor_last_turn_to_eof(CheckpointStore(sessions_dir() / session_id))
-    orchestrator = ResumeOrchestrator()
-    try:
-        plan = orchestrator.plan(session_id, turn_id)
-    except RuntimeError as exc:
-        return f"Resume {session_id} turn {turn_id}", f"Error: {exc}", None
-    return f"Resume {session_id} turn {turn_id}", plan.render(), plan
-
-
-def _execute_resume(plan: ResumePlan) -> tuple[str, str]:
-    orchestrator = ResumeOrchestrator(cwd=Path(plan.current_fs.cwd))
-    try:
-        report = orchestrator.execute(plan, lambda _text: ResumeOptions(proceed=True))
-    except RuntimeError as exc:
-        error_msg = f"Resume failed: {exc}\n\n"
-        error_msg += "Possible causes:\n"
-        error_msg += "• Target directory is not writable\n"
-        error_msg += "• Checkpoint data is corrupted\n"
-        error_msg += "• Required files are missing\n"
-        error_msg += "\nNo changes were made to your system."
-        return f"Resume {plan.session_id} turn {plan.turn_id}", error_msg
-    except Exception as exc:
-        return f"Resume {plan.session_id} turn {plan.turn_id}", f"Unexpected error: {exc}"
-
-    lines = [
-        "✓ Resume completed successfully!",
-        "",
-        f"New session: {report.new_session_id}",
-        f"Workspace: {report.target_cwd or '-'}",
-        f"Backup: {report.backup_dir}",
-        f"Files changed: {len(report.changed_files)}",
-    ]
-    if report.provider_session_path is not None:
-        lines.append(f"Provider session: {report.provider_session_path}")
-    if report.resume_command is not None:
-        lines.append("")
-        lines.append(f"Resume with: {report.resume_command}")
-    return f"Resume {plan.session_id} turn {plan.turn_id}", "\n".join(lines)
+def _resume_hint(session_id: str, turn_id: int) -> tuple[str, str]:
+    command = f"checkpoint resume {session_id} {turn_id}"
+    return (
+        f"Resume {session_id} turn {turn_id}",
+        "\n".join(
+            [
+                "Run this command outside the browser to restore the checkpoint:",
+                "",
+                command,
+                "",
+                "The CLI will show the restore diff and ask for confirmation before applying changes.",
+            ]
+        ),
+    )
 
 
 def _read_metadata(session_dir: Path) -> dict[str, Any]:

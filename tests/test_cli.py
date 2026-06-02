@@ -19,6 +19,7 @@ from checkpoint_plugin.ui.session_browser import (
     _header_fragments,
     _output_fragments,
     _output_page_size,
+    _resume_hint,
     _rows_for_nodes,
     collect_provider_trees,
     render_session_tree,
@@ -371,6 +372,26 @@ def test_session_browser_resume_only_on_valid_checkpoint_turn(tmp_path, monkeypa
     assert _command_action("/resume", session_header) is None
 
 
+def test_session_browser_resume_outputs_cli_command_hint_only():
+    title, text = _resume_hint("parent", 3)
+
+    assert title == "Resume parent turn 3"
+    assert "checkpoint resume parent 3" in text
+    assert "Run this command outside the browser" in text
+    assert "Press y" not in text
+    assert "restore in place" not in text
+
+    fragments = _output_fragments(
+        {
+            "output_visible": True,
+            "output_title": title,
+            "output_text": text,
+            "output_scroll": 0,
+        }
+    )
+    assert ("class:output.command", "checkpoint resume parent 3\n") in fragments
+
+
 def test_output_fragments_show_inline_command_result():
     fragments = _output_fragments(
         {
@@ -576,7 +597,11 @@ def test_tui_places_same_turn_subagent_before_fork_link(tmp_path, monkeypatch):
     rows = _rows_for_nodes(providers["claude"])
     labels = [row.label for row in rows]
 
-    turn_index = labels.index("T0001 │ 2026-01-01 00:02 │ spawn abc123 and then fork")
+    turn_index = next(
+        index
+        for index, row in enumerate(rows)
+        if row.kind == "turn" and row.node.session_id == "claude-parent" and row.manifest and row.manifest.turn_id == 1
+    )
     subagent_index = labels.index("subagent spawned here")
     fork_index = labels.index("forked/resumed here")
     assert turn_index < subagent_index < fork_index
