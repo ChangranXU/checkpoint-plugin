@@ -227,9 +227,13 @@ def _show_tui(providers: dict[str, list[SessionNode]]) -> BrowserAction | None:
         if not current_rows:
             return
         provider = current_provider()
+        old_selection = selected_by_provider[provider]
         selected_by_provider[provider] = max(0, min(selected_by_provider[provider] + delta, len(current_rows) - 1))
-        _sync_tree_scroll(state, selected_by_provider[provider], len(current_rows))
-        invalidate(event)
+
+        # Only invalidate if selection actually changed
+        if old_selection != selected_by_provider[provider]:
+            _sync_tree_scroll(state, selected_by_provider[provider], len(current_rows))
+            invalidate(event)
 
     def scroll_output(delta: int, event) -> bool:  # noqa: ANN001
         if not state.get("output_visible") or not _output_can_scroll(state):
@@ -343,16 +347,21 @@ def _show_tui(providers: dict[str, list[SessionNode]]) -> BrowserAction | None:
         if row.manifest is None:
             set_status("Select a checkpoint turn to inspect or resume.", event)
         elif _can_resume_row(row):
-            set_status(f"Selected resumable turn {row.manifest.turn_id} in {row.node.session_id}. Press r or use /resume.", event)
+            set_status(f"✓ Turn {row.manifest.turn_id} | Resumable | Press: r=resume d=diff Enter=show", event)
         else:
-            set_status(f"Selected checkpoint turn {row.manifest.turn_id}; resume is not available for this session.", event)
+            reason = ""
+            if row.node.subagent_parent or row.node.source == "subagent":
+                reason = "subagent"
+            elif row.node.marker:
+                reason = "no capture"
+            set_status(f"Turn {row.manifest.turn_id} | Not resumable ({reason}) | Press: d=diff Enter=show", event)
 
     @bindings.add("/", filter=browse_mode)
     def _command_mode(event) -> None:  # noqa: ANN001
         state["mode"] = "command"
         command_buffer.text = ""
         event.app.layout.focus(command)
-        set_status("Commands: show, diff, resume, quit  |  Tab to expand all  |  Esc to cancel", event)
+        set_status("Type: show | diff | resume | help | quit  (Esc cancels)", event)
 
     @bindings.add("?", filter=browse_mode)
     @bindings.add("f1", filter=browse_mode)
@@ -525,35 +534,47 @@ def _show_tui(providers: dict[str, list[SessionNode]]) -> BrowserAction | None:
     root = HSplit([header, body, detail, help_panel, output, status, command])
     style = Style.from_dict(
         {
-            "tab": "#888888 bold",
-            "tab.selected": "bg:#005faf #ffffff bold",
-            "tab.separator": "#444444",
-            "provider": "#00afff bold",
+            # Tabs - more distinct active state
+            "tab": "#888888",
+            "tab.selected": "bg:#0087ff #ffffff bold",
+            "tab.separator": "#666666",
+            # Provider/Session - better hierarchy
+            "provider": "#00d7ff bold",
             "session": "#ffffff bold",
-            "session.startup": "#00ff00 bold",
+            "session.startup": "#00ff87 bold",
             "session.fork": "#ffaf00 bold",
-            "session.subagent": "#af00ff bold",
-            "turn": "#cccccc",
-            "turn.recent": "#ffffff",
-            "fork": "#ffaf00",
-            "subagent": "#af00ff",
-            "link": "#666666",
-            "tree.branch": "#444444",
-            "muted": "#666666",
-            "dim": "#555555",
-            "status": "bg:#005f5f #ffffff",
-            "status.command": "bg:#5f5f00 #ffffff",
-            "status.confirm": "bg:#af0000 #ffffff bold",
+            "session.subagent": "#d787ff bold",
+            # Turns - add recency indicator
+            "turn": "#aaaaaa",
+            "turn.recent": "#ffffff bold",
+            # Relationships
+            "fork": "#ff8700",
+            "subagent": "#af87ff",
+            "link": "#808080",
+            # Tree structure
+            "tree.branch": "#4e4e4e",
+            # Text hierarchy
+            "muted": "#767676",
+            "dim": "#585858",
+            # Status bar - contextual colors
+            "status": "bg:#005f87 #ffffff",
+            "status.command": "bg:#af8700 #ffffff",
+            "status.confirm": "bg:#d70000 #ffffff bold",
+            # Command mode
             "command": "#00ff00 bold",
-            "output.title": "#00afff bold",
-            "output.meta": "#888888",
-            "help.header": "#00afff bold",
-            "help.key": "#ffff00",
-            "help.text": "#cccccc",
-            "detail.label": "#00afff",
+            # Output pane
+            "output.title": "#00d7ff bold",
+            "output.meta": "#808080",
+            # Help panel
+            "help.header": "#00d7ff bold underline",
+            "help.key": "#ffff00 bold",
+            "help.text": "#bcbcbc",
+            # Detail panel
+            "detail.label": "#00afff bold",
             "detail.value": "#ffffff",
-            "badge.resumable": "bg:#005f00 #ffffff bold",
-            "badge.blocked": "bg:#5f0000 #ffffff",
+            # Badges - more distinct
+            "badge.resumable": "bg:#00af00 #ffffff bold",
+            "badge.blocked": "bg:#af0000 #ffffff bold",
         }
     )
     return Application(layout=Layout(root, focused_element=body), key_bindings=bindings, style=style, full_screen=True).run()
@@ -711,7 +732,15 @@ def _header_fragments(
 
 def _body_fragments(rows: list[TreeRow], selected: int, state: dict[str, Any]) -> list[tuple[str, str]]:
     if not rows:
-        return [("class:muted", "No sessions for this provider.\n")]
+        return [
+            ("class:muted", "\n"),
+            ("class:muted", "  📭 No sessions found for this provider.\n"),
+            ("class:muted", "\n"),
+            ("class:help.text", "  Try:\n"),
+            ("class:help.text", "  • Switch provider tabs with ←/→ or h/l\n"),
+            ("class:help.text", "  • Capture new sessions by using the CLI\n"),
+            ("class:help.text", "  • Check that sessions directory exists\n"),
+        ]
     selected = min(selected, len(rows) - 1)
     _sync_tree_scroll(state, selected, len(rows))
     start = int(state.get("tree_scroll") or 0)
@@ -719,7 +748,8 @@ def _body_fragments(rows: list[TreeRow], selected: int, state: dict[str, Any]) -
     visible = rows[start : start + height]
     fragments: list[tuple[str, str]] = []
     if start > 0:
-        fragments.append(("class:muted", f"  ⋯ {start} rows above ⋯\n"))
+        percent = int((start / len(rows)) * 100)
+        fragments.append(("class:muted", f"  ⬆ {start} rows above ({percent}% scrolled) ⬆\n"))
     selected_row = rows[selected]
     for row in visible:
         is_selected = row is selected_row
@@ -727,7 +757,9 @@ def _body_fragments(rows: list[TreeRow], selected: int, state: dict[str, Any]) -
         fragments.extend(row_frags)
         fragments.append(("", "\n"))
     if start + height < len(rows):
-        fragments.append(("class:muted", f"  ⋯ {len(rows) - start - height} rows below ⋯\n"))
+        remaining = len(rows) - start - height
+        percent = int(((start + height) / len(rows)) * 100)
+        fragments.append(("class:muted", f"  ⬇ {remaining} rows below ({percent}% scrolled) ⬇\n"))
     return fragments
 
 
@@ -789,50 +821,53 @@ def _sync_tree_scroll(state: dict[str, Any], selected: int, row_count: int) -> N
 
 def _detail_fragments(row: TreeRow | None, state: dict[str, Any]) -> list[tuple[str, str]]:
     if row is None:
-        return [("class:muted", "\n━━━ Details ━━━\nNo selection.\n")]
+        return [("class:muted", "\n" + "─" * 40 + "\nNo selection.\n")]
     node = row.node
-    fragments: list[tuple[str, str]] = [("class:detail.label", "\n━━━ Details ━━━\n")]
+    fragments: list[tuple[str, str]] = [("class:detail.label", "\n" + "━" * 40 + "\n")]
 
-    # Session info
-    fragments.append(("class:detail.label", "Session: "))
+    # Session info with icons for better visual recognition
+    fragments.append(("class:detail.label", "📋 Session: "))
     fragments.append(("class:detail.value", f"{node.session_id[:16]}…\n"))
 
-    fragments.append(("class:detail.label", "Provider: "))
+    fragments.append(("class:detail.label", "🔌 Provider: "))
     fragments.append(("class:detail.value", node.provider))
-    fragments.append(("class:dim", "  │  "))
+    fragments.append(("class:dim", "  ┃  "))
     fragments.append(("class:detail.label", "Source: "))
     fragments.append(("class:detail.value", node.source))
-    fragments.append(("class:dim", "  │  "))
-    fragments.append(("class:detail.label", "Created: "))
+    fragments.append(("class:dim", "  ┃  "))
+    fragments.append(("class:detail.label", "⏰ Created: "))
     fragments.append(("class:detail.value", _format_timestamp(node.created_ts) + "\n"))
 
-    fragments.append(("class:detail.label", "Title: "))
+    fragments.append(("class:detail.label", "💬 Title: "))
     fragments.append(("class:detail.value", node.title + "\n"))
 
-    # Lineage info
+    # Lineage info with better visual markers
     if node.fork_parent:
-        fragments.append(("class:fork", f"↪ Fork from {node.fork_parent[0][:12]}… turn {_turn_text(node.fork_parent[1])}\n"))
+        fragments.append(("", "\n"))
+        fragments.append(("class:fork", f"🔀 Fork from {node.fork_parent[0][:12]}… turn {_turn_text(node.fork_parent[1])}\n"))
     if node.subagent_parent:
         agent = _text(node.lineage.get("agent_id")) or "-"
+        fragments.append(("", "\n"))
         fragments.append(("class:subagent", f"⚡ Subagent: {agent}, parent {node.subagent_parent[0][:12]}… turn {_turn_text(node.subagent_parent[1])}\n"))
 
-    # Turn info
+    # Turn info with separator
     if row.manifest is not None:
         manifest = row.manifest
-        fragments.append(("class:detail.label", f"\nTurn {manifest.turn_id}"))
-        fragments.append(("class:dim", f"  │  {_format_timestamp(manifest.created_ts)}"))
-        fragments.append(("class:dim", f"  │  prev: {_turn_text(manifest.parent_turn_id)}\n"))
+        fragments.append(("class:dim", "\n" + "─" * 40 + "\n"))
+        fragments.append(("class:detail.label", f"🔄 Turn {manifest.turn_id}"))
+        fragments.append(("class:dim", f"  ┃  {_format_timestamp(manifest.created_ts)}"))
+        fragments.append(("class:dim", f"  ┃  prev: {_turn_text(manifest.parent_turn_id)}\n"))
 
         can_resume = _can_resume_row(row)
         if can_resume:
-            fragments.append(("class:badge.resumable", " RESUMABLE "))
-            fragments.append(("", "  Press r or /resume to restore this checkpoint\n"))
+            fragments.append(("class:badge.resumable", " ✓ RESUMABLE "))
+            fragments.append(("", "  Press r or /resume to restore\n"))
         else:
             if row.node.subagent_parent or row.node.source == "subagent":
-                fragments.append(("class:badge.blocked", " SUBAGENT "))
+                fragments.append(("class:badge.blocked", " ✗ SUBAGENT "))
                 fragments.append(("class:dim", "  Cannot resume subagent sessions\n"))
             elif row.node.marker:
-                fragments.append(("class:badge.blocked", " NO CAPTURE "))
+                fragments.append(("class:badge.blocked", " ✗ NO CAPTURE "))
                 fragments.append(("class:dim", "  Session was not fully captured\n"))
             else:
                 fragments.append(("class:dim", "  Actions: show, diff\n"))
@@ -840,7 +875,8 @@ def _detail_fragments(row: TreeRow | None, state: dict[str, Any]) -> list[tuple[
         msg_preview = manifest.user_message_preview or "-"
         if len(msg_preview) > 100:
             msg_preview = msg_preview[:97] + "…"
-        fragments.append(("class:muted", f"{msg_preview}\n"))
+        fragments.append(("class:dim", "\n"))
+        fragments.append(("class:muted", f"💭 {msg_preview}\n"))
     elif node.marker:
         fragments.append(("class:badge.blocked", f"\n{node.marker}\n"))
 
@@ -1032,12 +1068,30 @@ def _line_style(line: str) -> str:
 
 
 def _show_result(session_id: str, turn_id: int) -> tuple[str, str]:
-    store = CheckpointStore(sessions_dir() / session_id)
-    reanchor_last_turn_to_eof(store)
+    session_path = sessions_dir() / session_id
+
+    if not session_path.exists():
+        return (
+            f"Show {session_id} turn {turn_id}",
+            f"Error: Session directory not found at {session_path}\n\nThe session may have been deleted or moved."
+        )
+
+    store = CheckpointStore(session_path)
+
+    try:
+        reanchor_last_turn_to_eof(store)
+    except Exception:
+        # Continue even if reanchor fails
+        pass
+
     try:
         manifest = store.read_manifest(turn_id)
     except (OSError, KeyError, ValueError, json.JSONDecodeError) as exc:
-        return f"Show {session_id} turn {turn_id}", f"Error: {exc}"
+        return (
+            f"Show {session_id} turn {turn_id}",
+            f"Error: {exc}\n\nAvailable turns: {[m.turn_id for m in store.list_manifests()]}"
+        )
+
     return (
         f"Show {session_id} turn {turn_id}",
         json.dumps(manifest.to_json(), indent=2, sort_keys=True),
@@ -1068,16 +1122,28 @@ def _execute_resume(plan: ResumePlan) -> tuple[str, str]:
     try:
         report = orchestrator.execute(plan, lambda _text: ResumeOptions(proceed=True))
     except RuntimeError as exc:
-        return f"Resume {plan.session_id} turn {plan.turn_id}", f"Error: {exc}"
+        error_msg = f"Resume failed: {exc}\n\n"
+        error_msg += "Possible causes:\n"
+        error_msg += "• Target directory is not writable\n"
+        error_msg += "• Checkpoint data is corrupted\n"
+        error_msg += "• Required files are missing\n"
+        error_msg += "\nNo changes were made to your system."
+        return f"Resume {plan.session_id} turn {plan.turn_id}", error_msg
+    except Exception as exc:
+        return f"Resume {plan.session_id} turn {plan.turn_id}", f"Unexpected error: {exc}"
+
     lines = [
-        f"Restored into new session {report.new_session_id}",
+        "✓ Resume completed successfully!",
+        "",
+        f"New session: {report.new_session_id}",
         f"Workspace: {report.target_cwd or '-'}",
         f"Backup: {report.backup_dir}",
-        f"Changed files: {len(report.changed_files)}",
+        f"Files changed: {len(report.changed_files)}",
     ]
     if report.provider_session_path is not None:
         lines.append(f"Provider session: {report.provider_session_path}")
     if report.resume_command is not None:
+        lines.append("")
         lines.append(f"Resume with: {report.resume_command}")
     return f"Resume {plan.session_id} turn {plan.turn_id}", "\n".join(lines)
 

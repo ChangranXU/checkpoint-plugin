@@ -99,8 +99,11 @@ def render_file_diff(plan: ResumePlan, store: CheckpointStore, entry: DiffEntry)
     if entry.summary is not None:
         return entry.summary
 
-    current = _snapshot_content(entry.current_sha, store)
-    target = _snapshot_content(entry.target_sha, store)
+    try:
+        current = _snapshot_content(entry.current_sha, store)
+        target = _snapshot_content(entry.target_sha, store)
+    except Exception as exc:
+        return f"Error loading file content: {exc}\n\nEntry: {entry.path}\nCurrent SHA: {entry.current_sha}\nTarget SHA: {entry.target_sha}"
 
     if current is not None and _is_binary(current):
         return _render_binary_diff(entry, current, target)
@@ -112,15 +115,18 @@ def render_file_diff(plan: ResumePlan, store: CheckpointStore, entry: DiffEntry)
     if current_text is None or target_text is None:
         return _render_binary_diff(entry, current, target)
 
-    lines = difflib.unified_diff(
-        current_text.splitlines(keepends=True),
-        target_text.splitlines(keepends=True),
-        fromfile=_diff_header("current", entry),
-        tofile=_diff_header("checkpoint", entry),
-        lineterm="\n",
-    )
-    rendered = "".join(lines)
-    return rendered or f"No content changes for {entry.path}"
+    try:
+        lines = difflib.unified_diff(
+            current_text.splitlines(keepends=True),
+            target_text.splitlines(keepends=True),
+            fromfile=_diff_header("current", entry),
+            tofile=_diff_header("checkpoint", entry),
+            lineterm="\n",
+        )
+        rendered = "".join(lines)
+        return rendered or f"No content changes for {entry.path}"
+    except Exception as exc:
+        return f"Error generating diff: {exc}\n\nPath: {entry.path}"
 
 
 def _environment_entries(plan: ResumePlan, store: CheckpointStore | None = None) -> list[DiffEntry]:

@@ -53,20 +53,20 @@ def _build_tree_prefix(row: TreeRow, all_rows: list[TreeRow]) -> str:
             has_sibling[current_depth - 1] = True
             break
 
-    # Build prefix for each depth level
+    # Build prefix for each depth level with better spacing
     for d in range(current_depth):
         if d < current_depth - 1:
             # Intermediate levels
             if _has_ancestor_sibling(row, all_rows, d + 1):
-                parts.append("│   ")
+                parts.append("│  ")
             else:
-                parts.append("    ")
+                parts.append("   ")
         else:
             # Final level
             if has_sibling[d]:
-                parts.append("├── ")
+                parts.append("├─ ")
             else:
-                parts.append("└── ")
+                parts.append("└─ ")
 
     return "".join(parts)
 
