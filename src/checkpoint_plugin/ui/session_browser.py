@@ -537,6 +537,8 @@ def _show_tui(providers: dict[str, list[SessionNode]]) -> BrowserAction | None:
             # Detail panel
             "detail.label": "#00afff bold",
             "detail.value": "#ffffff",
+            "action.enabled": "#00ff87 bold",
+            "action.disabled": "#767676",
             # Badges - more distinct
             "badge.resumable": "bg:#00af00 #ffffff bold",
             "badge.blocked": "bg:#af0000 #ffffff bold",
@@ -805,6 +807,7 @@ def _detail_fragments(row: TreeRow | None, state: dict[str, Any]) -> list[tuple[
 
     fragments.append(("class:detail.label", "💬 Title: "))
     fragments.append(("class:detail.value", node.title + "\n"))
+    fragments.extend(_selected_command_fragments(row))
 
     # Lineage info with better visual markers
     if node.fork_parent:
@@ -845,6 +848,29 @@ def _detail_fragments(row: TreeRow | None, state: dict[str, Any]) -> list[tuple[
     elif node.marker:
         fragments.append(("class:badge.blocked", f"\n{node.marker}\n"))
 
+    return fragments
+
+
+def _selected_command_fragments(row: TreeRow) -> list[tuple[str, str]]:
+    fragments: list[tuple[str, str]] = [
+        ("class:detail.label", "Commands: "),
+    ]
+    has_turn = row.manifest is not None
+    commands = [
+        ("show", has_turn),
+        ("diff", has_turn),
+        ("resume", _can_resume_row(row)),
+    ]
+    for index, (name, available) in enumerate(commands):
+        if index:
+            fragments.append(("class:dim", "  "))
+        style = "class:action.enabled" if available else "class:action.disabled"
+        value = "yes" if available else "no"
+        fragments.append((style, f"{name}:{value}"))
+    reason = _resume_unavailable_reason(row)
+    if reason:
+        fragments.append(("class:dim", f"  ({reason})"))
+    fragments.append(("", "\n"))
     return fragments
 
 
@@ -962,6 +988,18 @@ def _can_resume_row(row: TreeRow) -> bool:
     if row.node.marker:
         return False
     return True
+
+
+def _resume_unavailable_reason(row: TreeRow) -> str | None:
+    if _can_resume_row(row):
+        return None
+    if row.manifest is None:
+        return "select a checkpoint turn"
+    if row.node.subagent_parent is not None or row.node.source == "subagent":
+        return "resume unavailable: subagent"
+    if row.node.marker:
+        return f"resume unavailable: {row.node.marker}"
+    return "resume unavailable"
 
 
 def _output_fragments(state: dict[str, Any]) -> list[tuple[str, str]]:

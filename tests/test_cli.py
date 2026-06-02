@@ -371,6 +371,13 @@ def test_session_browser_resume_only_on_valid_checkpoint_turn(tmp_path, monkeypa
     assert _command_action("/terminal", parent_turn) is None
     assert _command_action("/resume", session_header) is None
 
+    parent_detail = "".join(text for _style, text in _detail_fragments(parent_turn, {}))
+    subagent_detail = "".join(text for _style, text in _detail_fragments(subagent_turn, {}))
+    session_detail = "".join(text for _style, text in _detail_fragments(session_header, {}))
+    assert "Commands: show:yes  diff:yes  resume:yes" in parent_detail
+    assert "Commands: show:yes  diff:yes  resume:no  (resume unavailable: subagent)" in subagent_detail
+    assert "Commands: show:no  diff:no  resume:no  (select a checkpoint turn)" in session_detail
+
 
 def test_session_browser_resume_outputs_cli_command_hint_only():
     title, text = _resume_hint("parent", 3)
