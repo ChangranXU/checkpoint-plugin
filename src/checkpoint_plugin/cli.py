@@ -20,6 +20,7 @@ from .retention import clean_keep_last
 from .store import CheckpointStore
 from .types import ResumePlan
 from .ui.diff_viewer import show_diff_viewer
+from .ui.session_browser import BrowserAction, show_session_browser
 
 
 def _supports_color(stream: Any = sys.stdout) -> bool:
@@ -42,7 +43,7 @@ def _colorize(text: str, style: str, *, stream: Any = sys.stdout) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="checkpoint")
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command")
 
     save = sub.add_parser("save", help="Manual checkpoint of current state")
     save.add_argument("--session")
@@ -82,6 +83,8 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _dispatch(args: argparse.Namespace) -> int:
+    if args.command is None:
+        return _cmd_checkpoint()
     if args.command == "save":
         coordinator = CheckpointCoordinator(session_id=args.session)
         coordinator.on_session_start()
@@ -148,6 +151,34 @@ def _dispatch(args: argparse.Namespace) -> int:
     if args.command == "config":
         return _cmd_config(args.action, args.key, args.value)
     raise AssertionError(args.command)
+
+
+def _cmd_checkpoint() -> int:
+    action = show_session_browser()
+    if action is None:
+        return 0
+    return _dispatch_browser_action(action)
+
+
+def _dispatch_browser_action(action: BrowserAction) -> int:
+    if action.session_id is None or action.turn_id is None:
+        return 0
+    if action.command == "show":
+        return _cmd_show(action.session_id, action.turn_id)
+    if action.command == "diff":
+        reanchor_last_turn_to_eof(CheckpointStore(sessions_dir() / action.session_id))
+        orchestrator = ResumeOrchestrator()
+        try:
+            print(orchestrator.plan(action.session_id, action.turn_id).render())
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        return 0
+    if action.command == "resume":
+        return _dispatch(
+            argparse.Namespace(command="resume", session=action.session_id, turn=action.turn_id, yes=False, target=None)
+        )
+    return 0
 
 
 def _cmd_list(session: str | None) -> int:

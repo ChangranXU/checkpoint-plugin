@@ -1,5 +1,6 @@
 import io
 import json
+import os
 
 from checkpoint_plugin.cli import (
     main,
@@ -7,6 +8,20 @@ from checkpoint_plugin.cli import (
     _edit_send_replaced_turns,
     _rolled_back_count,
     _supports_color,
+)
+from checkpoint_plugin.store import CheckpointStore
+from checkpoint_plugin.types import CheckpointManifest, TrajectoryReference
+import checkpoint_plugin.ui.session_browser as session_browser
+from checkpoint_plugin.ui.session_browser import (
+    _body_fragments,
+    _command_action,
+    _detail_fragments,
+    _header_fragments,
+    _output_fragments,
+    _output_page_size,
+    _rows_for_nodes,
+    collect_provider_trees,
+    render_session_tree,
 )
 
 
@@ -205,3 +220,363 @@ def test_list_marks_replaced_turn(tmp_path, monkeypatch, capsys):
     assert len(replaced_lines) == 1
     assert replaced_lines[0].startswith("0000")
 
+
+def _write_session(home, session_id, metadata, turns):
+    session = home / "sessions" / session_id
+    session.mkdir(parents=True)
+    (session / "metadata.json").write_text(json.dumps({"session_id": session_id, **metadata}), encoding="utf-8")
+    store = CheckpointStore(session)
+    transcript = session / f"{session_id}.jsonl"
+    transcript.write_text("".join(json.dumps({"turn": index}) + "\n" for index, _ in enumerate(turns)), encoding="utf-8")
+    offset = 0
+    for turn_id, (created_ts, preview) in enumerate(turns):
+        line = json.dumps({"turn": turn_id}) + "\n"
+        end = offset + len(line.encode("utf-8"))
+        store.write_manifest(
+            CheckpointManifest(
+                turn_id=turn_id,
+                session_id=session_id,
+                created_ts=created_ts,
+                env_ref="env",
+                fs_ref="fs",
+                trajectory_ref=TrajectoryReference("codex", str(transcript), offset, end, 1),
+                user_message_preview=preview,
+                parent_turn_id=turn_id - 1 if turn_id else None,
+            )
+        )
+        offset = end
+    return session
+
+
+def test_session_browser_groups_by_provider_and_nests_lineage(tmp_path, monkeypatch):
+    home = tmp_path / "plugin"
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(home))
+    parent = _write_session(
+        home,
+        "parent",
+        {
+            "provider": "codex",
+            "source": "startup",
+            "start_ts": "2026-01-01T00:00:00Z",
+            "session_title": "Parent work",
+        },
+        [
+            ("2026-01-01T00:01:00Z", "start"),
+            ("2026-01-01T00:02:00Z", "spawn child"),
+        ],
+    )
+    parent_transcript = str(parent / "parent.jsonl")
+    _write_session(
+        home,
+        "fork",
+        {
+            "provider": "codex",
+            "source": "fork",
+            "start_ts": "2026-01-01T00:03:00Z",
+            "session_title": "Forked work",
+            "forked_from_id": "parent",
+            "forked_from_transcript": parent_transcript,
+            "forked_at_offset": 12,
+        },
+        [("2026-01-01T00:03:30Z", "fork prompt")],
+    )
+    _write_session(
+        home,
+        "parent--subagent-a1",
+        {
+            "provider": "codex",
+            "source": "subagent",
+            "start_ts": "2026-01-01T00:01:30Z",
+            "session_title": "Agent work",
+            "lineage": {"parent_session_id": "parent", "agent_id": "a1"},
+        },
+        [("2026-01-01T00:01:45Z", "agent prompt")],
+    )
+    _write_session(
+        home,
+        "claude-session",
+        {
+            "provider": "claude",
+            "source": "startup",
+            "start_ts": "2026-01-01T00:04:00Z",
+            "session_title": "Claude work",
+        },
+        [("2026-01-01T00:04:30Z", "claude prompt")],
+    )
+
+    providers = collect_provider_trees(home / "sessions")
+    rendered = render_session_tree(providers)
+
+    assert list(providers) == ["claude", "codex"]
+    assert "codex (1 sessions, 4 turns)" in rendered
+    # New format uses abbreviated labels with separators: "parent… │ [startup] │ 2T"
+    assert "parent" in rendered and "[startup]" in rendered and "2T" in rendered
+    assert "forked/resumed here" in rendered
+    assert "fork" in rendered and "[fork]" in rendered
+    assert "subagent spawned here" in rendered
+    assert "subagent" in rendered and "[subagent]" in rendered
+
+
+def test_checkpoint_without_tty_prints_browser_tree(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "plugin"
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(home))
+    _write_session(
+        home,
+        "s1",
+        {"provider": "codex", "source": "startup", "start_ts": "2026-01-01T00:00:00Z"},
+        [("2026-01-01T00:01:00Z", "hello")],
+    )
+
+    assert main([]) == 0
+
+    out = capsys.readouterr().out
+    assert "codex (1 sessions, 1 turns)" in out
+    # New format: T0000 instead of "turn 0000"
+    assert "T0000" in out
+    assert "hello" in out
+
+
+def test_session_browser_resume_only_on_valid_checkpoint_turn(tmp_path, monkeypatch):
+    home = tmp_path / "plugin"
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(home))
+    _write_session(
+        home,
+        "parent",
+        {"provider": "codex", "source": "startup", "start_ts": "2026-01-01T00:00:00Z"},
+        [("2026-01-01T00:01:00Z", "parent turn")],
+    )
+    _write_session(
+        home,
+        "parent--subagent-a1",
+        {
+            "provider": "codex",
+            "source": "subagent",
+            "start_ts": "2026-01-01T00:01:30Z",
+            "lineage": {"parent_session_id": "parent", "agent_id": "a1"},
+        },
+        [("2026-01-01T00:01:45Z", "agent turn")],
+    )
+
+    providers = collect_provider_trees(home / "sessions")
+    rows = _rows_for_nodes(providers["codex"])
+    parent_turn = next(row for row in rows if row.kind == "turn" and row.node.session_id == "parent")
+    subagent_turn = next(row for row in rows if row.kind == "turn" and row.node.session_id == "parent--subagent-a1")
+    session_header = next(row for row in rows if row.kind == "session" and row.node.session_id == "parent")
+
+    assert _command_action("/resume", parent_turn).session_id == "parent"
+    assert _command_action("/show", subagent_turn).session_id == "parent--subagent-a1"
+    assert _command_action("/diff", subagent_turn).session_id == "parent--subagent-a1"
+    assert _command_action("/resume", subagent_turn) is None
+    assert _command_action("/terminal", parent_turn) is None
+    assert _command_action("/resume", session_header) is None
+
+
+def test_output_fragments_show_inline_command_result():
+    fragments = _output_fragments(
+        {
+            "output_visible": True,
+            "output_title": "Diff s1 turn 0",
+            "output_text": "line 1\n+added\n-removed",
+            "output_scroll": 0,
+        }
+    )
+    rendered = "".join(text for _style, text in fragments)
+    assert "Diff s1 turn 0" in rendered
+    assert "+added" in rendered
+    assert "-removed" in rendered
+
+
+def test_output_fragments_scroll_and_clamp_to_visible_page():
+    state = {
+        "output_visible": True,
+        "output_title": "Show s1 turn 0",
+        "output_text": "\n".join(f"line {index}" for index in range(12)),
+        "output_scroll": 999,
+        "output_height": 6,
+    }
+
+    fragments = _output_fragments(state)
+    rendered = "".join(text for _style, text in fragments)
+
+    assert state["output_scroll"] == 8
+    assert "9-12/12" in rendered
+    assert "line 8" in rendered
+    assert "line 11" in rendered
+    assert "line 7" not in rendered
+    assert _output_page_size(state) == 4
+
+
+def test_body_fragments_respect_tree_scroll(tmp_path, monkeypatch):
+    home = tmp_path / "plugin"
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(home))
+    turns = [(f"2026-01-01T00:{minute:02d}:00Z", f"turn {minute}") for minute in range(20)]
+    _write_session(
+        home,
+        "long",
+        {"provider": "codex", "source": "startup", "start_ts": "2026-01-01T00:00:00Z"},
+        turns,
+    )
+    rows = _rows_for_nodes(collect_provider_trees(home / "sessions")["codex"])
+    state = {"tree_scroll": 5, "output_visible": False}
+
+    rendered = "".join(text for _style, text in _body_fragments(rows, 10, state))
+
+    # New format: T0009, T0010 instead of "turn 0009", "turn 0010"
+    assert "T0009" in rendered or "T0010" in rendered
+    assert "T0000" not in rendered
+
+
+def test_body_fragments_keep_selected_row_visible_when_scroll_hints_render(tmp_path, monkeypatch):
+    home = tmp_path / "plugin"
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(home))
+    monkeypatch.setattr(session_browser.shutil, "get_terminal_size", lambda: os.terminal_size((100, 20)))
+    turns = [(f"2026-01-01T00:{minute:02d}:00Z", f"turn {minute}") for minute in range(20)]
+    _write_session(
+        home,
+        "long",
+        {"provider": "codex", "source": "startup", "start_ts": "2026-01-01T00:00:00Z"},
+        turns,
+    )
+    rows = _rows_for_nodes(collect_provider_trees(home / "sessions")["codex"])
+    selected = 7
+    state = {"tree_scroll": 0, "output_visible": False}
+
+    fragments = _body_fragments(rows, selected, state)
+
+    rendered = "".join(text for _style, text in fragments)
+    selected_text = rows[selected].label
+    selected_styles = [style for style, text in fragments if text == selected_text]
+    assert selected_text in rendered
+    assert any("reverse" in style for style in selected_styles)
+
+
+def test_tui_fragments_render_claude_session_and_subagent(tmp_path, monkeypatch):
+    home = tmp_path / "plugin"
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(home))
+    parent = _write_session(
+        home,
+        "claude-parent",
+        {
+            "provider": "claude",
+            "source": "startup",
+            "start_ts": "2026-01-01T00:00:00Z",
+            "session_title": "Claude parent work",
+        },
+        [
+            ("2026-01-01T00:01:00Z", "ask claude"),
+            ("2026-01-01T00:02:00Z", "spawn claude subagent abc123"),
+        ],
+    )
+    parent_transcript = parent / "claude-parent.jsonl"
+    parent_transcript.write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "user", "promptId": "p-1", "message": {"content": "ask claude"}}),
+                json.dumps({"type": "assistant", "message": {"content": "uses abc123"}}),
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    _write_session(
+        home,
+        "claude-parent--subagent-abc123",
+        {
+            "provider": "claude",
+            "source": "subagent",
+            "start_ts": "2026-01-01T00:01:30Z",
+            "session_title": "Claude subagent work",
+            "lineage": {"parent_session_id": "claude-parent", "agent_id": "abc123"},
+        },
+        [("2026-01-01T00:01:45Z", "subagent result")],
+    )
+    providers = collect_provider_trees(home / "sessions")
+
+    assert list(providers) == ["claude"]
+    header = "".join(text for _style, text in _header_fragments(["claude"], providers, {"provider": 0}))
+    assert "claude" in header
+    assert "(1/3)" in header
+
+    rows = _rows_for_nodes(providers["claude"])
+    body = "".join(text for _style, text in _body_fragments(rows, 0, {"tree_scroll": 0, "output_visible": False}))
+    assert "Claude parent work" in body
+    assert "subagent spawned here" in body
+    assert "Claude subagent work" in body
+
+    parent_row = next(row for row in rows if row.kind == "session" and row.node.session_id == "claude-parent")
+    subagent_turn = next(
+        row
+        for row in rows
+        if row.kind == "turn" and row.node.session_id == "claude-parent--subagent-abc123"
+    )
+    parent_detail = "".join(text for _style, text in _detail_fragments(parent_row, {}))
+    subagent_detail = "".join(text for _style, text in _detail_fragments(subagent_turn, {}))
+    assert "Provider: claude" in parent_detail
+    assert "Source: startup" in parent_detail
+    assert "Subagent: abc123" in subagent_detail
+    assert "SUBAGENT" in subagent_detail
+
+
+def test_tui_places_same_turn_subagent_before_fork_link(tmp_path, monkeypatch):
+    home = tmp_path / "plugin"
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(home))
+    parent = _write_session(
+        home,
+        "claude-parent",
+        {
+            "provider": "claude",
+            "source": "startup",
+            "start_ts": "2026-01-01T00:00:00Z",
+            "session_title": "Claude parent work",
+        },
+        [
+            ("2026-01-01T00:01:00Z", "ask claude"),
+            ("2026-01-01T00:02:00Z", "spawn abc123 and then fork"),
+        ],
+    )
+    parent_transcript = parent / "claude-parent.jsonl"
+    parent_transcript.write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "user", "promptId": "p-2", "message": {"content": "spawn abc123"}}),
+                json.dumps({"type": "assistant", "message": {"content": "abc123"}}),
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    _write_session(
+        home,
+        "claude-parent--subagent-abc123",
+        {
+            "provider": "claude",
+            "source": "subagent",
+            "start_ts": "2026-01-01T00:01:30Z",
+            "session_title": "Claude subagent work",
+            "lineage": {"parent_session_id": "claude-parent", "agent_id": "abc123"},
+        },
+        [("2026-01-01T00:01:45Z", "subagent result")],
+    )
+    _write_session(
+        home,
+        "claude-fork",
+        {
+            "provider": "claude",
+            "source": "resume",
+            "start_ts": "2026-01-01T00:03:00Z",
+            "session_title": "Claude fork work",
+            "forked_from_id": "claude-parent",
+            "forked_from_transcript": str(parent_transcript),
+            "forked_at_offset": parent_transcript.stat().st_size,
+        },
+        [("2026-01-01T00:03:30Z", "fork prompt")],
+    )
+
+    providers = collect_provider_trees(home / "sessions")
+    rows = _rows_for_nodes(providers["claude"])
+    labels = [row.label for row in rows]
+
+    turn_index = labels.index("T0001 │ 2026-01-01 00:02 │ spawn abc123 and then fork")
+    subagent_index = labels.index("subagent spawned here")
+    fork_index = labels.index("forked/resumed here")
+    assert turn_index < subagent_index < fork_index

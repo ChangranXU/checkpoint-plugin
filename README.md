@@ -22,7 +22,7 @@ pip install -e .
 checkpoint hooks install
 
 # Restart your agent, then verify
-checkpoint list
+checkpoint
 ```
 
 ## Configuration
@@ -55,6 +55,9 @@ Restoring a checkpoint shows a summary diff and creates backups before modifying
 ## Common Commands
 
 ```bash
+# Open the interactive session browser
+checkpoint
+
 # Manual checkpoint (automatic via hooks in normal use)
 checkpoint save --session <session-id> --note "description"
 
@@ -78,7 +81,29 @@ checkpoint config get .
 checkpoint config set . key value
 ```
 
-`checkpoint list` shows one row per session:
+`checkpoint` opens a terminal session browser grouped by provider. Use left/right
+or `h`/`l` to switch provider tabs, `j`/`k` or arrows to move, `PageUp`/`PageDown`
+to scroll, and `Enter` to expand a session or focus a turn. The tree shows
+session lineage, fork/resume branches under the parent turn where they split,
+subagents under the parent turn that spawned them, and each session's checkpoint
+timeline. Press `/` to run a command on the selected row:
+
+```text
+/show      show checkpoint metadata
+/diff      preview restore changes
+/resume    preview restore changes inline, then confirm in the browser
+/quit      exit
+```
+
+`r` and `d` are shortcuts for resume and diff on the selected turn. Resume is
+offered only for valid parent-session checkpoint turns. Commands render in an
+inline output pane and keep the browser open; `/resume` shows the restore preview
+and waits for `y` confirmation before restoring in place. Once command output is
+visible, `PageUp`/`PageDown` scrolls the output pane. When output is not a
+terminal, `checkpoint` prints the same provider/session/turn tree in a plain text
+form.
+
+`checkpoint list` remains the script-friendly view and shows one row per session:
 
 ```text
 <session-id>  <session-title>  <source>  [marker]
