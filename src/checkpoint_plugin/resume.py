@@ -147,7 +147,7 @@ class ResumeOrchestrator:
             fs=fs_report,
             provider_session_path=str(provider_session_path) if provider_session_path is not None else None,
             target_cwd=str(target_cwd),
-            resume_command=_resume_command(provider.name, new_session_id),
+            resume_command=_resume_command(provider.name, new_session_id, provider_session_path),
         )
 
     def _copy_session_prefix(
@@ -1897,13 +1897,22 @@ def _zulu_now_us() -> str:
     return f"{stamp}.{fraction}Z" if fraction else f"{stamp}Z"
 
 
-def _resume_command(provider_name: str, new_session_id: str) -> str | None:
+def _resume_command(
+    provider_name: str,
+    new_session_id: str,
+    provider_session_path: Path | None = None,
+) -> str | None:
     if provider_name == "claude":
         return f"claude --resume {new_session_id}"
     if provider_name == "codex":
         return f"codex resume {new_session_id}"
     if provider_name == "opencode":
-        return f"opencode import ~/.config/opencode/imports/{new_session_id}.json && opencode --session {new_session_id}"
+        import_path = (
+            str(provider_session_path)
+            if provider_session_path is not None
+            else f"~/.config/opencode/imports/{new_session_id}.json"
+        )
+        return f"opencode import {import_path} && opencode --session {new_session_id}"
     return None
 
 
