@@ -21,6 +21,7 @@ from prompt_toolkit.styles import Style
 from checkpoint_plugin.coordinator import reanchor_last_turn_to_eof
 from checkpoint_plugin.paths import sessions_dir
 from checkpoint_plugin.resume import ResumeOrchestrator, _parent_turn_for_subagent
+from checkpoint_plugin.coordinator import resolve_session_title
 from checkpoint_plugin.store import CheckpointStore
 from checkpoint_plugin.types import CheckpointManifest
 from checkpoint_plugin.ui._helpers import format_timestamp, truncate_with_ellipsis
@@ -60,7 +61,7 @@ class SessionNode:
 
     @property
     def title(self) -> str:
-        return _text(self.metadata.get("session_title")) or "-"
+        return _text(self.metadata.get("session_title")) or _text(resolve_session_title(self.metadata)) or "-"
 
     @property
     def source(self) -> str:

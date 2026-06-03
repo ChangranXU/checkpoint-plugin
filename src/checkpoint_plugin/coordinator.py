@@ -660,6 +660,8 @@ def _session_title(
         return _codex_session_title(provider_home, session_id)
     if provider == "claude" and trajectory_ref is not None:
         return _claude_session_title(trajectory_ref)
+    if provider == "opencode":
+        return _opencode_session_title(session_id)
     return None
 
 
@@ -699,9 +701,88 @@ def _claude_session_title(ref: TrajectoryReference) -> str | None:
             record = json.loads(line)
         except json.JSONDecodeError:
             continue
-        title = record.get("slug") if isinstance(record, dict) else None
-        if isinstance(title, str) and title:
-            return title
+        if not isinstance(record, dict):
+            continue
+        ai_title = record.get("aiTitle")
+        if isinstance(ai_title, str) and ai_title:
+            return ai_title
+        slug = record.get("slug")
+        if isinstance(slug, str) and slug:
+            return slug
+    return None
+
+
+def _claude_session_title_from_transcript(transcript_path: str) -> str | None:
+    """Scan full transcript for aiTitle (used by lazy resolve)."""
+    path = Path(transcript_path).expanduser()
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    for line in data.splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        ai_title = record.get("aiTitle")
+        if isinstance(ai_title, str) and ai_title:
+            return ai_title
+    return None
+
+
+def _opencode_session_title(session_id: str) -> str | None:
+    import os
+    import sqlite3
+
+    data_home = Path(
+        os.environ.get("OPENCODE_DATA_DIR")
+        or os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share"))
+    ) / "opencode"
+    db_path = data_home / "opencode.db"
+    if not db_path.exists():
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            row = conn.execute(
+                "SELECT title FROM session WHERE id = ? LIMIT 1", (session_id,)
+            ).fetchone()
+            return row[0] if row and row[0] else None
+        finally:
+            conn.close()
+    except (sqlite3.Error, OSError):
+        return None
+
+
+def resolve_session_title(metadata: dict[str, Any]) -> str | None:
+    """Resolve title for a session whose stored title is None.
+
+    Called by display paths (CLI list, TUI) to handle the race where the
+    provider writes the title after our hook fired (common for single-turn
+    Codex sessions) or for providers not previously supported (OpenCode).
+    """
+    provider = metadata.get("provider")
+    session_id = metadata.get("session_id")
+    if not provider or not session_id:
+        return None
+    if provider == "codex":
+        from .env.providers import codex_layout
+        layout = codex_layout()
+        return _codex_session_title(layout.home, session_id)
+    if provider == "opencode":
+        return _opencode_session_title(session_id)
+    if provider == "claude":
+        cwd = metadata.get("cwd")
+        if cwd:
+            claude_home = Path.home() / ".claude"
+            project_dir = str(cwd).replace("/", "-")
+            transcript = claude_home / "projects" / project_dir / f"{session_id}.jsonl"
+            if transcript.exists():
+                return _claude_session_title_from_transcript(str(transcript))
     return None
 
 

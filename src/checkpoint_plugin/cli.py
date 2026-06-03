@@ -10,7 +10,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from .coordinator import CheckpointCoordinator, TurnRecord, reanchor_last_turn_to_eof
+from .coordinator import CheckpointCoordinator, TurnRecord, reanchor_last_turn_to_eof, resolve_session_title
 from .env.collector import environment_from_blob
 from .fs.snapshot import filesystem_from_blob
 from .integrations.hook_installer import install_hooks, uninstall_hooks
@@ -248,7 +248,9 @@ def _cmd_list(session: str | None, show_all: bool = False) -> int:
                 if not show_all and _is_empty_session(child, metadata):
                     continue
 
-                title = _display_metadata_value(metadata.get("session_title"))
+                title = _display_metadata_value(
+                    metadata.get("session_title") or resolve_session_title(metadata)
+                )
                 source = _display_metadata_value(metadata.get("source"))
                 marker = _session_marker(metadata, child)
                 suffix = f"  {_colorize(marker, 'yellow')}" if marker else ""

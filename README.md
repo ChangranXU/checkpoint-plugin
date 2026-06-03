@@ -42,9 +42,7 @@ checkpoint hooks uninstall codex    # remove Codex hooks only
 checkpoint hooks uninstall opencode # remove OpenCode plugin
 ```
 
-**OpenCode Note**: OpenCode uses a TypeScript plugin system instead of JSON hooks. The installer copies a plugin to `~/.config/opencode/plugins/checkpoint.ts`. **Restart OpenCode after installation**. See [OPENCODE_INTEGRATION.md](OPENCODE_INTEGRATION.md) for detailed setup and troubleshooting.
-
-**Manual hook setup**: See [integrations/settings.example.json](integrations/settings.example.json) (Claude Code), [integrations/codex-settings.example.json](integrations/codex-settings.example.json) (Codex), or [integrations/opencode-settings.example.json](integrations/opencode-settings.example.json) (OpenCode)
+**Manual hook setup**: See [integrations/settings.example.json](integrations/settings.example.json) (Claude Code), [integrations/codex-settings.example.json](integrations/codex-settings.example.json) (Codex), or [integrations/opencode-plugin.example.ts](integrations/opencode-plugin.example.ts) (OpenCode)
 
 ## How It Works
 

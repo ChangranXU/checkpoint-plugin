@@ -89,7 +89,149 @@ def test_claude_session_title_is_read_from_transcript_slug(tmp_path, monkeypatch
     assert metadata["session_title"] == "complete-environment-configuration-documentation"
 
 
-def test_turn_manifest_stores_external_trajectory_reference(tmp_path):
+def test_claude_session_title_prefers_ai_title_over_slug(tmp_path, monkeypatch):
+    home = tmp_path / "plugin"
+    claude_home = tmp_path / ".claude"
+    cwd = tmp_path / "work"
+    transcript = tmp_path / "claude.jsonl"
+    cwd.mkdir()
+    claude_home.mkdir()
+    (cwd / "CLAUDE.md").write_text("agent", encoding="utf-8")
+    transcript.write_text(
+        '{"type":"user","message":{"role":"user","content":"hello"}}\n'
+        '{"type":"assistant","message":{"role":"assistant","content":"hi"}}\n'
+        '{"type":"ai-title","aiTitle":"Fix the login bug","sessionId":"s1"}\n'
+        '{"type":"user","slug":"random-slug-name","message":{"role":"user","content":"more"}}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("CHECKPOINT_PROVIDER", raising=False)
+    monkeypatch.delenv("CODEX_SESSION_ID", raising=False)
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.setenv("TEST_HOME", str(tmp_path))
+    monkeypatch.setenv("CLAUDE_SESSION_ID", "s1")
+
+    coordinator = CheckpointCoordinator(session_id="s1", cwd=cwd, plugin_home=home)
+    coordinator.on_session_start()
+    coordinator.on_turn_end(
+        TurnRecord(),
+        TrajectoryReference("claude", str(transcript), 0, transcript.stat().st_size, 4),
+    )
+
+    metadata = json.loads((home / "sessions" / "s1" / "metadata.json").read_text())
+    assert metadata["session_title"] == "Fix the login bug"
+
+
+def test_resolve_session_title_claude_from_transcript(tmp_path, monkeypatch):
+    """resolve_session_title reads aiTitle from Claude transcript."""
+    from checkpoint_plugin.coordinator import resolve_session_title
+
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    claude_home = tmp_path / "home" / ".claude"
+    project_dir_name = str(cwd).replace("/", "-")
+    project_dir = claude_home / "projects" / project_dir_name
+    project_dir.mkdir(parents=True)
+    transcript = project_dir / "sess1.jsonl"
+    transcript.write_text(
+        '{"type":"user","message":{"role":"user","content":"hello"}}\n'
+        '{"type":"ai-title","aiTitle":"Implement dark mode","sessionId":"sess1"}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path / "home")
+
+    metadata = {"provider": "claude", "session_id": "sess1", "cwd": str(cwd)}
+    assert resolve_session_title(metadata) == "Implement dark mode"
+
+
+def test_opencode_session_title_is_read_from_sqlite(tmp_path, monkeypatch):
+    import sqlite3
+
+    home = tmp_path / "plugin"
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    (cwd / ".opencode").mkdir()
+
+    # Create a mock opencode.db
+    data_dir = tmp_path / "data" / "opencode"
+    data_dir.mkdir(parents=True)
+    db_path = data_dir / "opencode.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "CREATE TABLE project (id TEXT PRIMARY KEY)"
+    )
+    conn.execute("INSERT INTO project VALUES ('proj1')")
+    conn.execute(
+        "CREATE TABLE session ("
+        "id TEXT PRIMARY KEY, project_id TEXT NOT NULL, slug TEXT NOT NULL, "
+        "directory TEXT NOT NULL, title TEXT NOT NULL, version TEXT NOT NULL, "
+        "time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, "
+        "FOREIGN KEY (project_id) REFERENCES project(id))"
+    )
+    conn.execute(
+        "INSERT INTO session VALUES (?, 'proj1', 'greeting', '/tmp', 'Greeting', '1.0', 1000, 2000)",
+        ("ses_abc123",),
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setenv("OPENCODE_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("CHECKPOINT_PROVIDER", "opencode")
+
+    coordinator = CheckpointCoordinator(session_id="ses_abc123", cwd=cwd, plugin_home=home)
+    coordinator.on_session_start()
+
+    metadata = json.loads((home / "sessions" / "ses_abc123" / "metadata.json").read_text())
+    assert metadata["session_title"] == "Greeting"
+
+
+def test_resolve_session_title_codex_lazy(tmp_path, monkeypatch):
+    """resolve_session_title picks up a codex title written after session_start."""
+    from checkpoint_plugin.coordinator import resolve_session_title
+
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    # No index entry yet → None
+    metadata = {"provider": "codex", "session_id": "s1", "session_title": None}
+    assert resolve_session_title(metadata) is None
+
+    # Write the index entry (simulating codex writing it after our hook)
+    (codex_home / "session_index.jsonl").write_text(
+        '{"id":"s1","thread_name":"Greet user","updated_at":"2026-06-03T07:35:49Z"}\n',
+        encoding="utf-8",
+    )
+    assert resolve_session_title(metadata) == "Greet user"
+
+
+def test_resolve_session_title_opencode_lazy(tmp_path, monkeypatch):
+    """resolve_session_title reads opencode title from SQLite."""
+    import sqlite3
+    from checkpoint_plugin.coordinator import resolve_session_title
+
+    data_dir = tmp_path / "data" / "opencode"
+    data_dir.mkdir(parents=True)
+    db_path = data_dir / "opencode.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE project (id TEXT PRIMARY KEY)")
+    conn.execute("INSERT INTO project VALUES ('p1')")
+    conn.execute(
+        "CREATE TABLE session ("
+        "id TEXT PRIMARY KEY, project_id TEXT NOT NULL, slug TEXT NOT NULL, "
+        "directory TEXT NOT NULL, title TEXT NOT NULL, version TEXT NOT NULL, "
+        "time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, "
+        "FOREIGN KEY (project_id) REFERENCES project(id))"
+    )
+    conn.execute(
+        "INSERT INTO session VALUES ('ses_xyz', 'p1', 'greet', '/tmp', 'Hello World', '1.0', 1000, 2000)"
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setenv("OPENCODE_DATA_DIR", str(tmp_path / "data"))
+
+    metadata = {"provider": "opencode", "session_id": "ses_xyz"}
+    assert resolve_session_title(metadata) == "Hello World"
     home = tmp_path / "plugin"
     cwd = tmp_path / "work"
     transcript = tmp_path / "provider.jsonl"
