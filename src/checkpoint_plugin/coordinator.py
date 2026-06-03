@@ -136,6 +136,11 @@ class CheckpointCoordinator:
                     # Store fork-point trajectory as blob
                     trajectory_sha = self.store.store_blob(anchor[2])
                     metadata["fork_point_trajectory_ref"] = trajectory_sha
+        # OpenCode forks: the TS plugin detects them via title pattern and passes
+        # source="fork" + lineage.forked_from_session_id. Record the linkage.
+        if provider.name == "opencode" and source == "fork" and lineage and lineage.get("forked_from_session_id"):
+            metadata["source"] = "fork"
+            metadata["forked_from_id"] = lineage["forked_from_session_id"]
         clean_env = {key: value for key, value in (session_env or {}).items() if value}
         if clean_env:
             metadata["session_env"] = clean_env

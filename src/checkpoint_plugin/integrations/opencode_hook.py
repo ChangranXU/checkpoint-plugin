@@ -67,18 +67,25 @@ def main(argv: list[str] | None = None) -> int:
     is_subagent = _first_string(payload, "agent_type") == "subagent"
     parent_session_id = _first_string(payload, "parent_session_id", "parentSessionId") if is_subagent else None
 
+    # OpenCode forks have no parent_id; the TS plugin detects them via title
+    # pattern and passes source="fork" + forked_from_session_id.
+    is_fork = _first_string(payload, "source") == "fork"
+    forked_from_session_id = _first_string(payload, "forked_from_session_id", "forkedFromSessionId") if is_fork else None
+
     coordinator = CheckpointCoordinator(session_id=session_id, cwd=cwd)
 
     if event == "session_start":
         source = _first_string(payload, "source") or ("subagent" if is_subagent else None)
-        lineage = (
-            {
+        lineage: dict[str, Any] | None = None
+        if is_subagent and parent_session_id:
+            lineage = {
                 "parent_session_id": parent_session_id,
                 "agent_type": _first_string(payload, "agent_type", "agentType"),
             }
-            if is_subagent and parent_session_id
-            else None
-        )
+        elif is_fork:
+            lineage = {
+                "forked_from_session_id": forked_from_session_id,
+            }
         coordinator.on_session_start(
             source=source,
             session_env=_session_env(payload),

@@ -30,8 +30,16 @@ interface CheckpointPayload {
   source?: string
   agent_type?: "primary" | "subagent"
   parent_session_id?: string
+  forked_from_session_id?: string
   messages?: any[]
   event_metadata?: Record<string, unknown>
+}
+
+function parseForkTitle(title: string | undefined): { baseTitle: string; forkNum: number } | null {
+  if (!title) return null
+  const match = title.match(/^(.+) \(fork #(\d+)\)$/)
+  if (!match) return null
+  return { baseTitle: match[1], forkNum: parseInt(match[2], 10) }
 }
 
 function invokeCheckpointHook(event: string, payload: CheckpointPayload): Promise<void> {
@@ -73,6 +81,20 @@ export const CheckpointPlugin = async (ctx: {
   // for the same turn completion.
   const lastCheckpointedCount = new Map<string, number>()
 
+  async function findForkOrigin(baseTitle: string, forkNum: number): Promise<string | undefined> {
+    try {
+      const resp = await client.session.list()
+      const sessions: any[] = resp?.data ?? []
+      // The fork's parent is the session with the base title (for fork #1)
+      // or the previous fork number (for fork #N where N>1).
+      const parentTitle = forkNum > 1 ? `${baseTitle} (fork #${forkNum - 1})` : baseTitle
+      const match = sessions.find((s: any) => s.title === parentTitle)
+      return match?.id
+    } catch {
+      return undefined
+    }
+  }
+
   return {
     /**
      * Bus events arrive here. OpenCode publishes session.created, session.idle,
@@ -88,14 +110,30 @@ export const CheckpointPlugin = async (ctx: {
 
           const info = event.properties?.info
           const parentID: string | undefined = info?.parentID
+          const forkInfo = parseForkTitle(info?.title)
+
+          let source: string | undefined
+          let agentType: "primary" | "subagent" = "primary"
+          let parentSessionId: string | undefined
+          let forkedFromSessionId: string | undefined
+
+          if (parentID) {
+            source = "subagent"
+            agentType = "subagent"
+            parentSessionId = parentID
+          } else if (forkInfo) {
+            source = "fork"
+            forkedFromSessionId = await findForkOrigin(forkInfo.baseTitle, forkInfo.forkNum)
+          }
 
           const payload: CheckpointPayload = {
             sessionID,
             directory,
             worktree,
-            source: parentID ? "subagent" : undefined,
-            agent_type: parentID ? "subagent" : "primary",
-            parent_session_id: parentID,
+            source,
+            agent_type: agentType,
+            parent_session_id: parentSessionId,
+            forked_from_session_id: forkedFromSessionId,
             event_metadata: {
               timestamp: new Date().toISOString(),
               hook_event_name: "SessionStart",
@@ -144,22 +182,42 @@ export const CheckpointPlugin = async (ctx: {
               .join(""),
           }))
 
-          // Detect subagent
+          // Detect subagent or fork
           let parentID: string | undefined
+          let sessTitle: string | undefined
           try {
             const sess = await client.session.get({ path: { id: sessionID } })
             parentID = sess?.data?.parentID
+            sessTitle = sess?.data?.title
           } catch {
             // best-effort
+          }
+
+          let source: string | undefined
+          let agentType: "primary" | "subagent" = "primary"
+          let parentSessionId: string | undefined
+          let forkedFromSessionId: string | undefined
+
+          if (parentID) {
+            source = "subagent"
+            agentType = "subagent"
+            parentSessionId = parentID
+          } else {
+            const forkInfo = parseForkTitle(sessTitle)
+            if (forkInfo) {
+              source = "fork"
+              forkedFromSessionId = await findForkOrigin(forkInfo.baseTitle, forkInfo.forkNum)
+            }
           }
 
           const payload: CheckpointPayload = {
             sessionID,
             directory,
             worktree,
-            source: parentID ? "subagent" : undefined,
-            agent_type: parentID ? "subagent" : "primary",
-            parent_session_id: parentID,
+            source,
+            agent_type: agentType,
+            parent_session_id: parentSessionId,
+            forked_from_session_id: forkedFromSessionId,
             messages: flatMessages,
             event_metadata: {
               timestamp: new Date().toISOString(),
@@ -229,20 +287,40 @@ export const CheckpointPlugin = async (ctx: {
         activeSessions.add(sessionID)
 
         let parentID: string | undefined
+        let sessTitle: string | undefined
         try {
           const sess = await client.session.get({ path: { id: sessionID } })
           parentID = sess?.data?.parentID
+          sessTitle = sess?.data?.title
         } catch {
           // best-effort
+        }
+
+        let source: string | undefined
+        let agentType: "primary" | "subagent" = "primary"
+        let parentSessionId: string | undefined
+        let forkedFromSessionId: string | undefined
+
+        if (parentID) {
+          source = "subagent"
+          agentType = "subagent"
+          parentSessionId = parentID
+        } else {
+          const forkInfo = parseForkTitle(sessTitle)
+          if (forkInfo) {
+            source = "fork"
+            forkedFromSessionId = await findForkOrigin(forkInfo.baseTitle, forkInfo.forkNum)
+          }
         }
 
         const payload: CheckpointPayload = {
           sessionID,
           directory,
           worktree,
-          source: parentID ? "subagent" : undefined,
-          agent_type: parentID ? "subagent" : "primary",
-          parent_session_id: parentID,
+          source,
+          agent_type: agentType,
+          parent_session_id: parentSessionId,
+          forked_from_session_id: forkedFromSessionId,
           event_metadata: {
             timestamp: new Date().toISOString(),
             hook_event_name: "SessionStart",
