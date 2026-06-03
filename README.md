@@ -4,14 +4,6 @@
 
 Automatically saves your agent's state at each turn: **environment config, project files, and conversation trajectory**. Restore to any previous checkpoint with a diff preview and automatic backups, then continue the session in your agent right where it left off.
 
-## Features
-
-- **Automatic checkpoints** at every turn, for Claude Code, Codex, and OpenCode
-- **Diff-first resume** — preview environment and filesystem changes before restoring
-- **Resume into your agent** — rebuilds a native provider session so you can keep going
-- **Forks & subagents** — captures forked threads and subagent runs faithfully
-- **Restore in place or into a copy** — leave your current workspace untouched
-
 ## Quick Start
 
 ```bash
@@ -24,6 +16,14 @@ checkpoint hooks install
 # Restart your agent, then verify
 checkpoint
 ```
+
+## Features
+
+- **Automatic checkpoints** at every turn, for Claude Code, Codex, and OpenCode
+- **Diff-first resume** — preview environment and filesystem changes before restoring
+- **Resume into your agent** — rebuilds a native provider session so you can keep going
+- **Forks & subagents** — captures forked threads and subagent runs faithfully
+- **Restore in place or into a copy** — leave your current workspace untouched
 
 ## Configuration
 

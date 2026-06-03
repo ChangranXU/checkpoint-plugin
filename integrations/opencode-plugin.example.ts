@@ -27,6 +27,7 @@ interface CheckpointPayload {
   sessionID: string
   directory?: string
   worktree?: string
+  source?: string
   agent_type?: "primary" | "subagent"
   parent_session_id?: string
   messages?: any[]
@@ -92,6 +93,7 @@ export const CheckpointPlugin = async (ctx: {
             sessionID,
             directory,
             worktree,
+            source: parentID ? "subagent" : undefined,
             agent_type: parentID ? "subagent" : "primary",
             parent_session_id: parentID,
             event_metadata: {
@@ -155,6 +157,7 @@ export const CheckpointPlugin = async (ctx: {
             sessionID,
             directory,
             worktree,
+            source: parentID ? "subagent" : undefined,
             agent_type: parentID ? "subagent" : "primary",
             parent_session_id: parentID,
             messages: flatMessages,
@@ -237,6 +240,7 @@ export const CheckpointPlugin = async (ctx: {
           sessionID,
           directory,
           worktree,
+          source: parentID ? "subagent" : undefined,
           agent_type: parentID ? "subagent" : "primary",
           parent_session_id: parentID,
           event_metadata: {

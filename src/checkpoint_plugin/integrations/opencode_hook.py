@@ -62,13 +62,28 @@ def main(argv: list[str] | None = None) -> int:
         _write_ok()
         return 0
 
+    # OpenCode subagents are regular sessions with parent_session_id set.
+    # Detect via the agent_type field the TS plugin passes.
+    is_subagent = _first_string(payload, "agent_type") == "subagent"
+    parent_session_id = _first_string(payload, "parent_session_id", "parentSessionId") if is_subagent else None
+
     coordinator = CheckpointCoordinator(session_id=session_id, cwd=cwd)
 
     if event == "session_start":
+        source = _first_string(payload, "source") or ("subagent" if is_subagent else None)
+        lineage = (
+            {
+                "parent_session_id": parent_session_id,
+                "agent_type": _first_string(payload, "agent_type", "agentType"),
+            }
+            if is_subagent and parent_session_id
+            else None
+        )
         coordinator.on_session_start(
-            source=_first_string(payload, "source"),
+            source=source,
             session_env=_session_env(payload),
             source_transcript_path=_first_string(payload, "transcript_path", "transcriptPath"),
+            lineage=lineage,
         )
         _write_ok()
         return 0
