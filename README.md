@@ -1,12 +1,12 @@
 # checkpoint-plugin
 
-**Turn-boundary checkpointing for Claude Code, Codex, and similar agent CLIs.**
+**Turn-boundary checkpointing for Claude Code, Codex, OpenCode, and similar agent CLIs.**
 
-Automatically saves your agent's state at each turn: environment config, project files, and conversation trajectory. Restore to any previous checkpoint with a diff preview and automatic backups, then continue the session in your agent right where it left off.
+Automatically saves your agent's state at each turn: **environment config, project files, and conversation trajectory**. Restore to any previous checkpoint with a diff preview and automatic backups, then continue the session in your agent right where it left off.
 
 ## Features
 
-- **Automatic checkpoints** at every turn, for both Claude Code and Codex
+- **Automatic checkpoints** at every turn, for Claude Code, Codex, and OpenCode
 - **Diff-first resume** — preview environment and filesystem changes before restoring
 - **Resume into your agent** — rebuilds a native provider session so you can keep going
 - **Forks & subagents** — captures forked threads and subagent runs faithfully
@@ -18,7 +18,7 @@ Automatically saves your agent's state at each turn: environment config, project
 # Install
 pip install -e .
 
-# Set up hooks (auto-configures Claude Code and Codex)
+# Set up hooks (auto-configures Claude Code, Codex, and OpenCode)
 checkpoint hooks install
 
 # Restart your agent, then verify
@@ -36,15 +36,19 @@ checkpoint clean --empty            # remove
 **Hook management**:
 
 ```bash
-checkpoint hooks install          # both Claude Code and Codex
-checkpoint hooks install claude   # Claude Code only
-checkpoint hooks install codex    # Codex only
-checkpoint hooks uninstall        # remove all hooks
-checkpoint hooks uninstall claude # remove Claude Code hooks only
-checkpoint hooks uninstall codex  # remove Codex hooks only
+checkpoint hooks install            # All providers (Claude Code, Codex, and OpenCode)
+checkpoint hooks install claude     # Claude Code only
+checkpoint hooks install codex      # Codex only
+checkpoint hooks install opencode   # OpenCode only (installs TypeScript plugin)
+checkpoint hooks uninstall          # remove all hooks
+checkpoint hooks uninstall claude   # remove Claude Code hooks only
+checkpoint hooks uninstall codex    # remove Codex hooks only
+checkpoint hooks uninstall opencode # remove OpenCode plugin
 ```
 
-**Manual hook setup**: See [integrations/settings.example.json](integrations/settings.example.json) (Claude Code) or [integrations/codex-settings.example.json](integrations/codex-settings.example.json) (Codex)
+**OpenCode Note**: OpenCode uses a TypeScript plugin system instead of JSON hooks. The installer copies a plugin to `~/.config/opencode/plugins/checkpoint.ts`. **Restart OpenCode after installation**. See [OPENCODE_INTEGRATION.md](OPENCODE_INTEGRATION.md) for detailed setup and troubleshooting.
+
+**Manual hook setup**: See [integrations/settings.example.json](integrations/settings.example.json) (Claude Code), [integrations/codex-settings.example.json](integrations/codex-settings.example.json) (Codex), or [integrations/opencode-settings.example.json](integrations/opencode-settings.example.json) (OpenCode)
 
 ## How It Works
 

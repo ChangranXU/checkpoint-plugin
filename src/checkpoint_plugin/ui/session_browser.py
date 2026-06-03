@@ -67,6 +67,10 @@ class SessionNode:
         return _text(self.metadata.get("source")) or "startup"
 
     @property
+    def cwd(self) -> str | None:
+        return _text(self.metadata.get("cwd"))
+
+    @property
     def lineage(self) -> dict[str, Any]:
         value = self.metadata.get("lineage")
         return value if isinstance(value, dict) else {}
@@ -82,6 +86,7 @@ class TreeRow:
     style: str = ""
     expanded: bool = False
     has_children: bool = False
+    group_key: str | None = None
 
 
 def show_session_browser(
@@ -126,12 +131,21 @@ def render_session_tree(providers: dict[str, list[SessionNode]]) -> str:
     for provider, nodes in providers.items():
         total_turns = sum(_count_turns(node) for node in nodes)
         lines.append(f"{provider} ({len(nodes)} sessions, {total_turns} turns)")
-        rows = _rows_for_nodes(nodes)
-        for row in rows:
-            # Simple text rendering for non-TTY
-            prefix = "  " * row.depth
-            marker = "▶" if row.kind == "session" else "├" if row.kind == "link" else "─"
-            lines.append(f"  {prefix}{marker} {row.label}")
+        groups = _group_by_project(nodes)
+        if len(groups) <= 1:
+            rows = _rows_for_nodes(nodes)
+            for row in rows:
+                prefix = "  " * row.depth
+                marker = "▶" if row.kind == "session" else "├" if row.kind == "link" else "─"
+                lines.append(f"  {prefix}{marker} {row.label}")
+        else:
+            for _, group_label, group_nodes in groups:
+                lines.append(f"  [{group_label}] ({len(group_nodes)} sessions)")
+                rows = _rows_for_nodes(group_nodes)
+                for row in rows:
+                    prefix = "  " * row.depth
+                    marker = "▶" if row.kind == "session" else "├" if row.kind == "link" else "─"
+                    lines.append(f"    {prefix}{marker} {row.label}")
     return "\n".join(lines)
 
 
@@ -139,6 +153,10 @@ def _show_tui(providers: dict[str, list[SessionNode]]) -> BrowserAction | None:
     provider_names = list(providers)
     selected_by_provider = {name: 0 for name in provider_names}
     expanded = {node.session_id for nodes in providers.values() for node in _walk_sessions(nodes)}
+    # Also expand all project groups by default
+    for nodes in providers.values():
+        for group_key, _, _ in _group_by_project(nodes):
+            expanded.add(group_key)
     state: dict[str, Any] = {
         "provider": 0,
         "mode": "browse",
@@ -320,6 +338,13 @@ def _show_tui(providers: dict[str, list[SessionNode]]) -> BrowserAction | None:
         row = selected_row()
         if row is None:
             return
+        if row.kind == "group" and row.group_key:
+            if row.group_key in expanded:
+                expanded.remove(row.group_key)
+            else:
+                expanded.add(row.group_key)
+            invalidate(event)
+            return
         if row.kind == "session":
             if row.node.session_id in expanded:
                 expanded.remove(row.node.session_id)
@@ -436,6 +461,8 @@ def _show_tui(providers: dict[str, list[SessionNode]]) -> BrowserAction | None:
         for nodes in providers.values():
             for node in _walk_sessions(nodes):
                 expanded.add(node.session_id)
+            for group_key, _, _ in _group_by_project(nodes):
+                expanded.add(group_key)
         set_status("Expanded all sessions", event)
 
     @bindings.add("s-tab", filter=browse_mode)
@@ -504,6 +531,7 @@ def _show_tui(providers: dict[str, list[SessionNode]]) -> BrowserAction | None:
             "tab.separator": "#666666",
             # Provider/Session - better hierarchy
             "provider": "#00d7ff bold",
+            "group": "#5fafff bold underline",
             "session": "#ffffff bold",
             "session.startup": "#00ff87 bold",
             "session.fork": "#ffaf00 bold",
@@ -649,9 +677,49 @@ def _safe_parent_turn(root: Path, parent_session_id: str, agent_id: str | None, 
 def _rows_for_nodes(nodes: list[SessionNode], expanded: set[str] | None = None) -> list[TreeRow]:
     expanded = expanded if expanded is not None else {node.session_id for node in _walk_sessions(nodes)}
     rows: list[TreeRow] = []
-    for node in nodes:
-        _append_session_rows(rows, node, 0, expanded)
+    groups = _group_by_project(nodes)
+    if len(groups) <= 1:
+        # Single group — no need for group headers
+        for node in nodes:
+            _append_session_rows(rows, node, 0, expanded)
+    else:
+        for group_key, group_label, group_nodes in groups:
+            is_expanded = group_key in expanded
+            rows.append(
+                TreeRow(
+                    "group",
+                    group_nodes[0],
+                    None,
+                    0,
+                    f"{group_label} ({len(group_nodes)})",
+                    "class:group",
+                    expanded=is_expanded,
+                    has_children=True,
+                    group_key=group_key,
+                )
+            )
+            if is_expanded:
+                for node in group_nodes:
+                    _append_session_rows(rows, node, 1, expanded)
     return rows
+
+
+def _group_by_project(nodes: list[SessionNode]) -> list[tuple[str, str, list[SessionNode]]]:
+    """Group session nodes by cwd. Returns (group_key, display_label, nodes) tuples sorted by recency."""
+    groups: dict[str, list[SessionNode]] = {}
+    for node in nodes:
+        cwd = node.cwd
+        key = cwd or "__chat__"
+        groups.setdefault(key, []).append(node)
+    result: list[tuple[str, str, list[SessionNode]]] = []
+    for key, group_nodes in groups.items():
+        if key == "__chat__":
+            label = "chat"
+        else:
+            label = Path(key).name or key
+        result.append((f"__group__{key}", label, group_nodes))
+    result.sort(key=lambda g: max((n.created_ts for n in g[2]), default=""), reverse=True)
+    return result
 
 
 def _append_session_rows(rows: list[TreeRow], node: SessionNode, depth: int, expanded: set[str]) -> None:
@@ -809,6 +877,17 @@ def _sync_tree_scroll(state: dict[str, Any], selected: int, row_count: int) -> N
 def _detail_fragments(row: TreeRow | None, state: dict[str, Any]) -> list[tuple[str, str]]:
     if row is None:
         return [("class:muted", "\n" + "─" * 40 + "\nNo selection.\n")]
+    if row.kind == "group" and row.group_key:
+        fragments: list[tuple[str, str]] = [("class:detail.label", "\n" + "━" * 40 + "\n")]
+        raw_key = row.group_key.removeprefix("__group__")
+        if raw_key == "__chat__":
+            fragments.append(("class:detail.label", "📁 Project: "))
+            fragments.append(("class:detail.value", "chat (no working directory)\n"))
+        else:
+            fragments.append(("class:detail.label", "📁 Project: "))
+            fragments.append(("class:detail.value", f"{raw_key}\n"))
+        fragments.append(("class:dim", "\nPress Enter to expand/collapse.\n"))
+        return fragments
     node = row.node
     fragments: list[tuple[str, str]] = [("class:detail.label", "\n" + "━" * 40 + "\n")]
 

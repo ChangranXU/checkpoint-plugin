@@ -40,11 +40,12 @@ def _selected_specs(provider: str) -> list[HookSpec]:
         "claude": _claude_spec(),
         "claude-code": _claude_spec(),
         "codex": _codex_spec(),
+        "opencode": _opencode_spec(),
     }
     if normalized == "all":
-        return [_claude_spec(), _codex_spec()]
+        return [_claude_spec(), _codex_spec(), _opencode_spec()]
     if normalized not in specs:
-        raise ValueError(f"Unknown provider {provider!r}; expected claude, codex, or all")
+        raise ValueError(f"Unknown provider {provider!r}; expected claude, codex, opencode, or all")
     return [specs[normalized]]
 
 
@@ -84,6 +85,19 @@ def _codex_spec() -> HookSpec:
     )
 
 
+def _opencode_spec() -> HookSpec:
+    # OpenCode uses TypeScript plugins, not JSON hooks like Claude/Codex.
+    # The installer copies the plugin file to ~/.config/opencode/plugins/checkpoint.ts
+    config_home = Path(os.environ.get("OPENCODE_HOME", str(_base_home() / ".config" / "opencode"))).expanduser()
+    plugin_dir = config_home / "plugins"
+    return HookSpec(
+        provider="opencode",
+        path=plugin_dir / "checkpoint.ts",
+        commands=frozenset(),  # TypeScript plugin, no command-based hooks
+        events={},  # TypeScript plugin handles events internally
+    )
+
+
 def _module_command(module: str, event: str) -> str:
     return f"{shlex.quote(sys.executable)} -m {module} {event}"
 
@@ -107,6 +121,11 @@ def _entry(matcher: str | None, command: str, status_message: str | None = None)
 
 
 def _apply(spec: HookSpec, install: bool) -> HookInstallResult:
+    # OpenCode uses TypeScript plugins (.ts files), not JSON hooks
+    if spec.provider == "opencode":
+        return _apply_opencode_plugin(spec, install)
+
+    # Claude/Codex use JSON hooks
     data = _read_json(spec.path)
     before = json.dumps(data, sort_keys=True, separators=(",", ":"))
     hooks = data.setdefault("hooks", {})
@@ -239,6 +258,52 @@ def _remove_commands_from_unmanaged_events(
                 hooks[event] = unmanaged[event]
             else:
                 del hooks[event]
+
+
+def _base_home() -> Path:
+    return Path(os.environ.get("TEST_HOME", str(Path.home()))).expanduser()
+
+
+def _apply_opencode_plugin(spec: HookSpec, install: bool) -> HookInstallResult:
+    """Install or uninstall OpenCode TypeScript plugin.
+
+    OpenCode doesn't use JSON hooks like Claude/Codex. Instead, it loads TypeScript
+    plugin files from ~/.config/opencode/plugins/ or .opencode/plugins/.
+    """
+    plugin_path = spec.path
+
+    if install:
+        # Copy the TypeScript plugin template to the plugins directory
+        plugin_dir = plugin_path.parent
+        plugin_dir.mkdir(parents=True, exist_ok=True)
+
+        # Read the template plugin from the package
+        package_root = Path(__file__).parent.parent.parent.parent
+        template_path = package_root / "integrations" / "opencode-plugin.example.ts"
+
+        if not template_path.exists():
+            raise FileNotFoundError(f"OpenCode plugin template not found at {template_path}")
+
+        # Check if plugin already exists and is identical
+        changed = True
+        if plugin_path.exists():
+            existing_content = plugin_path.read_text(encoding="utf-8")
+            template_content = template_path.read_text(encoding="utf-8")
+            if existing_content == template_content:
+                changed = False
+
+        if changed:
+            # Copy the template to the target location
+            plugin_path.write_text(template_path.read_text(encoding="utf-8"), encoding="utf-8")
+
+        return HookInstallResult(provider=spec.provider, path=plugin_path, changed=changed)
+    else:
+        # Uninstall: remove the plugin file
+        changed = plugin_path.exists()
+        if changed:
+            plugin_path.unlink()
+
+        return HookInstallResult(provider=spec.provider, path=plugin_path, changed=changed)
 
 
 def _base_home() -> Path:

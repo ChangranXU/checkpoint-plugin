@@ -330,7 +330,15 @@ def _prepare_resume_cwd(current_cwd: Path | None, target_cwd: Path | None) -> Pa
             raise RuntimeError(f"Target folder is not empty: {target_cwd}")
     else:
         target_cwd.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(current_cwd, target_cwd, dirs_exist_ok=True)
+    def _ignore_special_files(directory: str, entries: list[str]) -> set[str]:
+        ignored = set()
+        for entry in entries:
+            path = Path(directory) / entry
+            if path.is_socket() or path.is_fifo() or path.is_block_device() or path.is_char_device():
+                ignored.add(entry)
+        return ignored
+
+    shutil.copytree(current_cwd, target_cwd, dirs_exist_ok=True, ignore=_ignore_special_files)
     return target_cwd
 
 

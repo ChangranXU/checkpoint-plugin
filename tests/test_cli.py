@@ -42,7 +42,7 @@ def test_list_sessions_shows_title_and_source(tmp_path, monkeypatch, capsys):
     )
     monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(home))
 
-    assert main(["list"]) == 0
+    assert main(["list", "--all"]) == 0
 
     assert capsys.readouterr().out == "s1  Respond to greeting  startup\n"
 
@@ -52,7 +52,7 @@ def test_list_sessions_handles_missing_metadata(tmp_path, monkeypatch, capsys):
     (home / "sessions" / "s1").mkdir(parents=True)
     monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(home))
 
-    assert main(["list"]) == 0
+    assert main(["list", "--all"]) == 0
 
     assert capsys.readouterr().out == "s1  -  -\n"
 

@@ -75,7 +75,7 @@ def main(argv: list[str] | None = None) -> int:
 
     hooks = sub.add_parser("hooks", help="Install or uninstall agent lifecycle hooks")
     hooks.add_argument("action", choices=["install", "uninstall"])
-    hooks.add_argument("provider", nargs="?", default="all", help="claude, codex, or all")
+    hooks.add_argument("provider", nargs="?", default="all", help="claude, codex, opencode, or all")
 
     config = sub.add_parser("config", help="Read/write plugin config")
     config.add_argument("action", choices=["get", "set"])
@@ -144,7 +144,10 @@ def _dispatch(args: argparse.Namespace) -> int:
         if report.provider_session_path is not None:
             print(f"Provider session: {report.provider_session_path}")
         if report.resume_command is not None:
-            print(f"Resume with: {_colorize(report.resume_command, 'bold green')}")
+            if report.target_cwd is not None:
+                print(f"Resume with: {_colorize(f'cd {report.target_cwd} && {report.resume_command}', 'bold green')}")
+            else:
+                print(f"Resume with: {_colorize(report.resume_command, 'bold green')}")
         return 0
     if args.command == "clean":
         if args.empty:

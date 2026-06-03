@@ -657,7 +657,8 @@ def test_cli_resume_prints_resume_command_hint(tmp_path, monkeypatch, capsys):
 
     assert main(["resume", "s1", "0", "--yes"]) == 0
     out = capsys.readouterr().out
-    assert "Resume with: claude --resume " in out
+    assert "Resume with:" in out
+    assert "claude --resume" in out
     assert "Provider session:" in out
 
 

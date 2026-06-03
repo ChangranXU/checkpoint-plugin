@@ -18,7 +18,10 @@ def render_tree_row(row: TreeRow, is_selected: bool, all_rows: list[TreeRow]) ->
         fragments.append(("class:tree.branch", prefix))
 
     # Row marker and expansion indicator
-    if row.kind == "session":
+    if row.kind == "group":
+        marker = "▼ " if row.expanded else "▶ "
+        fragments.append(("class:group", marker))
+    elif row.kind == "session":
         # Check if expanded by looking for immediate children
         fragments.append(_session_marker_fragment(row, is_selected))
     elif row.kind == "link":
