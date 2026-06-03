@@ -20,10 +20,21 @@ checkpoint
 ## Features
 
 - **Automatic checkpoints** at every turn, for Claude Code, Codex, and OpenCode
-- **Diff-first resume** — preview environment and filesystem changes before restoring
-- **Resume into your agent** — rebuilds a native provider session so you can keep going
-- **Forks & subagents** — captures forked threads and subagent runs faithfully
+- **Full-state capture** — saves conversation trajectory + environment config + filesystem together as one atomic unit, not just file diffs
+- **Resume into your agent** — rebuilds a native provider session so you can continue the conversation from any prior turn
+- **Diff-first restore** — preview environment and filesystem changes before committing
+- **Cross-provider** — one checkpoint history works across Claude Code, Codex, and OpenCode
+- **Forks & subagents** — captures forked threads and subagent runs with full lineage
 - **Restore in place or into a copy** — leave your current workspace untouched
+
+### Why native file checkpointing isn't enough
+
+Native agent CLIs offer functions, e.g. [file checkpointing](https://code.claude.com/docs/en/agent-sdk/file-checkpointing#rewind-file-changes-with-checkpointing), that can rewind Write/Edit tool changes on disk. This plugin goes further:
+
+- **Conversation survives the rewind.** Native rewind restores files but explicitly does not rewind the conversation — the agent loses the context that produced those edits. This plugin restores the full transcript through the target turn, so you resume with the agent's reasoning intact.
+- **Everything is captured, not just tool edits.** Native checkpointing misses Bash-made changes, environment config (model, MCP servers, memory files, skills, permissions), and project settings. This plugin snapshots all of it at every turn boundary.
+- **Works across providers.** Native checkpointing is per-SDK and per-session. This plugin gives you a single timeline that spans Claude Code, Codex, and OpenCode sessions — browse, diff, and restore from one place.
+- **Independent, crash-safe store.** Checkpoints live in a content-addressed blob store outside the provider, with deduplication across sessions and fork-point trajectory anchors that survive parent transcript rewrites.
 
 ## Configuration
 
@@ -46,13 +57,13 @@ checkpoint hooks uninstall opencode # remove OpenCode plugin
 
 ## How It Works
 
-Checkpoints capture three things at each turn:
+Each turn, the plugin atomically captures:
 
-- **Environment**: Provider settings (model, permission mode, collaboration mode), memory files, MCP config, skills
-- **Filesystem**: All project files (respects `.gitignore` and excludes `.git`, `node_modules`, `.env`*, etc.)
-- **Trajectory**: The conversation transcript through that turn
+- **Environment** — model, permission mode, memory files, MCP config, skills
+- **Filesystem** — all project files (respects `.gitignore`; excludes `.git`, `node_modules`, `.env`*, etc.)
+- **Trajectory** — the conversation transcript through that turn
 
-Restoring a checkpoint shows a summary diff and creates backups before modifying files. At the resume prompt, enter `d` to inspect detailed environment and filesystem diffs before choosing whether to proceed. On confirm, the plugin restores your files and writes a native provider session you can reopen with the printed `codex resume` / `claude --resume` command — continuing the conversation from that turn.
+On restore, the plugin shows a summary diff (enter `d` for detailed diffs), creates backups, restores your files, and writes a native provider session you can reopen with the printed `codex resume` / `claude --resume` command.
 
 ## Common Commands
 
