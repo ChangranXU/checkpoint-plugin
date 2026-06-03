@@ -35,7 +35,7 @@ checkpoint
 checkpoint hooks install            # All providers (Claude Code, Codex, and OpenCode)
 checkpoint hooks install claude     # Claude Code only
 checkpoint hooks install codex      # Codex only
-checkpoint hooks install opencode   # OpenCode only (installs TypeScript plugin)
+checkpoint hooks install opencode   # OpenCode only
 checkpoint hooks uninstall          # remove all hooks
 checkpoint hooks uninstall claude   # remove Claude Code hooks only
 checkpoint hooks uninstall codex    # remove Codex hooks only

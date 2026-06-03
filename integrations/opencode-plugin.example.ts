@@ -67,6 +67,10 @@ export const CheckpointPlugin = async (ctx: {
 }) => {
   const { client, directory, worktree } = ctx
   const activeSessions = new Set<string>()
+  // Track the last checkpointed message count per session to avoid duplicate
+  // checkpoints when OpenCode fires both session.idle and session.status{idle}
+  // for the same turn completion.
+  const lastCheckpointedCount = new Map<string, number>()
 
   return {
     /**
@@ -124,6 +128,11 @@ export const CheckpointPlugin = async (ctx: {
           const lastMsg = messages[messages.length - 1]
           if (!lastMsg || lastMsg.info?.role !== "assistant") return
 
+          // Deduplicate: OpenCode fires both session.idle AND session.status{idle}
+          // for the same turn completion. Skip if we already checkpointed this state.
+          if (lastCheckpointedCount.get(sessionID) === messages.length) return
+          lastCheckpointedCount.set(sessionID, messages.length)
+
           // Flatten to simple {role, content} for the Python hook
           const flatMessages = messages.map((m: any) => ({
             role: m.info?.role,
@@ -161,6 +170,9 @@ export const CheckpointPlugin = async (ctx: {
           const sessionID: string = event.properties?.sessionID
           const messageID: string = event.properties?.messageID
           if (!sessionID) return
+
+          // Reset dedup counter so the rollback checkpoint can proceed
+          lastCheckpointedCount.delete(sessionID)
 
           let messages: any[] = []
           try {

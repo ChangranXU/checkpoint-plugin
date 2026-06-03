@@ -132,20 +132,13 @@ def render_session_tree(providers: dict[str, list[SessionNode]]) -> str:
         total_turns = sum(_count_turns(node) for node in nodes)
         lines.append(f"{provider} ({len(nodes)} sessions, {total_turns} turns)")
         groups = _group_by_project(nodes)
-        if len(groups) <= 1:
-            rows = _rows_for_nodes(nodes)
+        for _, group_label, group_nodes in groups:
+            lines.append(f"  [{group_label}] ({len(group_nodes)} sessions)")
+            rows = _rows_for_flat_group(group_nodes)
             for row in rows:
                 prefix = "  " * row.depth
                 marker = "▶" if row.kind == "session" else "├" if row.kind == "link" else "─"
-                lines.append(f"  {prefix}{marker} {row.label}")
-        else:
-            for _, group_label, group_nodes in groups:
-                lines.append(f"  [{group_label}] ({len(group_nodes)} sessions)")
-                rows = _rows_for_nodes(group_nodes)
-                for row in rows:
-                    prefix = "  " * row.depth
-                    marker = "▶" if row.kind == "session" else "├" if row.kind == "link" else "─"
-                    lines.append(f"    {prefix}{marker} {row.label}")
+                lines.append(f"    {prefix}{marker} {row.label}")
     return "\n".join(lines)
 
 
@@ -602,9 +595,11 @@ def _is_empty_node(manifests: list[CheckpointManifest], metadata: dict[str, Any]
     if not manifests:
         return True
 
-    # All turns have empty trajectories (0 records)
+    # A session is non-empty if any turn has trajectory records or a user message
     for manifest in manifests:
         if manifest.trajectory_ref and manifest.trajectory_ref.record_count > 0:
+            return False
+        if manifest.user_message_preview:
             return False
 
     return True
@@ -675,32 +670,40 @@ def _safe_parent_turn(root: Path, parent_session_id: str, agent_id: str | None, 
 
 
 def _rows_for_nodes(nodes: list[SessionNode], expanded: set[str] | None = None) -> list[TreeRow]:
-    expanded = expanded if expanded is not None else {node.session_id for node in _walk_sessions(nodes)}
+    if expanded is None:
+        expanded = {node.session_id for node in _walk_sessions(nodes)}
+        for group_key, _, _ in _group_by_project(nodes):
+            expanded.add(group_key)
     rows: list[TreeRow] = []
     groups = _group_by_project(nodes)
-    if len(groups) <= 1:
-        # Single group — no need for group headers
-        for node in nodes:
-            _append_session_rows(rows, node, 0, expanded)
-    else:
-        for group_key, group_label, group_nodes in groups:
-            is_expanded = group_key in expanded
-            rows.append(
-                TreeRow(
-                    "group",
-                    group_nodes[0],
-                    None,
-                    0,
-                    f"{group_label} ({len(group_nodes)})",
-                    "class:group",
-                    expanded=is_expanded,
-                    has_children=True,
-                    group_key=group_key,
-                )
+    for group_key, group_label, group_nodes in groups:
+        is_expanded = group_key in expanded
+        rows.append(
+            TreeRow(
+                "group",
+                group_nodes[0],
+                None,
+                0,
+                f"{group_label} ({len(group_nodes)})",
+                "class:group",
+                expanded=is_expanded,
+                has_children=True,
+                group_key=group_key,
             )
-            if is_expanded:
-                for node in group_nodes:
-                    _append_session_rows(rows, node, 1, expanded)
+        )
+        if is_expanded:
+            for node in group_nodes:
+                _append_session_rows(rows, node, 1, expanded)
+    return rows
+
+
+def _rows_for_flat_group(nodes: list[SessionNode], expanded: set[str] | None = None) -> list[TreeRow]:
+    """Render session rows without group headers (for text output where groups are handled externally)."""
+    if expanded is None:
+        expanded = {node.session_id for node in _walk_sessions(nodes)}
+    rows: list[TreeRow] = []
+    for node in nodes:
+        _append_session_rows(rows, node, 0, expanded)
     return rows
 
 

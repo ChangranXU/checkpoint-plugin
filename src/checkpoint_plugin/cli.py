@@ -219,15 +219,17 @@ def _is_empty_session(session_dir: Path, metadata: dict[str, Any]) -> bool:
         if not manifests:
             return True
 
-        # All turns have empty trajectories (0 records)
-        all_empty = True
+        # A session is non-empty if any turn has trajectory records OR a
+        # non-trivial user message (opencode passes messages via payload, not a
+        # transcript file, so trajectory_ref.record_count stays 0 even for real turns).
         for manifest in manifests:
             traj_ref = manifest.trajectory_ref
             if traj_ref and traj_ref.record_count > 0:
-                all_empty = False
-                break
+                return False
+            if manifest.user_message_preview:
+                return False
 
-        return all_empty
+        return True
     except Exception:
         # On error, show the session to be safe
         return False
