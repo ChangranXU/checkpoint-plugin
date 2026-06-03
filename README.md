@@ -23,10 +23,6 @@ checkpoint hooks install
 
 # Restart your agent, then verify
 checkpoint
-
-# Optional: Clean up any empty sessions from testing
-checkpoint clean --empty --dry-run  # preview
-checkpoint clean --empty            # remove
 ```
 
 ## Configuration
