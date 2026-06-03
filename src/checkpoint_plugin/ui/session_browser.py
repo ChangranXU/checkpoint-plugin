@@ -123,7 +123,7 @@ def collect_provider_trees(root: Path | None = None, show_all: bool = False) -> 
             continue
         providers.setdefault(node.provider, []).append(node)
     for provider_nodes in providers.values():
-        provider_nodes.sort(key=_session_sort_key)
+        provider_nodes.sort(key=_session_sort_key, reverse=True)
     return dict(sorted(providers.items()))
 
 
@@ -146,11 +146,7 @@ def render_session_tree(providers: dict[str, list[SessionNode]]) -> str:
 def _show_tui(providers: dict[str, list[SessionNode]]) -> BrowserAction | None:
     provider_names = list(providers)
     selected_by_provider = {name: 0 for name in provider_names}
-    expanded = {node.session_id for nodes in providers.values() for node in _walk_sessions(nodes)}
-    # Also expand all project groups by default
-    for nodes in providers.values():
-        for group_key, _, _ in _group_by_project(nodes):
-            expanded.add(group_key)
+    expanded = _default_expanded_groups(providers)
     state: dict[str, Any] = {
         "provider": 0,
         "mode": "browse",
@@ -623,7 +619,7 @@ def _link_nodes(nodes: dict[str, SessionNode], root: Path) -> None:
             nodes[parent_session].fork_children.setdefault(turn, []).append(node)
     for node in nodes.values():
         for children in [*node.fork_children.values(), *node.subagent_children.values()]:
-            children.sort(key=_session_sort_key)
+            children.sort(key=_session_sort_key, reverse=True)
 
 
 def _fork_parent(
@@ -696,6 +692,14 @@ def _rows_for_nodes(nodes: list[SessionNode], expanded: set[str] | None = None) 
             for node in group_nodes:
                 _append_session_rows(rows, node, 1, expanded)
     return rows
+
+
+def _default_expanded_groups(providers: dict[str, list[SessionNode]]) -> set[str]:
+    expanded: set[str] = set()
+    for nodes in providers.values():
+        for group_key, _, _ in _group_by_project(nodes):
+            expanded.add(group_key)
+    return expanded
 
 
 def _rows_for_flat_group(nodes: list[SessionNode], expanded: set[str] | None = None) -> list[TreeRow]:

@@ -318,6 +318,34 @@ def test_session_browser_groups_by_provider_and_nests_lineage(tmp_path, monkeypa
     assert "subagent" in rendered and "[subagent]" in rendered
 
 
+def test_session_browser_defaults_to_recent_sessions_with_turn_lists_collapsed(tmp_path, monkeypatch):
+    home = tmp_path / "plugin"
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(home))
+    _write_session(
+        home,
+        "older",
+        {"provider": "codex", "source": "startup", "start_ts": "2026-01-01T00:00:00Z"},
+        [("2026-01-01T00:01:00Z", "older turn")],
+    )
+    _write_session(
+        home,
+        "newer",
+        {"provider": "codex", "source": "startup", "start_ts": "2026-01-01T01:00:00Z"},
+        [("2026-01-01T01:01:00Z", "newer turn")],
+    )
+
+    providers = collect_provider_trees(home / "sessions")
+
+    assert [node.session_id for node in providers["codex"]] == ["newer", "older"]
+
+    expanded = session_browser._default_expanded_groups(providers)
+    rows = _rows_for_nodes(providers["codex"], expanded)
+
+    assert [row.node.session_id for row in rows if row.kind == "session"] == ["newer", "older"]
+    assert [row.kind for row in rows] == ["group", "session", "session"]
+    assert all(not row.expanded for row in rows if row.kind == "session")
+
+
 def test_checkpoint_without_tty_prints_browser_tree(tmp_path, monkeypatch, capsys):
     home = tmp_path / "plugin"
     monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(home))
