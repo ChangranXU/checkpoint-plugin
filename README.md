@@ -19,22 +19,11 @@ checkpoint
 
 ## Features
 
-- **Automatic checkpoints** at every turn, for Claude Code, Codex, and OpenCode
+- **Automatic checkpoints** at every turn, for Claude Code, Codex, and OpenCode.
 - **Full-state capture** — saves conversation trajectory + environment config + filesystem together as one atomic unit, not just file diffs
 - **Resume into your agent** — rebuilds a native provider session so you can continue the conversation from any prior turn
-- **Diff-first restore** — preview environment and filesystem changes before committing
 - **Cross-provider** — one checkpoint history works across Claude Code, Codex, and OpenCode
 - **Forks & subagents** — captures forked threads and subagent runs with full lineage
-- **Restore in place or into a copy** — leave your current workspace untouched
-
-### Why native file checkpointing isn't enough
-
-Native agent CLIs offer functions, e.g. [file checkpointing](https://code.claude.com/docs/en/agent-sdk/file-checkpointing#rewind-file-changes-with-checkpointing), that can rewind Write/Edit tool changes on disk. This plugin goes further:
-
-- **Conversation survives the rewind.** Native rewind restores files but explicitly does not rewind the conversation — the agent loses the context that produced those edits. This plugin restores the full transcript through the target turn, so you resume with the agent's reasoning intact.
-- **Everything is captured, not just tool edits.** Native checkpointing misses Bash-made changes, environment config (model, MCP servers, memory files, skills, permissions), and project settings. This plugin snapshots all of it at every turn boundary.
-- **Works across providers.** Native checkpointing is per-SDK and per-session. This plugin gives you a single timeline that spans Claude Code, Codex, and OpenCode sessions — browse, diff, and restore from one place.
-- **Independent, crash-safe store.** Checkpoints live in a content-addressed blob store outside the provider, with deduplication across sessions and fork-point trajectory anchors that survive parent transcript rewrites.
 
 ## Configuration
 
