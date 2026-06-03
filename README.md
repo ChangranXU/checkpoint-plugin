@@ -88,34 +88,13 @@ checkpoint config get .
 checkpoint config set key value
 ```
 
-`checkpoint` opens a terminal session browser grouped by provider. **Empty sessions are hidden by default** to keep the view clean. Use left/right or `h`/`l` to switch provider tabs, `j`/`k` or arrows to move, `PageUp`/`PageDown` to scroll, and `Enter` to expand a session or focus a turn. The tree shows session lineage, fork/resume branches under the parent turn where they split, subagents under the parent turn that spawned them, and each session's checkpoint timeline. Press `/` to run a command on the selected row:
+### Interactive browser
 
-```text
-/show      show checkpoint metadata
-/diff      preview restore changes
-/resume    show the checkpoint resume command to run outside the browser
-/quit      exit
-```
+`checkpoint` (no arguments) opens a terminal session browser grouped by provider. Navigate with arrow keys or vim bindings (`h`/`j`/`k`/`l`), `Enter` to expand, `/` to run a command (`/show`, `/diff`, `/resume`, `/quit`). `r` and `d` are shortcuts for resume and diff. When output is not a terminal, it prints a plain-text tree.
 
-`r` and `d` are shortcuts for resume and diff on the selected turn. Resume is
-offered only for valid parent-session checkpoint turns. Commands render in an
-inline output pane and keep the browser open; `/resume` prints a copyable
-`checkpoint resume <session-id> <turn>` command instead of restoring inline. Once
-command output is visible, `PageUp`/`PageDown` scrolls the output pane. When
-output is not a terminal, `checkpoint` prints the same provider/session/turn tree
-in a plain text form.
+### Resume workflow
 
-`checkpoint list` shows one row per session and **hides empty sessions by default** (those with no captured data). Use `--all` to see everything including empty sessions.
-
-```text
-<session-id>  <session-title>  <source>  [marker]
-```
-
-Sessions with `[no capture]` had no sidechain file at capture time and contain metadata only. Use `checkpoint clean --empty` to remove these automatically.
-
-Use `checkpoint list --session <session-id>` to list that session's checkpoint turns. Turns marked with `[replaced by turn N]` were superseded by an edit-send operation. Both the replaced and replacement turns are valid resume points — the replaced turn restores the pre-edit state, while the replacement restores the post-edit state.
-
-During `checkpoint resume`, the confirmation prompt accepts:
+`checkpoint resume` shows a summary diff and prompts:
 
 ```text
 y = restore checkpoint
@@ -123,26 +102,19 @@ n = cancel
 d = view detailed environment and filesystem diffs
 ```
 
-The diff viewer opens a terminal UI grouped like the summary diff: `Environment` changes first, then `Filesystem` changes. Use `j`/`k` or arrow keys to move, `Enter` to open the selected diff in a full-window colored view, and `Esc`/`q` to go back.
+On confirm, choose to restore in place or into a new folder copy. Copy mode leaves your current workspace untouched.
 
-After confirming with `y`, choose whether to restore in place or restore into a new folder copy. Copy mode duplicates the current workspace to a sibling folder, applies the checkpoint there, and leaves the original workspace untouched. The resumed provider session and checkpoint metadata point at the copied workspace; the command also prints the copied `Workspace:` path.
+## Storage Layout
 
-## Checkpoint Metadata Structure
+Checkpoints live in `~/.checkpoint-plugin/sessions/<session-id>/` with:
 
-Each checkpoint stores:
+- `metadata.json` — session metadata (provider, source, parent lineage, timestamps)
+- `manifests/` — per-turn state (trajectory offsets, environment, filesystem)
+- `env-snapshots/` — environment config at each turn
+- `fs-snapshots/` — compressed project filesystem at each turn
+- `blobs/` — content-addressed trajectory data, deduplicated across sessions
 
-- **metadata.json**: Session metadata including provider, source (startup/fork/resume), parent lineage, timestamps, and file references
-- **manifests/**: Turn-by-turn manifests with trajectory offsets, environment snapshots, and filesystem state
-- **env-snapshots/**: Environment configuration at each turn (provider settings, memory files, MCP config)
-- **fs-snapshots/**: Compressed project filesystem at each turn
-- **trajectory reference**: Points to the raw provider transcript file with byte offsets for each turn. Fork and resume sessions also store `fork_point_trajectory_ref` blobs containing the inherited trajectory to handle parent transcript rewrites.
-- **blobs/**: Content-addressed storage for trajectory data, deduplicated across sessions
-
-All JSON records use compact formatting (`separators=(",", ":")`) to match native provider output byte-for-byte.
-
-**Fork and resume sessions**: Metadata includes `forked_from_transcript` path and `forked_at_offset` pointing to the parent session's fork point. The fork session writes its own transcript file containing both inherited and new content. Additionally, `fork_point_trajectory_ref` stores the inherited trajectory as a content-addressed blob to handle cases where the parent transcript is rewritten post-fork (e.g., due to edit-send rollback or compaction).
-
-**Subagent sessions**: Metadata includes `parent_session_id` linking to the parent session. Subagents with `capture_status='no_sidechain_file'` indicate the sidechain file was not found at capture time.
+Fork/resume sessions store `fork_point_trajectory_ref` blobs to survive parent transcript rewrites.
 
 ## Troubleshooting
 
