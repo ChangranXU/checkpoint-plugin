@@ -103,13 +103,13 @@ def collect_environment(
     session_env = _session_env_fallback(store)
     return EnvironmentState(
         provider=provider.name,
-        model=_first_env("ANTHROPIC_MODEL", "CLAUDE_MODEL", "OPENAI_MODEL", "CODEX_MODEL")
+        model=_first_env("ANTHROPIC_MODEL", "CLAUDE_MODEL", "OPENAI_MODEL", "CODEX_MODEL", "OPENCODE_MODEL")
         or session_env.get("model"),
-        permission_mode=_first_env("CLAUDE_PERMISSION_MODE", "CODEX_PERMISSION_MODE", "CODEX_SANDBOX_MODE")
+        permission_mode=_first_env("CLAUDE_PERMISSION_MODE", "CODEX_PERMISSION_MODE", "CODEX_SANDBOX_MODE", "OPENCODE_PERMISSION_MODE")
         or session_env.get("permission_mode"),
-        mode=_first_env("CLAUDE_MODE", "CODEX_MODE") or session_env.get("mode"),
-        effort=_first_env("CLAUDE_EFFORT") or session_env.get("effort") or _codex_effort(provider, cwd),
-        agent_type=_first_env("CLAUDE_AGENT_TYPE", "CODEX_AGENT_TYPE") or session_env.get("agent_type"),
+        mode=_first_env("CLAUDE_MODE", "CODEX_MODE", "OPENCODE_MODE") or session_env.get("mode"),
+        effort=_first_env("CLAUDE_EFFORT", "OPENCODE_EFFORT") or session_env.get("effort") or _codex_effort(provider, cwd),
+        agent_type=_first_env("CLAUDE_AGENT_TYPE", "CODEX_AGENT_TYPE", "OPENCODE_AGENT_TYPE") or session_env.get("agent_type"),
         memory_files=_collect_tree(provider.memory_dir, store),
         mcp_config=_store_file(provider.mcp_config, store),
         mcp_configs=_collect_named_files(_mcp_config_files(provider, cwd), store),

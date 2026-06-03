@@ -286,8 +286,11 @@ def _new_resume_session_id(provider_name: str | None = None) -> str:
     # rollout filename, `id`, and session_index entry sort chronologically in the
     # picker. uuid4 (version nibble 4) sorts randomly and is a byte-distinguishable
     # fingerprint. Native CLAUDE ids are uuid4 (verified), so only codex needs v7.
+    # OpenCode uses `ses_` + hex-timestamp + random base62.
     if provider_name == "codex":
         return _uuid7()
+    if provider_name == "opencode":
+        return f"ses_{uuid.uuid4().hex[:26]}"
     return str(uuid.uuid4())
 
 
@@ -826,7 +829,173 @@ def _write_provider_session(
             provider_home, cwd, new_session_id, trajectory, model, permission_mode, mode,
             has_inherited_prefix, source_session_id, inherited_record_count,
         )
+    if provider_name == "opencode":
+        return _write_opencode_session(
+            provider_home, cwd, new_session_id, trajectory,
+        )
     return None
+
+
+def _write_opencode_session(
+    provider_home: Path,
+    cwd: Path,
+    new_session_id: str,
+    trajectory: bytes,
+) -> Path | None:
+    """Write a JSON file that `opencode import` can ingest to restore the session.
+
+    Parses the trajectory JSONL to extract the raw_messages (full OpenCode SDK
+    format) stored by the hook. Falls back to reconstructing minimal messages
+    from the turn records if raw data is unavailable (pre-fix captures).
+    """
+    records = _parse_jsonl(trajectory)
+    if not records:
+        return None
+    # Extract session_info and raw_messages from the last turn's metadata
+    session_info = None
+    all_raw_messages: list[dict] | None = None
+    for record in reversed(records):
+        meta = record.get("metadata", {})
+        hook_payload = meta.get("hook_payload", {})
+        if hook_payload.get("raw_messages"):
+            all_raw_messages = hook_payload["raw_messages"]
+            if not session_info and hook_payload.get("session_info"):
+                session_info = hook_payload["session_info"]
+            break
+    if all_raw_messages is None:
+        # Pre-fix captures: reconstruct minimal messages from turn records
+        all_raw_messages = _reconstruct_opencode_messages(records, new_session_id)
+    if not all_raw_messages:
+        return None
+    # Build the export JSON structure that `opencode import` accepts
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    info = session_info or {}
+    export_info = {
+        "id": new_session_id,
+        "slug": info.get("slug", _opencode_slug(new_session_id)),
+        "projectID": info.get("projectID", "global"),
+        "directory": str(cwd),
+        "title": info.get("title", "Resumed session"),
+        "version": info.get("version", "2"),
+        "cost": info.get("cost", 0),
+        "tokens": info.get("tokens", {"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}}),
+        "time": {"created": info.get("time", {}).get("created", now_ms), "updated": now_ms},
+    }
+    if info.get("model"):
+        export_info["model"] = info["model"]
+    if info.get("agent"):
+        export_info["agent"] = info["agent"]
+    # Structure: {info, messages: [{info, parts}, ...]}
+    # Remap all message/part IDs to avoid collisions with the source session
+    # (opencode import uses onConflictDoNothing, so duplicate IDs are silently skipped).
+    # Use time-ordered IDs so lexicographic ID comparison matches chronological
+    # order. OpenCode's continuation logic relies on `id > latest.id` comparisons.
+    # Format: timestamp (48-bit from uuid7) + sequential counter for strict ordering.
+    base_timestamp = _uuid7().replace('-', '')[:12]  # First 48 bits of uuid7
+    msg_id_map: dict[str, str] = {}
+    export_messages = []
+    for msg_idx, msg in enumerate(all_raw_messages):
+        msg_info = msg.get("info", msg)
+        msg_parts = msg.get("parts", [])
+        if not isinstance(msg_info, dict):
+            continue
+        old_msg_id = msg_info.get("id", "")
+        new_msg_id = f"msg_{base_timestamp}{msg_idx:012x}"
+        msg_id_map[old_msg_id] = new_msg_id
+        rewritten_info = {**msg_info, "id": new_msg_id, "sessionID": new_session_id}
+        # Remap parentID to the new message ID
+        if "parentID" in rewritten_info and rewritten_info["parentID"] in msg_id_map:
+            rewritten_info["parentID"] = msg_id_map[rewritten_info["parentID"]]
+        rewritten_parts = []
+        for part_idx, part in enumerate(msg_parts):
+            if isinstance(part, dict):
+                new_part_id = f"prt_{base_timestamp}{msg_idx:06x}{part_idx:06x}"
+                rewritten_parts.append({
+                    **part,
+                    "id": new_part_id,
+                    "messageID": new_msg_id,
+                    "sessionID": new_session_id,
+                })
+            else:
+                rewritten_parts.append(part)
+        export_messages.append({"info": rewritten_info, "parts": rewritten_parts})
+    export_data = {"info": export_info, "messages": export_messages}
+    # Write to a temp file that the resume CLI can import
+    import_dir = provider_home / "imports"
+    import_dir.mkdir(parents=True, exist_ok=True)
+    import_path = import_dir / f"{new_session_id}.json"
+    import_path.write_text(json.dumps(export_data, indent=2), encoding="utf-8")
+    return import_path
+
+
+def _reconstruct_opencode_messages(
+    records: list[dict], session_id: str
+) -> list[dict]:
+    """Build minimal OpenCode message structures from turn records (fallback)."""
+    messages: list[dict] = []
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    base_timestamp = _uuid7().replace('-', '')[:12]
+    last_user_id: str | None = None
+    msg_counter = 0
+    for i, record in enumerate(records):
+        if record.get("type") != "turn":
+            continue
+        user_text = record.get("user_message", "")
+        assistant_text = record.get("assistant_text", "")
+        ts = now_ms + i * 1000
+        if user_text:
+            user_id = f"msg_resume_{base_timestamp}{msg_counter:012x}"
+            msg_counter += 1
+            user_msg = {
+                "info": {
+                    "id": user_id,
+                    "sessionID": session_id,
+                    "role": "user",
+                    "time": {"created": ts},
+                    "agent": "build",
+                },
+                "parts": [{"id": f"prt_resume_{base_timestamp}{msg_counter:012x}", "messageID": user_id, "sessionID": session_id, "type": "text", "text": user_text}],
+            }
+            messages.append(user_msg)
+            last_user_id = user_id
+        if assistant_text:
+            asst_id = f"msg_resume_{base_timestamp}{msg_counter:012x}"
+            msg_counter += 1
+            asst_msg = {
+                "info": {
+                    "id": asst_id,
+                    "sessionID": session_id,
+                    "parentID": last_user_id if user_text else messages[-1]["info"]["id"] if messages else None,
+                    "role": "assistant",
+                    "mode": "build",
+                    "agent": "build",
+                    "path": {"cwd": ".", "root": "/"},
+                    "time": {"created": ts + 500, "completed": ts + 1000},
+                    "finish": "stop",
+                },
+                "parts": [{"id": f"prt_resume_{base_timestamp}{msg_counter:012x}", "messageID": asst_id, "sessionID": session_id, "type": "text", "text": assistant_text}],
+            }
+            messages.append(asst_msg)
+    return messages
+
+
+def _opencode_slug(session_id: str) -> str:
+    """Generate a simple slug from the session id."""
+    return f"resumed-{session_id[-8:]}"
+
+
+def _parse_jsonl(data: bytes) -> list[dict]:
+    """Parse JSONL bytes into a list of dicts."""
+    records = []
+    for line in data.split(b"\n"):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            records.append(json.loads(line))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+    return records
 
 
 def _first_session_meta_id(records: list[dict[str, object]]) -> str | None:
@@ -1733,6 +1902,8 @@ def _resume_command(provider_name: str, new_session_id: str) -> str | None:
         return f"claude --resume {new_session_id}"
     if provider_name == "codex":
         return f"codex resume {new_session_id}"
+    if provider_name == "opencode":
+        return f"opencode import ~/.config/opencode/imports/{new_session_id}.json && opencode --session {new_session_id}"
     return None
 
 

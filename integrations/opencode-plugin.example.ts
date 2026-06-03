@@ -31,7 +31,10 @@ interface CheckpointPayload {
   agent_type?: "primary" | "subagent"
   parent_session_id?: string
   forked_from_session_id?: string
+  model?: string
   messages?: any[]
+  raw_messages?: any[]
+  session_info?: any
   event_metadata?: Record<string, unknown>
 }
 
@@ -134,10 +137,10 @@ export const CheckpointPlugin = async (ctx: {
             agent_type: agentType,
             parent_session_id: parentSessionId,
             forked_from_session_id: forkedFromSessionId,
+            model: info?.model?.id,
             event_metadata: {
               timestamp: new Date().toISOString(),
               hook_event_name: "SessionStart",
-              model: info?.model?.id,
             },
           }
 
@@ -185,10 +188,12 @@ export const CheckpointPlugin = async (ctx: {
           // Detect subagent or fork
           let parentID: string | undefined
           let sessTitle: string | undefined
+          let sessData: any | undefined
           try {
             const sess = await client.session.get({ path: { id: sessionID } })
             parentID = sess?.data?.parentID
             sessTitle = sess?.data?.title
+            sessData = sess?.data
           } catch {
             // best-effort
           }
@@ -219,6 +224,9 @@ export const CheckpointPlugin = async (ctx: {
             parent_session_id: parentSessionId,
             forked_from_session_id: forkedFromSessionId,
             messages: flatMessages,
+            raw_messages: messages,
+            session_info: sessData,
+            model: lastMsg.info?.modelID || sessData?.model?.id,
             event_metadata: {
               timestamp: new Date().toISOString(),
               message_count: messages.length,
@@ -256,6 +264,7 @@ export const CheckpointPlugin = async (ctx: {
             directory,
             worktree,
             messages: flatMessages,
+            raw_messages: messages,
             event_metadata: {
               timestamp: new Date().toISOString(),
               removed_message_id: messageID,

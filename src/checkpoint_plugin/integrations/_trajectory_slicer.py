@@ -207,7 +207,7 @@ def _tail_within_session(tail: bytes) -> bool:
 def _key_extractor_for(provider: str) -> KeyExtractor | None:
     if provider == "claude":
         return claude_key
-    if provider == "codex":
+    if provider in ("codex", "opencode"):
         return codex_key
     return None
 

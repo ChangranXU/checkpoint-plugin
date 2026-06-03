@@ -17,7 +17,6 @@ from typing import Any
 from checkpoint_plugin.coordinator import CheckpointCoordinator, TurnRecord
 from checkpoint_plugin.types import TrajectoryReference
 
-from ._hook_common import empty_trajectory_ref as _empty_trajectory_ref
 from ._hook_common import first_string as _first_string
 from ._hook_common import parent_session_env as _parent_session_env
 from ._hook_common import read_payload as _read_payload
@@ -100,7 +99,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     turn_record = _turn_record(payload)
-    coordinator.on_turn_end(turn_record, _trajectory_ref(payload, provider="opencode") or _empty_trajectory_ref("opencode"))
+    coordinator.on_turn_end(turn_record, _trajectory_ref(payload, provider="opencode"))
     _write_ok()
     return 0
 
@@ -137,7 +136,7 @@ def _on_subagent_end(payload: dict[str, Any], cwd: Path, parent_session_id: str)
     )
     if transcript_path is not None:
         _settle_subagent_rollout(Path(transcript_path))
-    ref = _subagent_trajectory_ref(payload, transcript_path) or _empty_trajectory_ref("opencode")
+    ref = _subagent_trajectory_ref(payload, transcript_path)
     coordinator.on_turn_end(_turn_record(payload), ref)
 
 
@@ -224,12 +223,18 @@ def _seed_opencode_env(session_id: str, payload: dict[str, Any]) -> None:
     model = _first_string(payload, "model")
     if model:
         os.environ.setdefault("OPENCODE_MODEL", model)
+    effort = _first_string(payload, "effort", "thinking_effort", "thinkingEffort")
+    if effort:
+        os.environ.setdefault("OPENCODE_EFFORT", effort)
     permission_mode = _first_string(payload, "permission_mode", "permissionMode")
     if permission_mode:
         os.environ.setdefault("OPENCODE_PERMISSION_MODE", permission_mode)
     mode = _first_string(payload, "collaboration_mode_kind", "collaborationModeKind", "mode")
     if mode:
         os.environ.setdefault("OPENCODE_MODE", mode)
+    agent_type = _first_string(payload, "agent_type", "agentType")
+    if agent_type:
+        os.environ.setdefault("OPENCODE_AGENT_TYPE", agent_type)
 
 
 def _session_env(payload: dict[str, Any]) -> dict[str, str]:
@@ -243,8 +248,10 @@ def _session_env(payload: dict[str, Any]) -> dict[str, str]:
     """
     fields = {
         "model": _first_string(payload, "model"),
+        "effort": _first_string(payload, "effort", "thinking_effort", "thinkingEffort"),
         "permission_mode": _first_string(payload, "permission_mode", "permissionMode"),
         "mode": _first_string(payload, "collaboration_mode_kind", "collaborationModeKind", "mode"),
+        "agent_type": _first_string(payload, "agent_type", "agentType"),
         "approval_policy": _first_string(payload, "approval_policy", "approvalPolicy"),
         "sandbox_mode": _first_string(payload, "sandbox_mode", "sandboxMode", "sandbox_policy", "sandboxPolicy"),
     }
