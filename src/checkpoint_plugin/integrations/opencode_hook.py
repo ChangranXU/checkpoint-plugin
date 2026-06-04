@@ -249,19 +249,19 @@ def _seed_opencode_env(session_id: str, payload: dict[str, Any]) -> None:
     os.environ.setdefault("OPENCODE_SESSION_ID", session_id)
     model = _first_string(payload, "model")
     if model:
-        os.environ.setdefault("OPENCODE_MODEL", model)
+        os.environ["OPENCODE_MODEL"] = model
     effort = _opencode_effort(payload)
     if effort:
-        os.environ.setdefault("OPENCODE_EFFORT", effort)
+        os.environ["OPENCODE_EFFORT"] = effort
     permission_mode = _first_string(payload, "permission_mode", "permissionMode")
     if permission_mode:
-        os.environ.setdefault("OPENCODE_PERMISSION_MODE", permission_mode)
+        os.environ["OPENCODE_PERMISSION_MODE"] = permission_mode
     mode = _opencode_mode(payload)
     if mode:
-        os.environ.setdefault("OPENCODE_MODE", mode)
+        os.environ["OPENCODE_MODE"] = mode
     agent_type = _first_string(payload, "agent_type", "agentType")
     if agent_type:
-        os.environ.setdefault("OPENCODE_AGENT_TYPE", agent_type)
+        os.environ["OPENCODE_AGENT_TYPE"] = agent_type
     mcp_status = payload.get("mcp_status") or payload.get("mcpStatus")
     if isinstance(mcp_status, dict):
         try:
@@ -271,7 +271,8 @@ def _seed_opencode_env(session_id: str, payload: dict[str, Any]) -> None:
     resolved_config = payload.get("resolved_config") or payload.get("resolvedConfig")
     if isinstance(resolved_config, dict):
         try:
-            os.environ["OPENCODE_RESOLVED_CONFIG"] = json.dumps(_redact_secret_object(resolved_config), separators=(",", ":"))
+            config = _opencode_apply_mcp_status(_redact_secret_object(resolved_config), mcp_status)
+            os.environ["OPENCODE_RESOLVED_CONFIG"] = json.dumps(config, separators=(",", ":"))
         except (TypeError, ValueError):
             pass
 
@@ -311,10 +312,14 @@ def _session_env(payload: dict[str, Any]) -> dict[str, str]:
     resolved_config = payload.get("resolved_config") or payload.get("resolvedConfig")
     if isinstance(resolved_config, dict):
         try:
-            fields["resolved_config"] = json.dumps(_redact_secret_object(resolved_config), separators=(",", ":"))
+            config = _opencode_apply_mcp_status(_redact_secret_object(resolved_config), mcp_status)
+            fields["resolved_config"] = json.dumps(config, separators=(",", ":"))
         except (TypeError, ValueError):
             pass
-    config_content = _opencode_config_content(resolved_config if isinstance(resolved_config, dict) else None)
+    config_content = _opencode_config_content(
+        resolved_config if isinstance(resolved_config, dict) else None,
+        mcp_status if isinstance(mcp_status, dict) else None,
+    )
     if config_content:
         fields["opencode_config_content"] = config_content
     permission = os.environ.get("OPENCODE_PERMISSION")
@@ -330,19 +335,35 @@ def _session_env(payload: dict[str, Any]) -> dict[str, str]:
 
 
 def _opencode_effort(payload: dict[str, Any]) -> str | None:
-    value = _first_string(payload, "effort", "thinking_effort", "thinkingEffort")
+    value = _first_string(payload, "effort", "thinking_effort", "thinkingEffort", "variant")
+    if value:
+        return value
+    value = _opencode_model_variant(payload)
     if value:
         return value
     for message in reversed(_opencode_raw_messages(payload)):
         info = message.get("info")
         if isinstance(info, dict):
-            value = _first_string(info, "effort", "thinking_effort", "thinkingEffort")
+            value = _first_string(info, "effort", "thinking_effort", "thinkingEffort", "variant")
+            if value:
+                return value
+            value = _opencode_model_variant(info)
             if value:
                 return value
     session_info = payload.get("session_info")
     if isinstance(session_info, dict):
-        return _first_string(session_info, "effort", "thinking_effort", "thinkingEffort")
+        return _first_string(session_info, "effort", "thinking_effort", "thinkingEffort", "variant") or _opencode_model_variant(
+            session_info
+        )
     return None
+
+
+def _opencode_model_variant(value: dict[str, Any]) -> str | None:
+    model = value.get("model")
+    if not isinstance(model, dict):
+        return None
+    variant = model.get("variant")
+    return variant if isinstance(variant, str) and variant else None
 
 
 def _opencode_mode(payload: dict[str, Any]) -> str | None:
@@ -369,15 +390,59 @@ def _opencode_raw_messages(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return [message for message in messages if isinstance(message, dict)]
 
 
-def _opencode_config_content(resolved_config: dict[str, Any] | None) -> str | None:
+def _opencode_config_content(
+    resolved_config: dict[str, Any] | None,
+    mcp_status: dict[str, Any] | None = None,
+) -> str | None:
     if resolved_config:
         try:
-            return json.dumps(_redact_secret_object(resolved_config), separators=(",", ":"))
+            config = _opencode_apply_mcp_status(_redact_secret_object(resolved_config), mcp_status)
+            return json.dumps(config, separators=(",", ":"))
         except (TypeError, ValueError):
             pass
     config_content = os.environ.get("OPENCODE_CONFIG_CONTENT")
     if config_content:
-        return _redact_secret_text(config_content)
+        redacted = _redact_secret_text(config_content)
+        if not mcp_status:
+            return redacted
+        try:
+            config = json.loads(redacted)
+        except json.JSONDecodeError:
+            return redacted
+        if isinstance(config, dict):
+            try:
+                return json.dumps(_opencode_apply_mcp_status(config, mcp_status), separators=(",", ":"))
+            except (TypeError, ValueError):
+                return redacted
+        return redacted
+    return None
+
+
+def _opencode_apply_mcp_status(config: object, mcp_status: dict[str, Any] | None) -> object:
+    if not isinstance(config, dict) or not isinstance(mcp_status, dict):
+        return config
+    result = dict(config)
+    existing_mcp = result.get("mcp")
+    mcp = dict(existing_mcp) if isinstance(existing_mcp, dict) else {}
+    for name, value in mcp_status.items():
+        enabled = _opencode_mcp_enabled(value)
+        if enabled is None:
+            continue
+        existing_server = mcp.get(str(name))
+        server = dict(existing_server) if isinstance(existing_server, dict) else {}
+        server["enabled"] = enabled
+        mcp[str(name)] = server
+    if mcp:
+        result["mcp"] = mcp
+    return result
+
+
+def _opencode_mcp_enabled(value: object) -> bool | None:
+    status = value.get("status") if isinstance(value, dict) else value
+    if status in {"connected", "active"}:
+        return True
+    if status in {"disabled", "inactive"}:
+        return False
     return None
 
 

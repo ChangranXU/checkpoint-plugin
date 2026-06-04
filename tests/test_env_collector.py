@@ -373,6 +373,7 @@ def test_collect_opencode_resolved_config_and_saved_runtime_env(tmp_path, monkey
         json.dumps(
             {
                 "session_env": {
+                    "mcp_status": json.dumps({"context7": {"status": "disabled"}}),
                     "resolved_config": json.dumps(
                         {
                             "model": "opencode/test-model",
@@ -407,7 +408,7 @@ def test_collect_opencode_resolved_config_and_saved_runtime_env(tmp_path, monkey
 
     assert env.model == "opencode/test-model"
     assert env.mcp_servers == {
-        "context7": "active",
+        "context7": "inactive",
         "disabled_by_config": "inactive",
     }
     assert env.plugin_status == {"npm-plugin": "active", "tuple-plugin": "active"}
@@ -419,7 +420,7 @@ def test_collect_opencode_resolved_config_and_saved_runtime_env(tmp_path, monkey
     assert env.extra["opencode_config_skill_roots"] == [str(external_skills)]
     assert env.extra["opencode_resolved_config"]["provider"]["x"]["options"]["apiKey"] == "***redacted***"
     saved_config = json.loads(env.extra["opencode_config_content"])
-    assert saved_config["mcp"]["context7"]["enabled"] is True
+    assert saved_config["mcp"]["context7"]["enabled"] is False
     assert "inline_only" not in saved_config["mcp"]
 
 

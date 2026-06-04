@@ -27,6 +27,7 @@ def test_opencode_plugin_installs_typescript_file(tmp_path, monkeypatch):
     assert "export const CheckpointPlugin" in content
     assert "event.type === \"session.created\"" in content
     assert "event.type === \"session.idle\"" in content
+    assert "info?.model?.variant" in content
     assert "checkpoint_plugin.integrations.opencode_hook" in content
 
 
@@ -328,7 +329,7 @@ def test_opencode_mcp_status_capture_from_payload(tmp_path, monkeypatch):
 
 
 def test_opencode_session_env_prefers_resolved_config_over_stale_env(tmp_path, monkeypatch):
-    """Resolved OpenCode config should replace stale OPENCODE_CONFIG_CONTENT snapshots."""
+    """Resolved OpenCode config plus live MCP status should replace stale env snapshots."""
     from io import StringIO
     from checkpoint_plugin.integrations.opencode_hook import main
 
@@ -343,6 +344,7 @@ def test_opencode_session_env_prefers_resolved_config_over_stale_env(tmp_path, m
         "sessionID": "test-session",
         "directory": str(tmp_path),
         "agent_type": "primary",
+        "mcp_status": {"context7": {"status": "disabled"}},
         "resolved_config": {
             "mcp": {"context7": {"enabled": True}},
             "provider": {"x": {"options": {"apiKey": "secret-value"}}},
@@ -358,7 +360,7 @@ def test_opencode_session_env_prefers_resolved_config_over_stale_env(tmp_path, m
 
     metadata = json.loads((tmp_path / "sessions" / "test-session" / "metadata.json").read_text())
     config_content = json.loads(metadata["session_env"]["opencode_config_content"])
-    assert config_content["mcp"]["context7"]["enabled"] is True
+    assert config_content["mcp"]["context7"]["enabled"] is False
     assert config_content["provider"]["x"]["options"]["apiKey"] == "***redacted***"
 
 
@@ -390,6 +392,60 @@ def test_opencode_hook_captures_mode_and_effort_from_payload_context(tmp_path, m
     metadata = json.loads((tmp_path / "sessions" / "test-session" / "metadata.json").read_text())
     assert metadata["session_env"]["mode"] == "build"
     assert metadata["session_env"]["effort"] == "high"
+
+
+def test_opencode_turn_end_captures_model_variant_as_effort_per_turn(tmp_path, monkeypatch):
+    from io import StringIO
+    from checkpoint_plugin.env.collector import environment_from_blob
+    from checkpoint_plugin.integrations.opencode_hook import main
+    from checkpoint_plugin.store import CheckpointStore
+
+    plugin_home = tmp_path / "plugin"
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
+    monkeypatch.setenv("OPENCODE_SESSION_ID", "test-session")
+    monkeypatch.setenv("OPENCODE_MODEL", "stale-model")
+    monkeypatch.setenv("OPENCODE_EFFORT", "stale-effort")
+
+    start_payload = json.dumps({
+        "sessionID": "test-session",
+        "directory": str(cwd),
+        "agent_type": "primary",
+        "event_metadata": {"hook_event_name": "SessionStart"},
+    })
+    monkeypatch.setattr("sys.stdin", StringIO(start_payload))
+    assert main(["session_start"]) == 0
+
+    for prompt, model, variant in (
+        ("use high", "deepseek-v4-flash-free", "high"),
+        ("use max", "deepseek-v4-flash-free", "max"),
+    ):
+        stop_payload = json.dumps({
+            "sessionID": "test-session",
+            "directory": str(cwd),
+            "model": model,
+            "messages": [
+                {"role": "user", "content": prompt},
+                {"role": "assistant", "content": "ok"},
+            ],
+            "session_info": {
+                "model": {"id": model, "providerID": "opencode", "variant": variant},
+            },
+            "event_metadata": {"hook_event_name": "Stop"},
+        })
+        monkeypatch.setattr("sys.stdin", StringIO(stop_payload))
+        assert main(["turn_end"]) == 0
+
+    store = CheckpointStore(plugin_home / "sessions" / "test-session")
+    first = environment_from_blob(store.read_manifest(0).env_ref, store)
+    second = environment_from_blob(store.read_manifest(1).env_ref, store)
+
+    assert first.model == "deepseek-v4-flash-free"
+    assert first.effort == "high"
+    assert second.model == "deepseek-v4-flash-free"
+    assert second.effort == "max"
+    assert store.read_manifest(0).env_ref != store.read_manifest(1).env_ref
 
 
 def test_opencode_hook_captures_session_messages_and_todos_from_sqlite(tmp_path, monkeypatch):

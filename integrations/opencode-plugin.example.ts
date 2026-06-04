@@ -74,6 +74,8 @@ function effortFrom(info: any): string | undefined {
     info?.effort,
     info?.thinking_effort,
     info?.thinkingEffort,
+    info?.variant,
+    info?.model?.variant,
   )
 }
 

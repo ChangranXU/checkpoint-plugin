@@ -369,17 +369,54 @@ def _opencode_resolved_config(session_env: dict[str, str]) -> dict[str, object]:
         data = json.loads(raw)
     except json.JSONDecodeError:
         return {}
-    return _redact_secret_object(data) if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        return {}
+    return _opencode_config_with_mcp_status(_redact_secret_object(data), session_env)
 
 
 def _opencode_config_content(session_env: dict[str, str]) -> str | None:
     resolved = _opencode_resolved_config(session_env)
     if resolved:
         try:
-            return json.dumps(resolved, separators=(",", ":"))
+            return json.dumps(_opencode_config_with_mcp_status(resolved, session_env), separators=(",", ":"))
         except (TypeError, ValueError):
             pass
-    return os.environ.get("OPENCODE_CONFIG_CONTENT") or session_env.get("opencode_config_content")
+    raw = os.environ.get("OPENCODE_CONFIG_CONTENT") or session_env.get("opencode_config_content")
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
+    if not isinstance(data, dict):
+        return raw
+    try:
+        return json.dumps(_opencode_config_with_mcp_status(data, session_env), separators=(",", ":"))
+    except (TypeError, ValueError):
+        return raw
+
+
+def _opencode_config_with_mcp_status(config: dict[str, object], session_env: dict[str, str]) -> dict[str, object]:
+    statuses = _opencode_runtime_mcp_servers(session_env)
+    if not statuses:
+        return config
+    result = dict(config)
+    existing_mcp = result.get("mcp")
+    mcp = dict(existing_mcp) if isinstance(existing_mcp, dict) else {}
+    for name, status in statuses.items():
+        if status == "active":
+            enabled = True
+        elif status == "inactive":
+            enabled = False
+        else:
+            continue
+        existing_server = mcp.get(name)
+        server = dict(existing_server) if isinstance(existing_server, dict) else {}
+        server["enabled"] = enabled
+        mcp[name] = server
+    if mcp:
+        result["mcp"] = mcp
+    return result
 
 
 def _opencode_config_skill_roots(provider: ProviderLayout, cwd: Path, session_env: dict[str, str]) -> list[Path]:
