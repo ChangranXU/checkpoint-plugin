@@ -327,6 +327,134 @@ def test_opencode_mcp_status_capture_from_payload(tmp_path, monkeypatch):
     assert json.loads(metadata["session_env"]["mcp_status"]) == {"context7": {"status": "disabled"}}
 
 
+def test_opencode_session_env_prefers_resolved_config_over_stale_env(tmp_path, monkeypatch):
+    """Resolved OpenCode config should replace stale OPENCODE_CONFIG_CONTENT snapshots."""
+    from io import StringIO
+    from checkpoint_plugin.integrations.opencode_hook import main
+
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(tmp_path))
+    monkeypatch.setenv("OPENCODE_SESSION_ID", "test-session")
+    monkeypatch.setenv(
+        "OPENCODE_CONFIG_CONTENT",
+        json.dumps({"mcp": {"context7": {"enabled": False}}}),
+    )
+
+    payload = json.dumps({
+        "sessionID": "test-session",
+        "directory": str(tmp_path),
+        "agent_type": "primary",
+        "resolved_config": {
+            "mcp": {"context7": {"enabled": True}},
+            "provider": {"x": {"options": {"apiKey": "secret-value"}}},
+        },
+        "event_metadata": {
+            "timestamp": "2026-06-03T14:00:00Z",
+            "hook_event_name": "SessionStart",
+        },
+    })
+
+    monkeypatch.setattr("sys.stdin", StringIO(payload))
+    assert main(["session_start"]) == 0
+
+    metadata = json.loads((tmp_path / "sessions" / "test-session" / "metadata.json").read_text())
+    config_content = json.loads(metadata["session_env"]["opencode_config_content"])
+    assert config_content["mcp"]["context7"]["enabled"] is True
+    assert config_content["provider"]["x"]["options"]["apiKey"] == "***redacted***"
+
+
+def test_opencode_hook_captures_mode_and_effort_from_payload_context(tmp_path, monkeypatch):
+    """Advisory mode/effort fields should use OpenCode payload data when present."""
+    from io import StringIO
+    from checkpoint_plugin.integrations.opencode_hook import main
+
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(tmp_path))
+    monkeypatch.setenv("OPENCODE_SESSION_ID", "test-session")
+
+    payload = json.dumps({
+        "sessionID": "test-session",
+        "directory": str(tmp_path),
+        "agent_type": "primary",
+        "raw_messages": [
+            {"info": {"role": "user"}},
+            {"info": {"role": "assistant", "mode": "build", "thinkingEffort": "high"}},
+        ],
+        "event_metadata": {
+            "timestamp": "2026-06-03T14:00:00Z",
+            "hook_event_name": "SessionStart",
+        },
+    })
+
+    monkeypatch.setattr("sys.stdin", StringIO(payload))
+    assert main(["session_start"]) == 0
+
+    metadata = json.loads((tmp_path / "sessions" / "test-session" / "metadata.json").read_text())
+    assert metadata["session_env"]["mode"] == "build"
+    assert metadata["session_env"]["effort"] == "high"
+
+
+def test_opencode_hook_captures_session_messages_and_todos_from_sqlite(tmp_path, monkeypatch):
+    from io import StringIO
+    import sqlite3
+    from checkpoint_plugin.integrations.opencode_hook import main
+
+    plugin_home = tmp_path / "plugin"
+    cwd = tmp_path / "project"
+    data_dir = tmp_path / "data"
+    db_dir = data_dir / "opencode"
+    db_dir.mkdir(parents=True)
+    cwd.mkdir()
+    db_path = db_dir / "opencode.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "CREATE TABLE session_message ("
+        "id TEXT PRIMARY KEY, session_id TEXT NOT NULL, type TEXT NOT NULL, "
+        "time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL)"
+    )
+    conn.execute(
+        "CREATE TABLE todo ("
+        "session_id TEXT NOT NULL, content TEXT NOT NULL, status TEXT NOT NULL, "
+        "priority TEXT NOT NULL, position INTEGER NOT NULL, "
+        "time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, "
+        "PRIMARY KEY(session_id, position))"
+    )
+    conn.execute(
+        "INSERT INTO session_message VALUES (?, ?, ?, ?, ?, ?)",
+        ("evt_1", "test-session", "model-switched", 100, 101, json.dumps({"model": {"id": "big-pickle"}})),
+    )
+    conn.execute(
+        "INSERT INTO todo VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("test-session", "Capture todo", "pending", "high", 0, 200, 201),
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
+    monkeypatch.setenv("OPENCODE_SESSION_ID", "test-session")
+    monkeypatch.setenv("OPENCODE_DATA_DIR", str(data_dir))
+
+    payload = json.dumps({
+        "sessionID": "test-session",
+        "directory": str(cwd),
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ],
+        "event_metadata": {
+            "timestamp": "2026-06-03T14:00:00Z",
+            "hook_event_name": "Stop",
+        },
+    })
+    monkeypatch.setattr("sys.stdin", StringIO(payload))
+    assert main(["turn_end"]) == 0
+
+    trajectory = (plugin_home / "sessions" / "test-session" / "trajectory.jsonl").read_text(encoding="utf-8")
+    record = json.loads(trajectory.strip())
+    hook_payload = record["metadata"]["hook_payload"]
+    assert hook_payload["session_messages"][0]["type"] == "model-switched"
+    assert hook_payload["session_messages"][0]["data"]["model"]["id"] == "big-pickle"
+    assert hook_payload["todos"][0]["content"] == "Capture todo"
+
+
 def test_opencode_turn_end_uses_runtime_mcp_status_in_env_snapshot(tmp_path, monkeypatch):
     """A runtime UI disconnect should override static opencode.json in the checkpoint env."""
     from io import StringIO

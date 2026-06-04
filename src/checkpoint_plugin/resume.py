@@ -856,13 +856,20 @@ def _write_opencode_session(
     # Extract session_info and raw_messages from the last turn's metadata
     session_info = None
     all_raw_messages: list[dict] | None = None
+    session_messages: list[dict] = []
+    todos: list[dict] = []
     for record in reversed(records):
         meta = record.get("metadata", {})
         hook_payload = meta.get("hook_payload", {})
-        if hook_payload.get("raw_messages"):
+        if not session_messages:
+            session_messages = _opencode_hook_list(hook_payload, "session_messages", "sessionMessages")
+        if not todos:
+            todos = _opencode_hook_list(hook_payload, "todos")
+        if all_raw_messages is None and hook_payload.get("raw_messages"):
             all_raw_messages = hook_payload["raw_messages"]
             if not session_info and hook_payload.get("session_info"):
                 session_info = hook_payload["session_info"]
+        if all_raw_messages is not None and session_messages and todos:
             break
     if all_raw_messages is None:
         # Pre-fix captures: reconstruct minimal messages from turn records
@@ -909,12 +916,87 @@ def _write_opencode_session(
                 rewritten_parts.append(part)
         export_messages.append({"info": rewritten_info, "parts": rewritten_parts})
     export_data = {"info": export_info, "messages": export_messages}
+    rewritten_session_messages = _rewrite_opencode_session_messages(session_messages, new_session_id)
+    if rewritten_session_messages:
+        export_data["session_messages"] = rewritten_session_messages
+    rewritten_todos = _rewrite_opencode_todos(todos, new_session_id)
+    if rewritten_todos:
+        export_data["todos"] = rewritten_todos
     # Write to a temp file that the resume CLI can import
     import_dir = provider_home / "imports"
     import_dir.mkdir(parents=True, exist_ok=True)
     import_path = import_dir / f"{new_session_id}.json"
     import_path.write_text(json.dumps(export_data, indent=2), encoding="utf-8")
     return import_path
+
+
+def _opencode_hook_list(hook_payload: object, *keys: str) -> list[dict]:
+    if not isinstance(hook_payload, dict):
+        return []
+    for key in keys:
+        value = hook_payload.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def _rewrite_opencode_session_messages(messages: list[dict], new_session_id: str) -> list[dict]:
+    base_timestamp = _uuid7().replace("-", "")[:12]
+    rewritten = []
+    for idx, message in enumerate(messages):
+        msg_type = message.get("type")
+        if not isinstance(msg_type, str) or not msg_type:
+            continue
+        time_info = message.get("time") if isinstance(message.get("time"), dict) else {}
+        created = _int_or_now(time_info.get("created") if isinstance(time_info, dict) else None)
+        updated = _int_or_default(time_info.get("updated") if isinstance(time_info, dict) else None, created)
+        rewritten.append(
+            {
+                **message,
+                "id": f"evt_{base_timestamp}{idx:012x}",
+                "sessionID": new_session_id,
+                "type": msg_type,
+                "time": {"created": created, "updated": updated},
+            }
+        )
+    return rewritten
+
+
+def _rewrite_opencode_todos(todos: list[dict], new_session_id: str) -> list[dict]:
+    rewritten = []
+    for idx, todo in enumerate(todos):
+        content = todo.get("content")
+        status = todo.get("status")
+        priority = todo.get("priority")
+        if not all(isinstance(value, str) and value for value in (content, status, priority)):
+            continue
+        time_info = todo.get("time") if isinstance(todo.get("time"), dict) else {}
+        created = _int_or_now(time_info.get("created") if isinstance(time_info, dict) else None)
+        updated = _int_or_default(time_info.get("updated") if isinstance(time_info, dict) else None, created)
+        rewritten.append(
+            {
+                **todo,
+                "sessionID": new_session_id,
+                "content": content,
+                "status": status,
+                "priority": priority,
+                "position": _int_or_default(todo.get("position"), idx),
+                "time": {"created": created, "updated": updated},
+            }
+        )
+    return rewritten
+
+
+def _int_or_now(value: object) -> int:
+    return _int_or_default(value, int(datetime.now(timezone.utc).timestamp() * 1000))
+
+
+def _int_or_default(value: object, default: int) -> int:
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)):
+        return int(value)
+    return default
 
 
 def _opencode_export_info(info: dict, new_session_id: str, cwd: Path, now_ms: int) -> dict:
@@ -1954,11 +2036,129 @@ def _resume_command(
             else f"~/.config/opencode/imports/{new_session_id}.json"
         )
         prefix = _opencode_env_prefix(target_env)
+        restore_cmd = (
+            f"{shlex.quote(sys.executable)} -m checkpoint_plugin.cli "
+            f"opencode-restore-metadata {shlex.quote(import_path)} {shlex.quote(new_session_id)}"
+        )
         return (
             f"{prefix}opencode import {shlex.quote(import_path)} && "
+            f"{prefix}{restore_cmd} && "
             f"{prefix}opencode --session {shlex.quote(new_session_id)}"
         )
     return None
+
+
+def restore_opencode_metadata(import_path: Path, session_id: str) -> tuple[int, int]:
+    """Restore OpenCode sidecar metadata ignored by `opencode import`.
+
+    Current OpenCode import JSON only consumes `info` and `messages`. The checkpoint
+    exporter keeps session timeline events and todos in ignored sidecar fields, then
+    this post-import step inserts them directly into the local SQLite tables.
+    """
+    try:
+        data = json.loads(import_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return (0, 0)
+    if not isinstance(data, dict):
+        return (0, 0)
+    session_messages = _opencode_hook_list(data, "session_messages", "sessionMessages")
+    todos = _opencode_hook_list(data, "todos")
+    if not session_messages and not todos:
+        return (0, 0)
+    db_path = _opencode_db_path()
+    if not db_path.exists():
+        return (0, 0)
+    try:
+        import sqlite3
+
+        conn = sqlite3.connect(str(db_path))
+        try:
+            session_message_count = _restore_opencode_session_messages(conn, session_id, session_messages)
+            todo_count = _restore_opencode_todos(conn, session_id, todos)
+            conn.commit()
+            return (session_message_count, todo_count)
+        finally:
+            conn.close()
+    except Exception:
+        return (0, 0)
+
+
+def _opencode_db_path() -> Path:
+    data_home = Path(
+        os.environ.get("OPENCODE_DATA_DIR")
+        or os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share"))
+    )
+    return data_home.expanduser() / "opencode" / "opencode.db"
+
+
+def _restore_opencode_session_messages(conn: object, session_id: str, messages: list[dict]) -> int:
+    if not messages or not _sqlite_table_exists(conn, "session_message"):
+        return 0
+    count = 0
+    for message in messages:
+        msg_id = message.get("id")
+        msg_type = message.get("type")
+        if not isinstance(msg_id, str) or not msg_id or not isinstance(msg_type, str) or not msg_type:
+            continue
+        time_info = message.get("time") if isinstance(message.get("time"), dict) else {}
+        created = _int_or_now(time_info.get("created") if isinstance(time_info, dict) else None)
+        updated = _int_or_default(time_info.get("updated") if isinstance(time_info, dict) else None, created)
+        conn.execute(
+            "INSERT INTO session_message (id, session_id, type, time_created, time_updated, data) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET "
+            "session_id = excluded.session_id, type = excluded.type, "
+            "time_created = excluded.time_created, time_updated = excluded.time_updated, data = excluded.data",
+            (msg_id, session_id, msg_type, created, updated, _opencode_json_text(message.get("data", {}))),
+        )
+        count += 1
+    return count
+
+
+def _restore_opencode_todos(conn: object, session_id: str, todos: list[dict]) -> int:
+    if not todos or not _sqlite_table_exists(conn, "todo"):
+        return 0
+    count = 0
+    for idx, todo in enumerate(todos):
+        content = todo.get("content")
+        status = todo.get("status")
+        priority = todo.get("priority")
+        if not all(isinstance(value, str) and value for value in (content, status, priority)):
+            continue
+        time_info = todo.get("time") if isinstance(todo.get("time"), dict) else {}
+        created = _int_or_now(time_info.get("created") if isinstance(time_info, dict) else None)
+        updated = _int_or_default(time_info.get("updated") if isinstance(time_info, dict) else None, created)
+        position = _int_or_default(todo.get("position"), idx)
+        conn.execute(
+            "INSERT INTO todo (session_id, content, status, priority, position, time_created, time_updated) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(session_id, position) DO UPDATE SET "
+            "content = excluded.content, status = excluded.status, priority = excluded.priority, "
+            "time_created = excluded.time_created, time_updated = excluded.time_updated",
+            (session_id, content, status, priority, position, created, updated),
+        )
+        count += 1
+    return count
+
+
+def _sqlite_table_exists(conn: object, table_name: str) -> bool:
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+            (table_name,),
+        ).fetchone()
+    except Exception:
+        return False
+    return row is not None
+
+
+def _opencode_json_text(value: object) -> str:
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return "{}"
 
 
 def _opencode_env_prefix(target_env: object | None) -> str:
@@ -1998,6 +2198,9 @@ def _opencode_config_content(target_env: object | None) -> str:
     return json.dumps(content, separators=(",", ":"))
 
 
+_REDACTED_CONFIG_VALUE = object()
+
+
 def _opencode_config_content_base(target_env: object | None) -> object:
     extra = getattr(target_env, "extra", None)
     if not isinstance(extra, dict):
@@ -2006,9 +2209,24 @@ def _opencode_config_content_base(target_env: object | None) -> object:
     if not isinstance(raw, str) or not raw:
         return {}
     try:
-        return json.loads(raw)
+        return _without_redacted_values(json.loads(raw))
     except json.JSONDecodeError:
         return {}
+
+
+def _without_redacted_values(value: object) -> object:
+    if value == "***redacted***":
+        return _REDACTED_CONFIG_VALUE
+    if isinstance(value, dict):
+        result: dict[str, object] = {}
+        for key, item in value.items():
+            cleaned = _without_redacted_values(item)
+            if cleaned is not _REDACTED_CONFIG_VALUE:
+                result[str(key)] = cleaned
+        return result
+    if isinstance(value, list):
+        return [item for item in (_without_redacted_values(item) for item in value) if item is not _REDACTED_CONFIG_VALUE]
+    return value
 
 
 def _opencode_mcp_overlay(target_env: object | None) -> dict[str, dict[str, bool]]:

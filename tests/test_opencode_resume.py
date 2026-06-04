@@ -316,6 +316,113 @@ def test_opencode_resume_preserves_session_info_fields(tmp_path):
     )
 
 
+def test_opencode_resume_restores_session_messages_and_todos(tmp_path, monkeypatch):
+    import sqlite3
+    from checkpoint_plugin.resume import _write_opencode_session, restore_opencode_metadata
+
+    raw_messages = [
+        {
+            "info": {"id": "msg_user", "sessionID": "ses_orig", "role": "user", "time": {"created": 1000}},
+            "parts": [{"id": "prt_user", "type": "text", "text": "hello", "messageID": "msg_user", "sessionID": "ses_orig"}],
+        },
+        {
+            "info": {
+                "id": "msg_assistant",
+                "sessionID": "ses_orig",
+                "role": "assistant",
+                "parentID": "msg_user",
+                "time": {"created": 2000, "completed": 3000},
+                "finish": "stop",
+            },
+            "parts": [{"id": "prt_assistant", "type": "text", "text": "Hi!", "messageID": "msg_assistant", "sessionID": "ses_orig"}],
+        },
+    ]
+    trajectory = (
+        json.dumps(
+            {
+                "type": "turn",
+                "user_message": "hello",
+                "assistant_text": "Hi!",
+                "metadata": {
+                    "hook_payload": {
+                        "raw_messages": raw_messages,
+                        "session_info": {"id": "ses_orig", "slug": "test", "projectID": "global"},
+                        "session_messages": [
+                            {
+                                "id": "evt_orig",
+                                "sessionID": "ses_orig",
+                                "type": "model-switched",
+                                "time": {"created": 111, "updated": 112},
+                                "data": {"model": {"id": "big-pickle", "variant": "default"}},
+                            }
+                        ],
+                        "todos": [
+                            {
+                                "sessionID": "ses_orig",
+                                "content": "Keep todo",
+                                "status": "pending",
+                                "priority": "medium",
+                                "position": 0,
+                                "time": {"created": 211, "updated": 212},
+                            }
+                        ],
+                    }
+                },
+            }
+        )
+        + "\n"
+    ).encode()
+
+    opencode_home = tmp_path / ".config" / "opencode"
+    opencode_home.mkdir(parents=True)
+    import_path = _write_opencode_session(opencode_home, tmp_path, "ses_resumed", trajectory)
+    assert import_path is not None
+
+    import_data = json.loads(import_path.read_text(encoding="utf-8"))
+    assert import_data["session_messages"][0]["sessionID"] == "ses_resumed"
+    assert import_data["session_messages"][0]["id"] != "evt_orig"
+    assert import_data["todos"][0]["sessionID"] == "ses_resumed"
+
+    data_dir = tmp_path / "data"
+    db_dir = data_dir / "opencode"
+    db_dir.mkdir(parents=True)
+    db_path = db_dir / "opencode.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "CREATE TABLE session_message ("
+        "id TEXT PRIMARY KEY, session_id TEXT NOT NULL, type TEXT NOT NULL, "
+        "time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL)"
+    )
+    conn.execute(
+        "CREATE TABLE todo ("
+        "session_id TEXT NOT NULL, content TEXT NOT NULL, status TEXT NOT NULL, "
+        "priority TEXT NOT NULL, position INTEGER NOT NULL, "
+        "time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, "
+        "PRIMARY KEY(session_id, position))"
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setenv("OPENCODE_DATA_DIR", str(data_dir))
+
+    assert restore_opencode_metadata(import_path, "ses_resumed") == (1, 1)
+    assert restore_opencode_metadata(import_path, "ses_resumed") == (1, 1)
+
+    conn = sqlite3.connect(str(db_path))
+    session_row = conn.execute(
+        "SELECT session_id, type, time_created, time_updated, data FROM session_message"
+    ).fetchone()
+    todo_row = conn.execute(
+        "SELECT session_id, content, status, priority, position, time_created, time_updated FROM todo"
+    ).fetchone()
+    conn.close()
+
+    assert session_row[0] == "ses_resumed"
+    assert session_row[1] == "model-switched"
+    assert session_row[2:4] == (111, 112)
+    assert json.loads(session_row[4])["model"]["variant"] == "default"
+    assert todo_row == ("ses_resumed", "Keep todo", "pending", "medium", 0, 211, 212)
+
+
 def test_opencode_resume_command_carries_runtime_mcp_overlay(tmp_path):
     from checkpoint_plugin.resume import _resume_command
     from checkpoint_plugin.types import EnvironmentState
@@ -328,6 +435,7 @@ def test_opencode_resume_command_carries_runtime_mcp_overlay(tmp_path):
                 {
                     "mcp": {"context7": {"enabled": True, "type": "local"}},
                     "model": "opencode/model",
+                    "provider": {"custom": {"options": {"apiKey": "***redacted***"}}},
                 }
             ),
             "opencode_runtime_env": {
@@ -345,6 +453,8 @@ def test_opencode_resume_command_carries_runtime_mcp_overlay(tmp_path):
     assert '"context7":{"enabled":false' in command
     assert '"filesystem":{"enabled":true}' in command
     assert '"model":"opencode/model"' in command
+    assert "apiKey" not in command
+    assert "***redacted***" not in command
     assert "failed_server" not in command
     assert "OPENCODE_DISABLE_PROJECT_CONFIG=1" in command
     assert "OPENCODE_PERMISSION=" in command

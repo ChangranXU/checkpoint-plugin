@@ -40,6 +40,7 @@ _RUNTIME_ENV_KEYS = (
     "OPENCODE_PURE",
     "OPENCODE_WORKSPACE_ID",
     "OPENCODE_EXPERIMENTAL_WORKSPACES",
+    "OPENCODE_DATA_DIR",
 )
 
 
@@ -75,6 +76,8 @@ def main(argv: list[str] | None = None) -> int:
         _on_subagent_end(payload, cwd, session_id)
         _write_ok()
         return 0
+
+    _attach_opencode_sqlite_state(payload, session_id)
 
     # OpenCode subagents are regular sessions with parent_session_id set.
     # Detect via the agent_type field the TS plugin passes.
@@ -247,13 +250,13 @@ def _seed_opencode_env(session_id: str, payload: dict[str, Any]) -> None:
     model = _first_string(payload, "model")
     if model:
         os.environ.setdefault("OPENCODE_MODEL", model)
-    effort = _first_string(payload, "effort", "thinking_effort", "thinkingEffort")
+    effort = _opencode_effort(payload)
     if effort:
         os.environ.setdefault("OPENCODE_EFFORT", effort)
     permission_mode = _first_string(payload, "permission_mode", "permissionMode")
     if permission_mode:
         os.environ.setdefault("OPENCODE_PERMISSION_MODE", permission_mode)
-    mode = _first_string(payload, "collaboration_mode_kind", "collaborationModeKind", "mode")
+    mode = _opencode_mode(payload)
     if mode:
         os.environ.setdefault("OPENCODE_MODE", mode)
     agent_type = _first_string(payload, "agent_type", "agentType")
@@ -284,9 +287,9 @@ def _session_env(payload: dict[str, Any]) -> dict[str, str]:
     """
     fields = {
         "model": _first_string(payload, "model"),
-        "effort": _first_string(payload, "effort", "thinking_effort", "thinkingEffort"),
+        "effort": _opencode_effort(payload),
         "permission_mode": _first_string(payload, "permission_mode", "permissionMode"),
-        "mode": _first_string(payload, "collaboration_mode_kind", "collaborationModeKind", "mode"),
+        "mode": _opencode_mode(payload),
         "agent_type": _first_string(payload, "agent_type", "agentType"),
         "approval_policy": _first_string(payload, "approval_policy", "approvalPolicy"),
         "sandbox_mode": _first_string(payload, "sandbox_mode", "sandboxMode", "sandbox_policy", "sandboxPolicy"),
@@ -311,9 +314,9 @@ def _session_env(payload: dict[str, Any]) -> dict[str, str]:
             fields["resolved_config"] = json.dumps(_redact_secret_object(resolved_config), separators=(",", ":"))
         except (TypeError, ValueError):
             pass
-    config_content = os.environ.get("OPENCODE_CONFIG_CONTENT")
+    config_content = _opencode_config_content(resolved_config if isinstance(resolved_config, dict) else None)
     if config_content:
-        fields["opencode_config_content"] = _redact_secret_text(config_content)
+        fields["opencode_config_content"] = config_content
     permission = os.environ.get("OPENCODE_PERMISSION")
     if permission:
         fields["opencode_permission"] = permission
@@ -324,6 +327,131 @@ def _session_env(payload: dict[str, Any]) -> dict[str, str]:
     if config_skill_roots:
         fields["opencode_config_skill_roots"] = json.dumps(config_skill_roots, separators=(",", ":"))
     return {key: value for key, value in fields.items() if value}
+
+
+def _opencode_effort(payload: dict[str, Any]) -> str | None:
+    value = _first_string(payload, "effort", "thinking_effort", "thinkingEffort")
+    if value:
+        return value
+    for message in reversed(_opencode_raw_messages(payload)):
+        info = message.get("info")
+        if isinstance(info, dict):
+            value = _first_string(info, "effort", "thinking_effort", "thinkingEffort")
+            if value:
+                return value
+    session_info = payload.get("session_info")
+    if isinstance(session_info, dict):
+        return _first_string(session_info, "effort", "thinking_effort", "thinkingEffort")
+    return None
+
+
+def _opencode_mode(payload: dict[str, Any]) -> str | None:
+    value = _first_string(payload, "collaboration_mode_kind", "collaborationModeKind", "mode")
+    if value:
+        return value
+    for message in reversed(_opencode_raw_messages(payload)):
+        info = message.get("info")
+        if isinstance(info, dict):
+            role = info.get("role")
+            mode = info.get("mode")
+            if role == "assistant" and isinstance(mode, str) and mode:
+                return mode
+    session_info = payload.get("session_info")
+    if isinstance(session_info, dict):
+        return _first_string(session_info, "mode")
+    return None
+
+
+def _opencode_raw_messages(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    messages = payload.get("raw_messages") or payload.get("rawMessages")
+    if not isinstance(messages, list):
+        return []
+    return [message for message in messages if isinstance(message, dict)]
+
+
+def _opencode_config_content(resolved_config: dict[str, Any] | None) -> str | None:
+    if resolved_config:
+        try:
+            return json.dumps(_redact_secret_object(resolved_config), separators=(",", ":"))
+        except (TypeError, ValueError):
+            pass
+    config_content = os.environ.get("OPENCODE_CONFIG_CONTENT")
+    if config_content:
+        return _redact_secret_text(config_content)
+    return None
+
+
+def _attach_opencode_sqlite_state(payload: dict[str, Any], session_id: str) -> None:
+    state = _opencode_sqlite_state(session_id)
+    if state.get("session_messages"):
+        payload["session_messages"] = state["session_messages"]
+    if state.get("todos"):
+        payload["todos"] = state["todos"]
+
+
+def _opencode_sqlite_state(session_id: str) -> dict[str, list[dict[str, Any]]]:
+    db_path = _opencode_db_path()
+    if not db_path.exists():
+        return {}
+    try:
+        import sqlite3
+
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            session_messages = [
+                {
+                    "id": row[0],
+                    "sessionID": row[1],
+                    "type": row[2],
+                    "time": {"created": row[3], "updated": row[4]},
+                    "data": _json_or_text(row[5]),
+                }
+                for row in conn.execute(
+                    "SELECT id, session_id, type, time_created, time_updated, data "
+                    "FROM session_message WHERE session_id = ? ORDER BY time_created, id",
+                    (session_id,),
+                )
+            ]
+            todos = [
+                {
+                    "sessionID": row[0],
+                    "content": row[1],
+                    "status": row[2],
+                    "priority": row[3],
+                    "position": row[4],
+                    "time": {"created": row[5], "updated": row[6]},
+                }
+                for row in conn.execute(
+                    "SELECT session_id, content, status, priority, position, time_created, time_updated "
+                    "FROM todo WHERE session_id = ? ORDER BY position",
+                    (session_id,),
+                )
+            ]
+        finally:
+            conn.close()
+    except Exception:
+        return {}
+    result: dict[str, list[dict[str, Any]]] = {}
+    if session_messages:
+        result["session_messages"] = session_messages
+    if todos:
+        result["todos"] = todos
+    return result
+
+
+def _opencode_db_path() -> Path:
+    data_home = Path(
+        os.environ.get("OPENCODE_DATA_DIR")
+        or os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share"))
+    )
+    return data_home.expanduser() / "opencode" / "opencode.db"
+
+
+def _json_or_text(value: str) -> Any:
+    try:
+        return json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return value
 
 
 _SECRET_KEY_PARTS = (

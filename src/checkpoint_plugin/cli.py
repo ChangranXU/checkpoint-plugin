@@ -15,7 +15,7 @@ from .env.collector import environment_from_blob
 from .fs.snapshot import filesystem_from_blob
 from .integrations.hook_installer import install_hooks, uninstall_hooks
 from .paths import config_path, load_config, sessions_dir, write_config
-from .resume import ResumeOptions, ResumeOrchestrator
+from .resume import ResumeOptions, ResumeOrchestrator, restore_opencode_metadata
 from .retention import clean_empty_sessions, clean_keep_last
 from .store import CheckpointStore
 from .types import ResumePlan
@@ -81,6 +81,10 @@ def main(argv: list[str] | None = None) -> int:
     config.add_argument("action", choices=["get", "set"])
     config.add_argument("key")
     config.add_argument("value", nargs="?")
+
+    opencode_restore = sub.add_parser("opencode-restore-metadata", help=argparse.SUPPRESS)
+    opencode_restore.add_argument("file")
+    opencode_restore.add_argument("session")
 
     args = parser.parse_args(argv)
     return int(_dispatch(args))
@@ -177,6 +181,11 @@ def _dispatch(args: argparse.Namespace) -> int:
         return _cmd_hooks(args.action, args.provider)
     if args.command == "config":
         return _cmd_config(args.action, args.key, args.value)
+    if args.command == "opencode-restore-metadata":
+        session_messages, todos = restore_opencode_metadata(Path(args.file), args.session)
+        if session_messages or todos:
+            print(f"Restored OpenCode metadata: {session_messages} session event(s), {todos} todo item(s)")
+        return 0
     raise AssertionError(args.command)
 
 

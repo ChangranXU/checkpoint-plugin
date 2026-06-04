@@ -409,7 +409,6 @@ def test_collect_opencode_resolved_config_and_saved_runtime_env(tmp_path, monkey
     assert env.mcp_servers == {
         "context7": "active",
         "disabled_by_config": "inactive",
-        "inline_only": "inactive",
     }
     assert env.plugin_status == {"npm-plugin": "active", "tuple-plugin": "active"}
     assert f"opencode-config-skills:{external_skills}/custom/SKILL.md" in env.skills
@@ -419,6 +418,9 @@ def test_collect_opencode_resolved_config_and_saved_runtime_env(tmp_path, monkey
     assert env.extra["opencode_runtime_env"] == {"OPENCODE_DISABLE_EXTERNAL_SKILLS": "1"}
     assert env.extra["opencode_config_skill_roots"] == [str(external_skills)]
     assert env.extra["opencode_resolved_config"]["provider"]["x"]["options"]["apiKey"] == "***redacted***"
+    saved_config = json.loads(env.extra["opencode_config_content"])
+    assert saved_config["mcp"]["context7"]["enabled"] is True
+    assert "inline_only" not in saved_config["mcp"]
 
 
 def test_collect_environment_never_stores_secret_files(tmp_path, monkeypatch):

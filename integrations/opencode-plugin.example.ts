@@ -45,6 +45,8 @@ interface CheckpointPayload {
   parent_session_id?: string
   forked_from_session_id?: string
   model?: string
+  effort?: string
+  mode?: string
   messages?: any[]
   raw_messages?: any[]
   session_info?: any
@@ -58,6 +60,25 @@ function parseForkTitle(title: string | undefined): { baseTitle: string; forkNum
   const match = title.match(/^(.+) \(fork #(\d+)\)$/)
   if (!match) return null
   return { baseTitle: match[1], forkNum: parseInt(match[2], 10) }
+}
+
+function firstString(...values: any[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === "string" && value.length > 0) return value
+  }
+  return undefined
+}
+
+function effortFrom(info: any): string | undefined {
+  return firstString(
+    info?.effort,
+    info?.thinking_effort,
+    info?.thinkingEffort,
+  )
+}
+
+function modeFrom(info: any): string | undefined {
+  return firstString(info?.mode, info?.collaboration_mode_kind, info?.collaborationModeKind)
 }
 
 function invokeCheckpointHook(event: string, payload: CheckpointPayload): Promise<void> {
@@ -195,6 +216,8 @@ export const CheckpointPlugin = async (ctx: {
               timestamp: new Date().toISOString(),
               hook_event_name: "SessionStart",
             },
+            effort: effortFrom(info),
+            mode: modeFrom(info),
           }
 
           await invokeCheckpointHook("session_start", payload)
@@ -275,6 +298,8 @@ export const CheckpointPlugin = async (ctx: {
             raw_messages: messages,
             session_info: sessData,
             model: lastMsg.info?.modelID || sessData?.model?.id,
+            effort: effortFrom(lastMsg.info) || effortFrom(sessData),
+            mode: modeFrom(lastMsg.info) || modeFrom(sessData),
             mcp_status: await getMcpStatus(),
             resolved_config: await getResolvedConfig(),
             event_metadata: {
@@ -309,13 +334,18 @@ export const CheckpointPlugin = async (ctx: {
               .join(""),
           }))
 
+          const sessData = await getSessionInfo(sessionID)
+          const lastAssistant = [...messages].reverse().find((m: any) => m?.info?.role === "assistant")
+
           const payload: CheckpointPayload = {
             sessionID,
             directory,
             worktree,
             messages: flatMessages,
             raw_messages: messages,
-            session_info: await getSessionInfo(sessionID),
+            session_info: sessData,
+            effort: effortFrom(lastAssistant?.info) || effortFrom(sessData),
+            mode: modeFrom(lastAssistant?.info) || modeFrom(sessData),
             mcp_status: await getMcpStatus(),
             resolved_config: await getResolvedConfig(),
             event_metadata: {
@@ -379,6 +409,8 @@ export const CheckpointPlugin = async (ctx: {
           forked_from_session_id: forkedFromSessionId,
           session_info: sessData,
           model: input.model?.modelID || sessData?.model?.id,
+          effort: effortFrom(input.model) || effortFrom(sessData),
+          mode: firstString(input.agent) || modeFrom(sessData),
           mcp_status: await getMcpStatus(),
           resolved_config: await getResolvedConfig(),
           event_metadata: {

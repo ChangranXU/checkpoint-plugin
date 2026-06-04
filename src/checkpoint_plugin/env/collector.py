@@ -335,7 +335,7 @@ def _opencode_configs(
     configs.extend(_opencode_config_files(Path(os.environ.get("TEST_HOME", str(Path.home()))).expanduser() / ".opencode"))
     if config_dir:
         configs.extend(_opencode_config_files(config_home))
-    config_content = os.environ.get("OPENCODE_CONFIG_CONTENT") or (session_env or {}).get("opencode_config_content")
+    config_content = _opencode_config_content(session_env or {})
     if config_content:
         configs.append(_load_json_text(config_content))
     permission = os.environ.get("OPENCODE_PERMISSION") or (session_env or {}).get("opencode_permission")
@@ -370,6 +370,16 @@ def _opencode_resolved_config(session_env: dict[str, str]) -> dict[str, object]:
     except json.JSONDecodeError:
         return {}
     return _redact_secret_object(data) if isinstance(data, dict) else {}
+
+
+def _opencode_config_content(session_env: dict[str, str]) -> str | None:
+    resolved = _opencode_resolved_config(session_env)
+    if resolved:
+        try:
+            return json.dumps(resolved, separators=(",", ":"))
+        except (TypeError, ValueError):
+            pass
+    return os.environ.get("OPENCODE_CONFIG_CONTENT") or session_env.get("opencode_config_content")
 
 
 def _opencode_config_skill_roots(provider: ProviderLayout, cwd: Path, session_env: dict[str, str]) -> list[Path]:
@@ -466,7 +476,7 @@ def _opencode_extra(provider: ProviderLayout, session_env: dict[str, str]) -> di
         roots = _opencode_skill_paths_from_config(resolved)
         if roots:
             extra["opencode_config_skill_roots"] = roots
-    config_content = os.environ.get("OPENCODE_CONFIG_CONTENT") or session_env.get("opencode_config_content")
+    config_content = _opencode_config_content(session_env)
     if config_content:
         extra["opencode_config_content"] = _redact_secret_values(config_content.encode("utf-8")).decode("utf-8")
     return extra
@@ -487,6 +497,7 @@ def _opencode_runtime_env(session_env: dict[str, str]) -> dict[str, str]:
         "OPENCODE_PURE",
         "OPENCODE_WORKSPACE_ID",
         "OPENCODE_EXPERIMENTAL_WORKSPACES",
+        "OPENCODE_DATA_DIR",
     )
     result = _opencode_runtime_env_from_session(session_env)
     result.update({key: os.environ[key] for key in keys if os.environ.get(key)})
