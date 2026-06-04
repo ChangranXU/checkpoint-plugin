@@ -511,8 +511,12 @@ def _interactive_resume_options(plan: ResumePlan) -> ResumeOptions:
     if answer.lower() not in {"c", "copy"}:
         return ResumeOptions(proceed=True)
     default_path = _default_copy_path(Path(plan.target_fs.cwd), plan.turn_id)
-    raw_path = input(f"Copy folder [{default_path}]: ").strip()
-    target_cwd = Path(raw_path).expanduser() if raw_path else default_path
+    raw_path = input(f"Copy folder (Enter for default, or type an absolute path) [{default_path}]: ").strip()
+    if not raw_path:
+        return ResumeOptions(proceed=True, target_cwd=default_path)
+    target_cwd = Path(raw_path).expanduser()
+    if not target_cwd.is_absolute():
+        raise RuntimeError(f"Copy folder must be an absolute path: {raw_path}")
     return ResumeOptions(proceed=True, target_cwd=target_cwd)
 
 

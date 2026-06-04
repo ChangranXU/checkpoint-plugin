@@ -59,6 +59,7 @@ class ResumeOrchestrator:
         _refuse_subagent_resume(store, self.home)
         manifest = store.read_manifest(turn_id)
         target_env = environment_from_blob(manifest.env_ref, store)
+        target_env = _target_env_with_provider_runtime(manifest, target_env, store)
         target_fs = filesystem_from_blob(manifest.fs_ref, store)
         cwd = self.cwd or Path(target_fs.cwd).expanduser().resolve()
         self.cwd = cwd
@@ -114,6 +115,8 @@ class ResumeOrchestrator:
             backup_root / "filesystem",
             ignore,
         )
+        if not target_cwd.is_dir():
+            raise RuntimeError(f"Resume workspace was not created: {target_cwd}")
         new_session_id = _new_resume_session_id(provider.name)
         trajectory = _trajectory_prefix(original_store, plan)
         source_meta = _codex_source_session_meta(plan) if provider.name == "codex" else None
@@ -127,6 +130,7 @@ class ResumeOrchestrator:
             new_session_id,
             trajectory.data,
             plan.target_env.model,
+            plan.target_env.effort,
             plan.target_env.permission_mode,
             plan.target_env.mode,
             source_meta,
@@ -726,6 +730,87 @@ def _recover_trailing_tail(ref: TrajectoryReference) -> bytes:
     return recover_trailing_tail(ref)
 
 
+def _target_env_with_provider_runtime(
+    manifest: CheckpointManifest,
+    target_env: object,
+    store: CheckpointStore,
+) -> object:
+    if getattr(target_env, "provider", None) != "codex":
+        return target_env
+    runtime = _codex_runtime_from_manifest(manifest, store)
+    if not runtime:
+        return target_env
+    return replace(target_env, **runtime)
+
+
+def _codex_runtime_from_manifest(
+    manifest: CheckpointManifest,
+    store: CheckpointStore,
+) -> dict[str, str]:
+    ref = manifest.trajectory_ref
+    if ref is None or ref.provider != "codex":
+        return {}
+    try:
+        trajectory = store.read_trajectory_slice(ref)
+    except (OSError, ValueError):
+        return {}
+    return _codex_runtime_from_trajectory(trajectory)
+
+
+def _codex_runtime_from_trajectory(trajectory: bytes) -> dict[str, str]:
+    runtime: dict[str, str] = {}
+    for record in _jsonl_records(trajectory):
+        if record.get("type") != "turn_context":
+            continue
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        effort = _codex_turn_context_effort(payload)
+        mode = _codex_turn_context_mode(payload)
+        if effort:
+            runtime["effort"] = effort
+        if mode:
+            runtime["mode"] = mode
+    return runtime
+
+
+def _codex_turn_context_effort(payload: dict[str, object]) -> str | None:
+    value = _first_payload_string(
+        payload,
+        "model_reasoning_effort",
+        "reasoning_effort",
+        "thinking_effort",
+        "thinkingEffort",
+        "effort",
+    )
+    if value:
+        return value
+    collaboration_mode = payload.get("collaboration_mode")
+    if isinstance(collaboration_mode, dict):
+        settings = collaboration_mode.get("settings")
+        if isinstance(settings, dict):
+            return _first_payload_string(settings, "reasoning_effort", "thinking_effort", "thinkingEffort")
+    return None
+
+
+def _codex_turn_context_mode(payload: dict[str, object]) -> str | None:
+    value = _first_payload_string(payload, "collaboration_mode_kind", "mode")
+    if value:
+        return value
+    collaboration_mode = payload.get("collaboration_mode")
+    if isinstance(collaboration_mode, dict):
+        return _first_payload_string(collaboration_mode, "mode")
+    return None
+
+
+def _first_payload_string(payload: dict[object, object], *keys: str) -> str | None:
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
 def _write_resumed_metadata(
     source_store: CheckpointStore,
     target_store: CheckpointStore,
@@ -762,16 +847,34 @@ def _write_resumed_metadata(
     # a fresh start_ts (the resume moment), and drop the stale source-relative fork
     # anchor — the real lineage already lives in resumed_from_session_id /
     # resumed_from_turn_id (claude sources carry no forked_* fields, so the drops are a
-    # harmless no-op there). session_title/session_env are left inherited: they describe
-    # the resumed content (same conversation prefix, same model) and remain accurate.
+    # harmless no-op there). session_title is left inherited: it describes the resumed
+    # conversation prefix. session_env is rebuilt from the target environment so
+    # resume-of-resume fallbacks pin the checkpointed model/effort/policy rather than
+    # the source session's stale runtime hints.
     metadata["source"] = "resume"
     metadata["start_ts"] = _now()
+    target_session_env = _session_env_from_environment(plan.target_env)
+    if target_session_env:
+        metadata["session_env"] = target_session_env
+    else:
+        metadata.pop("session_env", None)
     for stale_key in ("forked_from_transcript", "forked_at_offset", "forked_at_record_count"):
         metadata.pop(stale_key, None)
     target_store._atomic_write(
         target_store.session_dir / "metadata.json",
         canonical_json(metadata) + "\n",
     )
+
+
+def _session_env_from_environment(env: object) -> dict[str, str]:
+    fields = {
+        "model": getattr(env, "model", None),
+        "permission_mode": getattr(env, "permission_mode", None),
+        "mode": getattr(env, "mode", None),
+        "effort": getattr(env, "effort", None),
+        "agent_type": getattr(env, "agent_type", None),
+    }
+    return {key: value for key, value in fields.items() if isinstance(value, str) and value}
 
 
 def _resumed_manifest(
@@ -821,6 +924,7 @@ def _write_provider_session(
     new_session_id: str,
     trajectory: bytes,
     model: str | None,
+    effort: str | None,
     permission_mode: str | None,
     mode: str | None,
     source_meta: dict[str, object] | None = None,
@@ -832,7 +936,7 @@ def _write_provider_session(
         return None
     if provider_name == "codex":
         return _write_codex_session(
-            provider_home, cwd, new_session_id, trajectory, model, permission_mode, mode,
+            provider_home, cwd, new_session_id, trajectory, model, effort, permission_mode, mode,
             source_meta, inherited_record_count,
         )
     if provider_name == "claude":
@@ -1222,6 +1326,7 @@ def _write_codex_session(
     new_session_id: str,
     trajectory: bytes,
     model: str | None,
+    effort: str | None,
     permission_mode: str | None,
     mode: str | None,
     source_meta: dict[str, object] | None,
@@ -1239,7 +1344,7 @@ def _write_codex_session(
         path,
         _rewrite_codex_trajectory(
             trajectory, new_session_id, cwd, model, permission_mode, mode, source_meta,
-            inherited_record_count, is_resume=True,
+            inherited_record_count, is_resume=True, effort=effort,
         ),
     )
     return path
@@ -1280,6 +1385,7 @@ def _rewrite_codex_trajectory(
     source_meta: dict[str, object] | None,
     inherited_record_count: int = 0,
     is_resume: bool = False,
+    effort: str | None = None,
 ) -> bytes:
     lines: list[bytes] = []
     records = _jsonl_records(trajectory)
@@ -1339,6 +1445,8 @@ def _rewrite_codex_trajectory(
             if record.get("type") == "turn_context":
                 if model:
                     payload["model"] = model
+                if effort:
+                    payload["model_reasoning_effort"] = effort
                 # F1: turn_context.permission_profile is a STRUCTURED object
                 # ({type, file_system, network, ...}) and sits alongside
                 # sandbox_policy/approval_policy. The hook-derived permission_mode
@@ -2035,9 +2143,11 @@ def _resume_command(
     target_env: object | None = None,
 ) -> str | None:
     if provider_name == "claude":
-        return f"claude --resume {new_session_id}"
+        args = ["claude", *_provider_runtime_args("claude", target_env), "--resume", new_session_id]
+        return _shell_join(args)
     if provider_name == "codex":
-        return f"codex resume {new_session_id}"
+        args = ["codex", "resume", *_provider_runtime_args("codex", target_env), new_session_id]
+        return _shell_join(args)
     if provider_name == "opencode":
         if provider_session_path is None:
             return None
@@ -2053,6 +2163,35 @@ def _resume_command(
             f"{prefix}opencode --session {shlex.quote(new_session_id)}"
         )
     return None
+
+
+def _provider_runtime_args(provider_name: str, target_env: object | None) -> list[str]:
+    model = _string_attr(target_env, "model")
+    effort = _string_attr(target_env, "effort")
+    permission_mode = _string_attr(target_env, "permission_mode")
+    args: list[str] = []
+    if provider_name == "claude":
+        if model:
+            args.extend(["--model", model])
+        if effort:
+            args.extend(["--effort", effort])
+        if permission_mode:
+            args.extend(["--permission-mode", permission_mode])
+    elif provider_name == "codex":
+        if model:
+            args.extend(["--model", model])
+        if effort:
+            args.extend(["-c", f"model_reasoning_effort={json.dumps(effort)}"])
+    return args
+
+
+def _string_attr(value: object | None, name: str) -> str | None:
+    raw = getattr(value, name, None)
+    return raw if isinstance(raw, str) and raw else None
+
+
+def _shell_join(args: list[str]) -> str:
+    return " ".join(shlex.quote(arg) for arg in args)
 
 
 def restore_opencode_metadata(import_path: Path, session_id: str) -> tuple[int, int]:

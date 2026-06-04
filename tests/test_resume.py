@@ -5,9 +5,9 @@ from pathlib import Path
 from checkpoint_plugin.cli import main
 from checkpoint_plugin.coordinator import CheckpointCoordinator, TurnRecord
 from checkpoint_plugin.paths import load_config, write_config
-from checkpoint_plugin.resume import ResumeOptions, ResumeOrchestrator
+from checkpoint_plugin.resume import ResumeOptions, ResumeOrchestrator, _resume_command
 from checkpoint_plugin.store import CheckpointStore
-from checkpoint_plugin.types import TrajectoryReference
+from checkpoint_plugin.types import RestoreReport, TrajectoryReference
 
 
 def _isolate_provider_env(monkeypatch):
@@ -196,6 +196,31 @@ def test_resume_plan_tolerates_nonexistent_target_dir(tmp_path, monkeypatch):
     assert report.target_cwd == str(missing_target)
 
 
+def test_resume_fails_loudly_when_workspace_is_not_created(tmp_path, monkeypatch):
+    plugin_home = tmp_path / "plugin"
+    cwd = tmp_path / "work"
+    missing_target = tmp_path / "missing-workspace"
+    cwd.mkdir()
+    (cwd / "file.txt").write_text("v1\n", encoding="utf-8")
+    _isolate_provider_env(monkeypatch)
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
+
+    coordinator = CheckpointCoordinator(session_id="s1", cwd=cwd)
+    coordinator.on_session_start()
+    coordinator.on_turn_end(TurnRecord(user_message="checkpoint"))
+
+    orchestrator = ResumeOrchestrator(cwd=missing_target)
+    plan = orchestrator.plan("s1", 0)
+    monkeypatch.setattr("checkpoint_plugin.resume.restore_cwd", lambda *_args, **_kwargs: RestoreReport())
+
+    try:
+        orchestrator.execute(plan, lambda _text: True)
+    except RuntimeError as exc:
+        assert str(exc) == f"Resume workspace was not created: {missing_target}"
+    else:
+        raise AssertionError("resume should fail when the workspace directory is missing")
+
+
 def test_resume_materializes_codex_native_session(tmp_path, monkeypatch):
     plugin_home = tmp_path / "plugin"
     home = tmp_path / "home"
@@ -244,6 +269,8 @@ def test_resume_materializes_codex_native_session(tmp_path, monkeypatch):
     monkeypatch.setenv("CHECKPOINT_PROVIDER", "codex")
     monkeypatch.setenv("CODEX_MODEL", "gpt-target")
     monkeypatch.setenv("CODEX_PERMISSION_MODE", "acceptEdits")
+    (codex_home / "config.toml").parent.mkdir(parents=True, exist_ok=True)
+    (codex_home / "config.toml").write_text('model_reasoning_effort = "low"\n', encoding="utf-8")
 
     coordinator = CheckpointCoordinator(session_id="s1", cwd=cwd)
     coordinator.on_session_start()
@@ -255,6 +282,10 @@ def test_resume_materializes_codex_native_session(tmp_path, monkeypatch):
     report = ResumeOrchestrator(cwd=cwd).execute(ResumeOrchestrator(cwd=cwd).plan("s1", 0), lambda _text: True)
 
     assert report.provider_session_path is not None
+    assert (
+        report.resume_command
+        == f"codex resume --model gpt-target -c 'model_reasoning_effort=\"low\"' {report.new_session_id}"
+    )
     provider_path = codex_home / "sessions"
     materialized = list(provider_path.glob("**/*.jsonl"))
     assert [path.as_posix() for path in materialized] == [report.provider_session_path]
@@ -279,6 +310,7 @@ def test_resume_materializes_codex_native_session(tmp_path, monkeypatch):
     assert metas[1]["payload"]["id"] == "old"  # inlined source meta keeps its id
     turn_context = next(r for r in records if r.get("type") == "turn_context")
     assert turn_context["payload"]["model"] == "gpt-target"
+    assert turn_context["payload"]["model_reasoning_effort"] == "low"
     assert turn_context["payload"]["permission_profile"] == "acceptEdits"
     # Permission mode must not bleed into the sandbox policy (B2): it stays as
     # whatever the original transcript recorded.
@@ -304,6 +336,11 @@ def test_resume_materializes_codex_native_session(tmp_path, monkeypatch):
     # The source s1 was source="startup"; the resume must report source="resume",
     # carry a fresh start_ts (not s1's), and drop any stale codex fork anchor.
     assert metadata["source"] == "resume"
+    assert metadata["session_env"] == {
+        "model": "gpt-target",
+        "permission_mode": "acceptEdits",
+        "effort": "low",
+    }
     source_meta = json.loads((CheckpointStore(plugin_home / "sessions" / "s1").session_dir / "metadata.json").read_text(encoding="utf-8"))
     assert metadata["start_ts"] != source_meta["start_ts"]
     # start_ts is stamped at the resume moment, so it tracks resumed_ts (same UTC day).
@@ -311,6 +348,79 @@ def test_resume_materializes_codex_native_session(tmp_path, monkeypatch):
     assert "forked_from_transcript" not in metadata
     assert "forked_at_offset" not in metadata
     assert "forked_at_record_count" not in metadata
+
+
+def test_codex_resume_uses_turn_context_effort_over_stale_config(tmp_path, monkeypatch):
+    plugin_home = tmp_path / "plugin"
+    home = tmp_path / "home"
+    codex_home = home / ".codex"
+    cwd = tmp_path / "work"
+    transcript = tmp_path / "codex.jsonl"
+    cwd.mkdir()
+    transcript.write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "session_meta", "payload": {"id": "old", "cwd": str(cwd)}}),
+                json.dumps(
+                    {
+                        "type": "turn_context",
+                        "payload": {
+                            "turn_id": "turn-1",
+                            "model": "gpt-5.5",
+                            "effort": "high",
+                            "collaboration_mode": {
+                                "mode": "default",
+                                "settings": {"reasoning_effort": "high"},
+                            },
+                        },
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (cwd / "file.txt").write_text("v1", encoding="utf-8")
+    _isolate_provider_env(monkeypatch)
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
+    monkeypatch.setenv("TEST_HOME", str(home))
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setenv("CHECKPOINT_PROVIDER", "codex")
+    monkeypatch.setenv("CODEX_MODEL", "gpt-5.5")
+    (codex_home / "config.toml").parent.mkdir(parents=True, exist_ok=True)
+    (codex_home / "config.toml").write_text(
+        'model = "gpt-5.5"\nmodel_reasoning_effort = "xhigh"\n',
+        encoding="utf-8",
+    )
+
+    coordinator = CheckpointCoordinator(session_id="s1", cwd=cwd)
+    coordinator.on_session_start()
+    coordinator.on_turn_end(
+        TurnRecord(user_message="effort changed"),
+        TrajectoryReference("codex", str(transcript), 0, transcript.stat().st_size, 2),
+    )
+
+    orchestrator = ResumeOrchestrator(cwd=cwd)
+    plan = orchestrator.plan("s1", 0)
+
+    assert plan.target_env.effort == "high"
+    assert "Effort: xhigh -> high" in plan.env_diff_text
+
+    report = orchestrator.execute(plan, lambda _text: True)
+
+    assert (
+        report.resume_command
+        == f"codex resume --model gpt-5.5 -c 'model_reasoning_effort=\"high\"' {report.new_session_id}"
+    )
+    records = [
+        json.loads(line)
+        for line in Path(report.provider_session_path).read_text(encoding="utf-8").splitlines()
+    ]
+    turn_context = next(r for r in records if r.get("type") == "turn_context")
+    assert turn_context["payload"]["model_reasoning_effort"] == "high"
+    resumed_store = CheckpointStore(plugin_home / "sessions" / report.new_session_id)
+    metadata = json.loads((resumed_store.session_dir / "metadata.json").read_text(encoding="utf-8"))
+    assert metadata["session_env"]["effort"] == "high"
 
 
 def test_resume_copy_materializes_codex_session_with_copy_cwd(tmp_path, monkeypatch):
@@ -732,12 +842,44 @@ def test_cli_resume_can_restore_into_chosen_copy(tmp_path, monkeypatch):
     coordinator.on_turn_end(TurnRecord(user_message="checkpoint"))
     target_file.write_text("v2\n", encoding="utf-8")
 
+    prompts = []
     answers = iter(["y", "c", str(copy_cwd)])
-    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+
+    def answer(prompt: str) -> str:
+        prompts.append(prompt)
+        return next(answers)
+
+    monkeypatch.setattr("builtins.input", answer)
 
     assert main(["resume", "s1", "0"]) == 0
     assert target_file.read_text(encoding="utf-8") == "v2\n"
     assert (copy_cwd / "file.txt").read_text(encoding="utf-8") == "v1\n"
+    assert any("Copy folder (Enter for default, or type an absolute path)" in prompt for prompt in prompts)
+
+
+def test_cli_resume_rejects_relative_copy_folder(tmp_path, monkeypatch, capsys):
+    plugin_home = tmp_path / "plugin"
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    _isolate_provider_env(monkeypatch)
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
+    monkeypatch.chdir(cwd)
+
+    target_file = cwd / "file.txt"
+    target_file.write_text("v1\n", encoding="utf-8")
+    coordinator = CheckpointCoordinator(session_id="s1", cwd=cwd)
+    coordinator.on_session_start()
+    coordinator.on_turn_end(TurnRecord(user_message="checkpoint"))
+    target_file.write_text("v2\n", encoding="utf-8")
+
+    answers = iter(["y", "c", "relative-copy"])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+
+    assert main(["resume", "s1", "0"]) == 1
+    captured = capsys.readouterr()
+    assert "Copy folder must be an absolute path: relative-copy" in captured.err
+    assert not (cwd / "relative-copy").exists()
+    assert target_file.read_text(encoding="utf-8") == "v2\n"
 
 
 def test_cli_resume_diff_viewer_includes_environment_changes(tmp_path, monkeypatch, capsys):
@@ -1143,6 +1285,35 @@ def test_resume_command_is_set_in_report(tmp_path, monkeypatch):
         ResumeOrchestrator(cwd=cwd).plan("s1", 0), lambda _text: True
     )
     assert report.resume_command == f"claude --resume {report.new_session_id}"
+
+
+def test_resume_command_pins_claude_model_effort_and_permission():
+    from checkpoint_plugin.types import EnvironmentState
+
+    target_env = EnvironmentState(
+        provider="claude",
+        model="Opus 4.8",
+        effort="xhigh",
+        permission_mode="acceptEdits",
+    )
+
+    assert (
+        _resume_command("claude", "019e91aa-5d69-7180-8729-1a9a31c7e182", target_env=target_env)
+        == "claude --model 'Opus 4.8' --effort xhigh --permission-mode acceptEdits "
+        "--resume 019e91aa-5d69-7180-8729-1a9a31c7e182"
+    )
+
+
+def test_resume_command_pins_codex_model_and_effort():
+    from checkpoint_plugin.types import EnvironmentState
+
+    target_env = EnvironmentState(provider="codex", model="gpt-5.5", effort="xhigh")
+
+    assert (
+        _resume_command("codex", "019e91aa-5d69-7180-8729-1a9a31c7e182", target_env=target_env)
+        == "codex resume --model gpt-5.5 -c 'model_reasoning_effort=\"xhigh\"' "
+        "019e91aa-5d69-7180-8729-1a9a31c7e182"
+    )
 
 
 def test_resume_parent_uuid_chain_skips_summary_records(tmp_path, monkeypatch):
