@@ -22,7 +22,7 @@ checkpoint
 - **Automatic checkpoints** 
   - at every turn, for Claude Code, Codex, and OpenCode.
 - **Full-state capture** 
-  - saves conversation trajectory + environment config + filesystem together as one atomic unit, not just file diffs
+  - saves conversation trajectory + environment config + filesystem together, not just file diffs
 - **Resume into your agent** 
   - rebuilds a native provider session so you can continue the conversation from any prior turn
 - **Cross-provider** 
