@@ -460,3 +460,89 @@ def test_opencode_resume_command_carries_runtime_mcp_overlay(tmp_path):
     assert "OPENCODE_PERMISSION=" in command
     assert f"opencode import {import_path}" in command
     assert "opencode --session ses_resumed" in command
+
+
+def test_opencode_resume_command_requires_materialized_import_file():
+    from checkpoint_plugin.resume import _resume_command
+
+    assert _resume_command("opencode", "ses_resumed", None) is None
+
+
+def test_opencode_resume_of_resume_uses_checkpoint_jsonl(tmp_path, monkeypatch):
+    from checkpoint_plugin.coordinator import CheckpointCoordinator, TurnRecord
+    from checkpoint_plugin.resume import ResumeOrchestrator
+    from checkpoint_plugin.store import CheckpointStore
+
+    plugin_home = tmp_path / "plugin"
+    home = tmp_path / "home"
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    (cwd / "file.txt").write_text("v1", encoding="utf-8")
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
+    monkeypatch.setenv("TEST_HOME", str(home))
+    monkeypatch.setenv("CHECKPOINT_PROVIDER", "opencode")
+
+    def msg(message_id, role, text, parent_id=None):
+        info = {"id": message_id, "sessionID": "ses_orig", "role": role, "time": {"created": 1000}}
+        if parent_id is not None:
+            info["parentID"] = parent_id
+        if role == "assistant":
+            info["finish"] = "stop"
+            info["time"]["completed"] = 1100
+        return {
+            "info": info,
+            "parts": [
+                {
+                    "id": f"prt_{message_id}",
+                    "type": "text",
+                    "text": text,
+                    "messageID": message_id,
+                    "sessionID": "ses_orig",
+                }
+            ],
+        }
+
+    messages = [
+        msg("msg_user_1", "user", "first"),
+        msg("msg_assistant_1", "assistant", "one", "msg_user_1"),
+        msg("msg_user_2", "user", "second", "msg_assistant_1"),
+        msg("msg_assistant_2", "assistant", "two", "msg_user_2"),
+    ]
+    session_info = {"id": "ses_orig", "slug": "test", "projectID": "global", "title": "Test"}
+
+    coordinator = CheckpointCoordinator(session_id="s1", cwd=cwd)
+    coordinator.on_session_start()
+    coordinator.on_turn_end(
+        TurnRecord(
+            user_message="first",
+            assistant_text="one",
+            metadata={"hook_payload": {"raw_messages": messages[:2], "session_info": session_info}},
+        )
+    )
+    coordinator.on_turn_end(
+        TurnRecord(
+            user_message="second",
+            assistant_text="two",
+            metadata={"hook_payload": {"raw_messages": messages, "session_info": session_info}},
+        )
+    )
+
+    orchestrator = ResumeOrchestrator(cwd=cwd)
+    gen1 = orchestrator.execute(orchestrator.plan("s1", 1), lambda _text: True)
+    assert gen1.provider_session_path is not None
+
+    gen1_store = CheckpointStore(plugin_home / "sessions" / gen1.new_session_id)
+    assert gen1_store.trajectory_path.exists()
+    assert Path(gen1.provider_session_path) != gen1_store.trajectory_path
+    for turn_id in (0, 1):
+        manifest = gen1_store.read_manifest(turn_id)
+        assert manifest.trajectory_ref is not None
+        assert manifest.trajectory_ref.transcript_path == str(gen1_store.trajectory_path)
+
+    gen2_orchestrator = ResumeOrchestrator(cwd=cwd)
+    gen2 = gen2_orchestrator.execute(gen2_orchestrator.plan(gen1.new_session_id, 1), lambda _text: True)
+
+    assert gen2.provider_session_path is not None
+    import_data = json.loads(Path(gen2.provider_session_path).read_text(encoding="utf-8"))
+    assert import_data["info"]["id"] == gen2.new_session_id
+    assert len(import_data["messages"]) == 4

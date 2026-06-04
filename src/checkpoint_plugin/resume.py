@@ -172,10 +172,17 @@ class ResumeOrchestrator:
         # records). Re-tile by per-turn provider key, not pre-rewrite counts.
         included = [m for m in store.list_manifests() if m.turn_id <= plan.turn_id]
         provider_name = _manifests_provider_name(included)
+        manifest_session_path = provider_session_path
+        realign_session_path = provider_session_path
+        if provider_name == "opencode" and trajectory.data:
+            # OpenCode needs a JSON import file for the external resume command, but
+            # checkpoint manifests must keep referencing the plugin's JSONL timeline.
+            manifest_session_path = target_store.trajectory_path
+            realign_session_path = None
         realigned = replace(
             trajectory,
             spans=_realign_spans_to_provider_file(
-                provider_session_path,
+                realign_session_path,
                 trajectory.spans,
                 provider_name=provider_name,
                 turn_keys=trajectory.turn_keys,
@@ -184,7 +191,7 @@ class ResumeOrchestrator:
         for manifest in store.list_manifests():
             if manifest.turn_id <= plan.turn_id:
                 target_store.write_manifest(
-                    _resumed_manifest(manifest, new_session_id, provider_session_path, realigned, target_store, cwd)
+                    _resumed_manifest(manifest, new_session_id, manifest_session_path, realigned, target_store, cwd)
                 )
         if trajectory.data:
             target_store._atomic_write(target_store.trajectory_path, trajectory.data)
@@ -742,6 +749,8 @@ def _write_resumed_metadata(
     metadata["resumed_ts"] = _now()
     if provider_session_path is not None:
         metadata["provider_session_path"] = str(provider_session_path)
+    else:
+        metadata.pop("provider_session_path", None)
     metadata["cwd"] = str(cwd)
     # FK1: the source metadata is inherited wholesale, so a resume kept the SOURCE's
     # `source` (startup/fork), its stale `start_ts`, and — for a codex source — its
@@ -860,7 +869,7 @@ def _write_opencode_session(
     todos: list[dict] = []
     for record in reversed(records):
         meta = record.get("metadata", {})
-        hook_payload = meta.get("hook_payload", {})
+        hook_payload = meta.get("hook_payload", {}) if isinstance(meta, dict) else {}
         if not session_messages:
             session_messages = _opencode_hook_list(hook_payload, "session_messages", "sessionMessages")
         if not todos:
@@ -2030,11 +2039,9 @@ def _resume_command(
     if provider_name == "codex":
         return f"codex resume {new_session_id}"
     if provider_name == "opencode":
-        import_path = (
-            str(provider_session_path)
-            if provider_session_path is not None
-            else f"~/.config/opencode/imports/{new_session_id}.json"
-        )
+        if provider_session_path is None:
+            return None
+        import_path = str(provider_session_path)
         prefix = _opencode_env_prefix(target_env)
         restore_cmd = (
             f"{shlex.quote(sys.executable)} -m checkpoint_plugin.cli "
