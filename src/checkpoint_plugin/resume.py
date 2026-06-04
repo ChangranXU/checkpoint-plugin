@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shlex
 import shutil
 import sys
 import uuid
@@ -147,7 +149,7 @@ class ResumeOrchestrator:
             fs=fs_report,
             provider_session_path=str(provider_session_path) if provider_session_path is not None else None,
             target_cwd=str(target_cwd),
-            resume_command=_resume_command(provider.name, new_session_id, provider_session_path),
+            resume_command=_resume_command(provider.name, new_session_id, provider_session_path, plan.target_env),
         )
 
     def _copy_session_prefix(
@@ -870,21 +872,7 @@ def _write_opencode_session(
     # Build the export JSON structure that `opencode import` accepts
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
     info = session_info or {}
-    export_info = {
-        "id": new_session_id,
-        "slug": info.get("slug", _opencode_slug(new_session_id)),
-        "projectID": info.get("projectID", "global"),
-        "directory": str(cwd),
-        "title": info.get("title", "Resumed session"),
-        "version": info.get("version", "2"),
-        "cost": info.get("cost", 0),
-        "tokens": info.get("tokens", {"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}}),
-        "time": {"created": info.get("time", {}).get("created", now_ms), "updated": now_ms},
-    }
-    if info.get("model"):
-        export_info["model"] = info["model"]
-    if info.get("agent"):
-        export_info["agent"] = info["agent"]
+    export_info = _opencode_export_info(info, new_session_id, cwd, now_ms)
     # Structure: {info, messages: [{info, parts}, ...]}
     # Remap all message/part IDs to avoid collisions with the source session
     # (opencode import uses onConflictDoNothing, so duplicate IDs are silently skipped).
@@ -906,6 +894,7 @@ def _write_opencode_session(
         # Remap parentID to the new message ID
         if "parentID" in rewritten_info and rewritten_info["parentID"] in msg_id_map:
             rewritten_info["parentID"] = msg_id_map[rewritten_info["parentID"]]
+        _rewrite_opencode_message_cwd(rewritten_info, cwd)
         rewritten_parts = []
         for part_idx, part in enumerate(msg_parts):
             if isinstance(part, dict):
@@ -926,6 +915,57 @@ def _write_opencode_session(
     import_path = import_dir / f"{new_session_id}.json"
     import_path.write_text(json.dumps(export_data, indent=2), encoding="utf-8")
     return import_path
+
+
+def _opencode_export_info(info: dict, new_session_id: str, cwd: Path, now_ms: int) -> dict:
+    """Build an OpenCode Session.Info object for `opencode import`.
+
+    Start from captured session_info so runtime session fields (permission,
+    metadata, workspaceID, share/revert, etc.) survive. Then stamp only the
+    identity/location/time fields that must belong to the resumed session.
+    """
+    base = dict(info) if isinstance(info, dict) else {}
+    source_time = base.get("time") if isinstance(base.get("time"), dict) else {}
+    base.update(
+        {
+            "id": new_session_id,
+            "slug": base.get("slug", _opencode_slug(new_session_id)),
+            "projectID": base.get("projectID", "global"),
+            "directory": str(cwd),
+            "path": _opencode_session_path(base, cwd),
+            "title": base.get("title", "Resumed session"),
+            "version": base.get("version", "2"),
+            "cost": base.get("cost", 0),
+            "tokens": base.get(
+                "tokens",
+                {"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}},
+            ),
+            "time": {"created": source_time.get("created", now_ms), "updated": now_ms},
+        }
+    )
+    base.pop("parentID", None)
+    return {key: value for key, value in base.items() if value is not None}
+
+
+def _opencode_session_path(info: dict, cwd: Path) -> str | None:
+    source_directory = info.get("directory")
+    source_path = info.get("path")
+    if isinstance(source_directory, str) and isinstance(source_path, str):
+        try:
+            rel = Path(source_path)
+            if not rel.is_absolute():
+                source_root = Path(source_directory).expanduser().resolve() / rel
+                resume_root = cwd.expanduser().resolve()
+                return str(resume_root.relative_to(source_root))
+        except (OSError, ValueError):
+            pass
+    return source_path if isinstance(source_path, str) else None
+
+
+def _rewrite_opencode_message_cwd(info: dict, cwd: Path) -> None:
+    path_info = info.get("path")
+    if isinstance(path_info, dict):
+        path_info["cwd"] = str(cwd)
 
 
 def _reconstruct_opencode_messages(
@@ -1901,6 +1941,7 @@ def _resume_command(
     provider_name: str,
     new_session_id: str,
     provider_session_path: Path | None = None,
+    target_env: object | None = None,
 ) -> str | None:
     if provider_name == "claude":
         return f"claude --resume {new_session_id}"
@@ -1912,8 +1953,96 @@ def _resume_command(
             if provider_session_path is not None
             else f"~/.config/opencode/imports/{new_session_id}.json"
         )
-        return f"opencode import {import_path} && opencode --session {new_session_id}"
+        prefix = _opencode_env_prefix(target_env)
+        return (
+            f"{prefix}opencode import {shlex.quote(import_path)} && "
+            f"{prefix}opencode --session {shlex.quote(new_session_id)}"
+        )
     return None
+
+
+def _opencode_env_prefix(target_env: object | None) -> str:
+    env = _opencode_runtime_env(target_env)
+    config_content = _opencode_config_content(target_env)
+    if config_content:
+        env["OPENCODE_CONFIG_CONTENT"] = config_content
+    return "".join(f"{key}={shlex.quote(value)} " for key, value in sorted(env.items()))
+
+
+def _opencode_runtime_env(target_env: object | None) -> dict[str, str]:
+    extra = getattr(target_env, "extra", None)
+    if not isinstance(extra, dict):
+        return {}
+    raw = extra.get("opencode_runtime_env")
+    if not isinstance(raw, dict):
+        return {}
+    result: dict[str, str] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str) or not _safe_env_name(key):
+            continue
+        if key == "OPENCODE_CONFIG_CONTENT":
+            continue
+        if isinstance(value, (str, int, float, bool)):
+            result[key] = str(value)
+    return result
+
+
+def _opencode_config_content(target_env: object | None) -> str:
+    base = _opencode_config_content_base(target_env)
+    mcp = _opencode_mcp_overlay(target_env)
+    if not base and not mcp:
+        return ""
+    content = _json_object(base)
+    if mcp:
+        content = _deep_merge_dicts(content, {"mcp": mcp})
+    return json.dumps(content, separators=(",", ":"))
+
+
+def _opencode_config_content_base(target_env: object | None) -> object:
+    extra = getattr(target_env, "extra", None)
+    if not isinstance(extra, dict):
+        return {}
+    raw = extra.get("opencode_config_content")
+    if not isinstance(raw, str) or not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+
+
+def _opencode_mcp_overlay(target_env: object | None) -> dict[str, dict[str, bool]]:
+    mcp_servers = getattr(target_env, "mcp_servers", None)
+    if not isinstance(mcp_servers, dict):
+        return {}
+    mcp: dict[str, dict[str, bool]] = {}
+    for name, status in mcp_servers.items():
+        if not isinstance(name, str) or not isinstance(status, str):
+            continue
+        if status == "active":
+            mcp[name] = {"enabled": True}
+        elif status == "inactive":
+            mcp[name] = {"enabled": False}
+    return mcp
+
+
+def _json_object(value: object) -> dict[str, object]:
+    return value if isinstance(value, dict) else {}
+
+
+def _deep_merge_dicts(base: dict[str, object], overlay: dict[str, object]) -> dict[str, object]:
+    result = dict(base)
+    for key, value in overlay.items():
+        existing = result.get(key)
+        if isinstance(existing, dict) and isinstance(value, dict):
+            result[key] = _deep_merge_dicts(existing, value)
+        else:
+            result[key] = value
+    return result
+
+
+def _safe_env_name(name: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name))
 
 
 def _carry_provider_session_state(

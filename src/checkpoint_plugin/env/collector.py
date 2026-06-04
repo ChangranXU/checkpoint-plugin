@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fnmatch
+import glob as globlib
 import json
 import os
 import re
@@ -33,7 +34,7 @@ SECRET_BASENAME_PATTERNS = (
 # faithful restore, but they can embed secret material inline (e.g. Codex
 # `experimental_bearer_token`). We redact the VALUE of any secret-shaped key
 # before storing, gated to structured config so source/markdown is never altered.
-_REDACTABLE_SUFFIXES = (".toml", ".json")
+_REDACTABLE_SUFFIXES = (".toml", ".json", ".jsonc")
 _SECRET_VALUE_KEY_PATTERNS = (
     "*token*",
     "*secret*",
@@ -94,17 +95,19 @@ def collect_environment(
     store: CheckpointStore,
 ) -> EnvironmentState:
     cwd = cwd.expanduser().resolve()
-    skill_roots = _skill_roots(provider, cwd)
-    skills = _collect_named_trees(skill_roots, store, follow_symlink_dirs=True)
     # Some provider fields (notably Claude's model) are only delivered to the
     # SessionStart hook, which runs in a separate process from Stop. on_session_start
     # persists them to metadata.json; we fall back to that when the live env var is
     # absent so the captured state still pins the model/agent/effort.
     session_env = _session_env_fallback(store)
+    skill_roots = _skill_roots(provider, cwd, session_env)
+    skills = _collect_named_trees(skill_roots, store, follow_symlink_dirs=True)
+    opencode_configs = _opencode_configs(provider, cwd, session_env) if provider.name == "opencode" else []
     return EnvironmentState(
         provider=provider.name,
         model=_first_env("ANTHROPIC_MODEL", "CLAUDE_MODEL", "OPENAI_MODEL", "CODEX_MODEL", "OPENCODE_MODEL")
-        or session_env.get("model"),
+        or session_env.get("model")
+        or _opencode_model(opencode_configs),
         permission_mode=_first_env("CLAUDE_PERMISSION_MODE", "CODEX_PERMISSION_MODE", "CODEX_SANDBOX_MODE", "OPENCODE_PERMISSION_MODE")
         or session_env.get("permission_mode"),
         mode=_first_env("CLAUDE_MODE", "CODEX_MODE", "OPENCODE_MODE") or session_env.get("mode"),
@@ -113,17 +116,18 @@ def collect_environment(
         memory_files=_collect_tree(provider.memory_dir, store),
         mcp_config=_store_file(provider.mcp_config, store),
         mcp_configs=_collect_named_files(_mcp_config_files(provider, cwd), store),
-        mcp_servers=_collect_mcp_servers(provider, cwd),
+        mcp_servers=_collect_mcp_servers(provider, cwd, session_env),
         skills=skills,
         skill_status=_collect_skill_status(provider, cwd, skills),
-        plugin_status=_collect_plugin_status(provider, cwd),
-        settings=_collect_settings(provider.settings_files, store),
+        plugin_status=_collect_plugin_status(provider, cwd, session_env),
+        settings=_collect_settings(provider.settings_files, store, force_absolute=_force_absolute_settings(provider)),
         project_context=_collect_project_context(cwd, provider.project_files, store),
         extra={
             "provider_home": str(provider.home),
             "cwd": str(cwd),
             "skill_symlinks": _collect_named_symlinks(skill_roots),
             **_codex_history_extra(provider, store),
+            **_opencode_extra(provider, session_env),
         },
     )
 
@@ -149,7 +153,7 @@ def _session_env_fallback(store: CheckpointStore) -> dict[str, str]:
     return {str(key): str(value) for key, value in session_env.items() if value}
 
 
-def _collect_mcp_servers(provider: ProviderLayout, cwd: Path) -> dict[str, str]:
+def _collect_mcp_servers(provider: ProviderLayout, cwd: Path, session_env: dict[str, str] | None = None) -> dict[str, str]:
     if provider.name == "codex":
         servers: dict[str, str] = {}
         for config in _codex_configs(provider, cwd):
@@ -174,6 +178,14 @@ def _collect_mcp_servers(provider: ProviderLayout, cwd: Path) -> dict[str, str]:
             for name in project.get("disabledMcpjsonServers") or []:
                 servers[str(name)] = "inactive"
         return servers
+    if provider.name == "opencode":
+        servers: dict[str, str] = {}
+        for config in _opencode_configs(provider, cwd, session_env):
+            value = config.get("mcp")
+            if isinstance(value, dict):
+                servers.update({str(name): _status_from_config(server_config) for name, server_config in value.items()})
+        servers.update(_opencode_runtime_mcp_servers(session_env or {}))
+        return dict(sorted(servers.items()))
     return {}
 
 
@@ -206,9 +218,11 @@ def _skill_names_from_files(skills: dict[str, str]) -> set[str]:
     return names
 
 
-def _skill_roots(provider: ProviderLayout, cwd: Path) -> dict[str, Path]:
+def _skill_roots(provider: ProviderLayout, cwd: Path, session_env: dict[str, str] | None = None) -> dict[str, Path]:
     roots = dict(provider.skills_dirs)
     roots.update(_plugin_skill_roots(provider))
+    if provider.name == "opencode":
+        roots = _filter_opencode_skill_roots(roots, session_env)
     if provider.name == "claude":
         for project_root in _ancestor_chain(_nearest_project_root(cwd), cwd):
             roots[f"project:{project_root}:.claude/skills"] = project_root / ".claude" / "skills"
@@ -216,7 +230,38 @@ def _skill_roots(provider: ProviderLayout, cwd: Path) -> dict[str, Path]:
         for project_root in _ancestor_chain(_nearest_project_root(cwd), cwd):
             roots[f"project:{project_root}:.codex/skills"] = project_root / ".codex" / "skills"
             roots[f"project:{project_root}:.agents/skills"] = project_root / ".agents" / "skills"
+    if provider.name == "opencode":
+        for project_root in _ancestor_chain(_nearest_project_root(cwd), cwd):
+            roots[f"project:{project_root}:.opencode/skills"] = project_root / ".opencode" / "skills"
+            roots[f"project:{project_root}:.opencode/skill"] = project_root / ".opencode" / "skill"
+            if not _opencode_flag_enabled("OPENCODE_DISABLE_EXTERNAL_SKILLS", session_env):
+                roots[f"project:{project_root}:.agents/skills"] = project_root / ".agents" / "skills"
+                if not _opencode_flag_enabled("OPENCODE_DISABLE_CLAUDE_CODE", session_env) and not _opencode_flag_enabled(
+                    "OPENCODE_DISABLE_CLAUDE_CODE_SKILLS",
+                    session_env,
+                ):
+                    roots[f"project:{project_root}:.claude/skills"] = project_root / ".claude" / "skills"
+        for root in _opencode_config_skill_roots(provider, cwd, session_env or {}):
+            roots[f"opencode-config-skills:{root}"] = root
     return roots
+
+
+def _filter_opencode_skill_roots(
+    roots: dict[str, Path],
+    session_env: dict[str, str] | None,
+) -> dict[str, Path]:
+    if not _opencode_flag_enabled("OPENCODE_DISABLE_EXTERNAL_SKILLS", session_env):
+        if not _opencode_flag_enabled("OPENCODE_DISABLE_CLAUDE_CODE", session_env) and not _opencode_flag_enabled(
+            "OPENCODE_DISABLE_CLAUDE_CODE_SKILLS",
+            session_env,
+        ):
+            return roots
+        return {name: root for name, root in roots.items() if not name.startswith("claude-")}
+    return {
+        name: root
+        for name, root in roots.items()
+        if not name.startswith("agent-") and not name.startswith("claude-")
+    }
 
 
 def _plugin_skill_roots(provider: ProviderLayout) -> dict[str, Path]:
@@ -241,12 +286,17 @@ def _plugin_skill_roots(provider: ProviderLayout) -> dict[str, Path]:
 
 
 def _mcp_config_files(provider: ProviderLayout, cwd: Path) -> dict[str, Path]:
-    files = {path.name: path for path in provider.mcp_config_files}
+    files = _named_paths(provider.mcp_config_files)
     for project_root in _ancestor_chain(_nearest_project_root(cwd), cwd):
         path = project_root / ".mcp.json"
         files[f"project:{project_root}:.mcp.json"] = path
         if provider.name == "codex":
             files[f"project:{project_root}:.codex/config.toml"] = project_root / ".codex" / "config.toml"
+        if provider.name == "opencode":
+            files[f"project:{project_root}:opencode.json"] = project_root / "opencode.json"
+            files[f"project:{project_root}:opencode.jsonc"] = project_root / "opencode.jsonc"
+            files[f"project:{project_root}:.opencode/opencode.json"] = project_root / ".opencode" / "opencode.json"
+            files[f"project:{project_root}:.opencode/opencode.jsonc"] = project_root / ".opencode" / "opencode.jsonc"
     return files
 
 
@@ -255,6 +305,228 @@ def _codex_configs(provider: ProviderLayout, cwd: Path) -> list[dict[str, object
     for project_root in _ancestor_chain(_nearest_project_root(cwd), cwd):
         configs.append(_load_toml(project_root / ".codex" / "config.toml"))
     return [config for config in configs if config]
+
+
+def _opencode_configs(
+    provider: ProviderLayout,
+    cwd: Path,
+    session_env: dict[str, str] | None = None,
+) -> list[dict[str, object]]:
+    if provider.name != "opencode":
+        return []
+    runtime_env = _opencode_runtime_env_from_session(session_env or {})
+    config_dir = os.environ.get("OPENCODE_CONFIG_DIR") or runtime_env.get("OPENCODE_CONFIG_DIR")
+    config_home = Path(config_dir).expanduser() if config_dir else provider.home
+    global_config_home = _opencode_default_config_home() if config_dir else provider.home
+    configs = [
+        _load_json(global_config_home / "config.json"),
+        _load_json(global_config_home / "opencode.json"),
+        _load_json(global_config_home / "opencode.jsonc"),
+    ]
+    custom_config = os.environ.get("OPENCODE_CONFIG") or runtime_env.get("OPENCODE_CONFIG")
+    if custom_config:
+        configs.append(_load_json(Path(custom_config).expanduser()))
+    if not _opencode_flag_enabled("OPENCODE_DISABLE_PROJECT_CONFIG", session_env):
+        chain = _ancestor_chain(_nearest_project_root(cwd), cwd)
+        for project_root in chain:
+            configs.extend(_opencode_config_files(project_root))
+        for project_root in reversed(chain):
+            configs.extend(_opencode_config_files(project_root / ".opencode"))
+    configs.extend(_opencode_config_files(Path(os.environ.get("TEST_HOME", str(Path.home()))).expanduser() / ".opencode"))
+    if config_dir:
+        configs.extend(_opencode_config_files(config_home))
+    config_content = os.environ.get("OPENCODE_CONFIG_CONTENT") or (session_env or {}).get("opencode_config_content")
+    if config_content:
+        configs.append(_load_json_text(config_content))
+    permission = os.environ.get("OPENCODE_PERMISSION") or (session_env or {}).get("opencode_permission")
+    if permission:
+        try:
+            parsed_permission = json.loads(permission)
+        except json.JSONDecodeError:
+            parsed_permission = None
+        if isinstance(parsed_permission, dict):
+            configs.append({"permission": parsed_permission})
+    resolved = _opencode_resolved_config(session_env or {})
+    if resolved:
+        configs.append(resolved)
+    return [config for config in configs if config]
+
+
+def _opencode_default_config_home() -> Path:
+    home = Path(os.environ.get("TEST_HOME", str(Path.home()))).expanduser()
+    return Path(os.environ.get("XDG_CONFIG_HOME", str(home / ".config"))).expanduser() / "opencode"
+
+
+def _opencode_config_files(directory: Path) -> list[dict[str, object]]:
+    return [_load_json(directory / "opencode.json"), _load_json(directory / "opencode.jsonc")]
+
+
+def _opencode_resolved_config(session_env: dict[str, str]) -> dict[str, object]:
+    raw = os.environ.get("OPENCODE_RESOLVED_CONFIG") or session_env.get("resolved_config")
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return _redact_secret_object(data) if isinstance(data, dict) else {}
+
+
+def _opencode_config_skill_roots(provider: ProviderLayout, cwd: Path, session_env: dict[str, str]) -> list[Path]:
+    roots: list[Path] = []
+    for config in _opencode_configs(provider, cwd, session_env):
+        skills = config.get("skills")
+        if not isinstance(skills, dict):
+            continue
+        paths = skills.get("paths")
+        if not isinstance(paths, list):
+            continue
+        for item in paths:
+            if not isinstance(item, str) or not item:
+                continue
+            expanded = _expand_opencode_path(item)
+            roots.append(expanded if expanded.is_absolute() else cwd / expanded)
+    return sorted(set(roots))
+
+
+def _expand_opencode_path(value: str) -> Path:
+    home = Path(os.environ.get("TEST_HOME", str(Path.home()))).expanduser()
+    if value.startswith("~/"):
+        return home / value[2:]
+    return Path(value).expanduser()
+
+
+def _truthy_env(name: str) -> bool:
+    return _truthy_value(os.environ.get(name))
+
+
+def _truthy_value(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    value = str(value or "").lower()
+    return value in {"1", "true"}
+
+
+def _opencode_flag_enabled(name: str, session_env: dict[str, str] | None) -> bool:
+    if _truthy_env(name):
+        return True
+    runtime_env = _opencode_runtime_env_from_session(session_env or {})
+    return _truthy_value(runtime_env.get(name))
+
+
+def _opencode_runtime_mcp_servers(session_env: dict[str, str]) -> dict[str, str]:
+    raw = os.environ.get("OPENCODE_MCP_STATUS") or session_env.get("mcp_status")
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    statuses: dict[str, str] = {}
+    for name, value in data.items():
+        status = value.get("status") if isinstance(value, dict) else value
+        if status == "connected":
+            statuses[str(name)] = "active"
+        elif status == "disabled":
+            statuses[str(name)] = "inactive"
+        elif isinstance(status, str) and status:
+            statuses[str(name)] = status
+    return statuses
+
+
+def _opencode_model(configs: list[dict[str, object]]) -> str | None:
+    for config in reversed(configs):
+        value = config.get("model")
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _opencode_extra(provider: ProviderLayout, session_env: dict[str, str]) -> dict[str, object]:
+    if provider.name != "opencode":
+        return {}
+    extra: dict[str, object] = {}
+    resolved = _opencode_resolved_config(session_env)
+    if resolved:
+        extra["opencode_resolved_config"] = resolved
+    runtime_env = _opencode_runtime_env(session_env)
+    if runtime_env:
+        extra["opencode_runtime_env"] = runtime_env
+    config_skill_roots = session_env.get("opencode_config_skill_roots")
+    if config_skill_roots:
+        try:
+            roots = json.loads(config_skill_roots)
+        except json.JSONDecodeError:
+            roots = None
+        if isinstance(roots, list):
+            extra["opencode_config_skill_roots"] = [str(root) for root in roots if isinstance(root, str)]
+    elif resolved:
+        roots = _opencode_skill_paths_from_config(resolved)
+        if roots:
+            extra["opencode_config_skill_roots"] = roots
+    config_content = os.environ.get("OPENCODE_CONFIG_CONTENT") or session_env.get("opencode_config_content")
+    if config_content:
+        extra["opencode_config_content"] = _redact_secret_values(config_content.encode("utf-8")).decode("utf-8")
+    return extra
+
+
+def _opencode_runtime_env(session_env: dict[str, str]) -> dict[str, str]:
+    keys = (
+        "OPENCODE_CONFIG",
+        "OPENCODE_CONFIG_DIR",
+        "OPENCODE_TUI_CONFIG",
+        "OPENCODE_DISABLE_PROJECT_CONFIG",
+        "OPENCODE_DISABLE_EXTERNAL_SKILLS",
+        "OPENCODE_DISABLE_CLAUDE_CODE",
+        "OPENCODE_DISABLE_CLAUDE_CODE_SKILLS",
+        "OPENCODE_DISABLE_AUTOCOMPACT",
+        "OPENCODE_DISABLE_PRUNE",
+        "OPENCODE_DISABLE_DEFAULT_PLUGINS",
+        "OPENCODE_PURE",
+        "OPENCODE_WORKSPACE_ID",
+        "OPENCODE_EXPERIMENTAL_WORKSPACES",
+    )
+    result = _opencode_runtime_env_from_session(session_env)
+    result.update({key: os.environ[key] for key in keys if os.environ.get(key)})
+    permission = os.environ.get("OPENCODE_PERMISSION") or session_env.get("opencode_permission")
+    if permission:
+        result["OPENCODE_PERMISSION"] = permission
+    return result
+
+
+def _opencode_runtime_env_from_session(session_env: dict[str, str]) -> dict[str, str]:
+    raw = session_env.get("opencode_runtime_env")
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(key): str(value) for key, value in data.items() if isinstance(value, (str, int, float, bool))}
+
+
+def _opencode_skill_paths_from_config(config: dict[str, object]) -> list[str]:
+    skills = config.get("skills")
+    if not isinstance(skills, dict):
+        return []
+    paths = skills.get("paths")
+    if not isinstance(paths, list):
+        return []
+    return [item for item in paths if isinstance(item, str) and item]
+
+
+def _redact_secret_object(value: object, key: str | None = None) -> object:
+    if key and _is_secret_key(key):
+        return "***redacted***"
+    if isinstance(value, dict):
+        return {str(k): _redact_secret_object(v, str(k)) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_secret_object(item) for item in value]
+    return value
 
 
 def _codex_history_extra(provider: ProviderLayout, store: CheckpointStore) -> dict[str, str]:
@@ -323,7 +595,11 @@ def _enabled_claude_plugins(config: dict[str, object]) -> set[str]:
     return enabled
 
 
-def _collect_plugin_status(provider: ProviderLayout, cwd: Path) -> dict[str, str]:
+def _collect_plugin_status(
+    provider: ProviderLayout,
+    cwd: Path,
+    session_env: dict[str, str] | None = None,
+) -> dict[str, str]:
     if provider.name == "codex":
         status: dict[str, str] = {}
         for config in _codex_configs(provider, cwd):
@@ -337,7 +613,27 @@ def _collect_plugin_status(provider: ProviderLayout, cwd: Path) -> dict[str, str
         for name in _enabled_claude_plugins(config):
             status[name] = "active"
         return dict(sorted(status.items()))
+    if provider.name == "opencode":
+        status: dict[str, str] = {}
+        for config in _opencode_configs(provider, cwd, session_env):
+            plugins = config.get("plugin")
+            if isinstance(plugins, list):
+                for plugin in plugins:
+                    name = _opencode_plugin_name(plugin)
+                    if name:
+                        status[name] = "active"
+        return dict(sorted(status.items()))
     return {}
+
+
+def _opencode_plugin_name(plugin: object) -> str:
+    if isinstance(plugin, str):
+        return plugin
+    if isinstance(plugin, list) and plugin and isinstance(plugin[0], str):
+        return plugin[0]
+    if isinstance(plugin, tuple) and plugin and isinstance(plugin[0], str):
+        return plugin[0]
+    return ""
 
 
 def _status_from_config(config: object) -> str:
@@ -384,10 +680,62 @@ def _nearest_project_config(config: dict[str, object], cwd: Path) -> dict[str, o
 
 def _load_json(path: Path) -> dict[str, object]:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        return _load_json_text(path.read_text(encoding="utf-8"))
+    except OSError:
+        return {}
+
+
+def _load_json_text(text: str) -> dict[str, object]:
+    try:
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            data = json.loads(_strip_jsonc(text))
+    except json.JSONDecodeError:
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def _strip_jsonc(text: str) -> str:
+    """Remove JSONC comments/trailing commas without touching string contents."""
+    out: list[str] = []
+    in_string = False
+    quote = ""
+    escape = False
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        nxt = text[i + 1] if i + 1 < len(text) else ""
+        if in_string:
+            out.append(ch)
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == quote:
+                in_string = False
+            i += 1
+            continue
+        if ch in ('"', "'"):
+            in_string = True
+            quote = ch
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "/" and nxt == "/":
+            i += 2
+            while i < len(text) and text[i] not in "\r\n":
+                i += 1
+            continue
+        if ch == "/" and nxt == "*":
+            i += 2
+            while i + 1 < len(text) and not (text[i] == "*" and text[i + 1] == "/"):
+                i += 1
+            i += 2
+            continue
+        out.append(ch)
+        i += 1
+    return re.sub(r",(\s*[}\]])", r"\1", "".join(out))
 
 
 def _load_toml(path: Path) -> dict[str, object]:
@@ -410,6 +758,18 @@ def _collect_named_files(paths: dict[str, Path], store: CheckpointStore) -> dict
         sha = _store_file(path, store)
         if sha is not None:
             result[name] = sha
+    return result
+
+
+def _named_paths(paths: Iterable[Path], *, force_absolute: bool = False) -> dict[str, Path]:
+    path_list = list(paths)
+    basenames: dict[str, int] = {}
+    for path in path_list:
+        basenames[path.name] = basenames.get(path.name, 0) + 1
+    result: dict[str, Path] = {}
+    for path in path_list:
+        key = str(path) if force_absolute or basenames[path.name] > 1 else path.name
+        result[key] = path
     return result
 
 
@@ -443,27 +803,52 @@ def _collect_tree(
     return result
 
 
-def _collect_settings(paths: Iterable[Path], store: CheckpointStore) -> dict[str, str]:
+def _collect_settings(
+    paths: Iterable[Path],
+    store: CheckpointStore,
+    *,
+    force_absolute: bool = False,
+) -> dict[str, str]:
     settings: dict[str, str] = {}
-    for path in paths:
+    for name, path in _named_paths(paths, force_absolute=force_absolute).items():
         if path.exists() and path.is_file() and not _is_secret_path(path):
-            settings[path.name] = store.store_blob(_read_blob_bytes(path))
+            settings[name] = store.store_blob(_read_blob_bytes(path))
     return settings
+
+
+def _force_absolute_settings(provider: ProviderLayout) -> bool:
+    return provider.name == "opencode"
 
 
 def _collect_project_context(cwd: Path, project_files: list[str], store: CheckpointStore) -> dict[str, str]:
     context: dict[str, str] = {}
     for root in _ancestor_chain(_nearest_project_root(cwd), cwd):
         for rel_name in project_files:
-            path = root / rel_name
-            if path.exists() and path.is_file() and not _is_secret_path(path):
-                key = path.relative_to(root).as_posix()
-                context[str(root / key)] = store.store_blob(_read_blob_bytes(path))
-            elif path.exists() and path.is_dir():
-                for rel, sha in _collect_tree(path, store, follow_symlink_dirs=True).items():
-                    key = path.relative_to(root).joinpath(rel).as_posix()
-                    context[str(root / key)] = sha
+            path = Path(rel_name)
+            target = path if path.is_absolute() else root / rel_name
+            if globlib.has_magic(str(target)):
+                for match in sorted(Path(item) for item in globlib.glob(str(target), recursive=True)):
+                    _collect_project_context_path(context, match, root, store)
+                continue
+            _collect_project_context_path(context, target, root, store)
     return context
+
+
+def _collect_project_context_path(
+    context: dict[str, str],
+    path: Path,
+    root: Path,
+    store: CheckpointStore,
+) -> None:
+    if path.exists() and path.is_file() and not _is_secret_path(path):
+        context[str(path.resolve())] = store.store_blob(_read_blob_bytes(path))
+    elif path.exists() and path.is_dir():
+        for rel, sha in _collect_tree(path, store, follow_symlink_dirs=True).items():
+            try:
+                key = path.relative_to(root).joinpath(rel).as_posix()
+                context[str(root / key)] = sha
+            except ValueError:
+                context[str(path / rel)] = sha
 
 
 def _collect_named_symlinks(roots: dict[str, Path]) -> dict[str, str]:

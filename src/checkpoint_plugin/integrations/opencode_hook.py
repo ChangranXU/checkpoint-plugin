@@ -26,6 +26,21 @@ from ._trajectory_slicer import codex_key, jsonl_after_leading_metas, jsonl_ref_
 # record is flushed. Apply the same settle timeout optimization with read-time tail recovery.
 _SETTLE_TIMEOUT_ENV = "CHECKPOINT_SIDECHAIN_SETTLE_TIMEOUT"
 _SETTLE_POLL_ENV = "CHECKPOINT_SIDECHAIN_SETTLE_POLL"
+_RUNTIME_ENV_KEYS = (
+    "OPENCODE_CONFIG",
+    "OPENCODE_CONFIG_DIR",
+    "OPENCODE_TUI_CONFIG",
+    "OPENCODE_DISABLE_PROJECT_CONFIG",
+    "OPENCODE_DISABLE_EXTERNAL_SKILLS",
+    "OPENCODE_DISABLE_CLAUDE_CODE",
+    "OPENCODE_DISABLE_CLAUDE_CODE_SKILLS",
+    "OPENCODE_DISABLE_AUTOCOMPACT",
+    "OPENCODE_DISABLE_PRUNE",
+    "OPENCODE_DISABLE_DEFAULT_PLUGINS",
+    "OPENCODE_PURE",
+    "OPENCODE_WORKSPACE_ID",
+    "OPENCODE_EXPERIMENTAL_WORKSPACES",
+)
 
 
 def _settle_timeout_s() -> float:
@@ -46,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("event", nargs="?", choices=["session_start", "turn_end", "subagent_end"])
     args = parser.parse_args(argv)
-    payload = _read_payload()
+    payload = _sanitize_payload(_read_payload())
     event = args.event or _event_from_payload(payload)
     cwd = Path(_first_string(payload, "cwd", "directory") or Path.cwd())
     session_id = (
@@ -76,18 +91,27 @@ def main(argv: list[str] | None = None) -> int:
     if event == "session_start":
         source = _first_string(payload, "source") or ("subagent" if is_subagent else None)
         lineage: dict[str, Any] | None = None
+        # OC1: Inherit session_env from parent/source session for forks/subagents.
+        # Fork/subagent SessionStart payloads often omit runtime fields (model,
+        # effort) that only arrive at the primary session's SessionStart. Inherit
+        # them so resumed metadata is complete, matching how subagent_end inherits.
+        inherited_env: dict[str, str] = {}
         if is_subagent and parent_session_id:
             lineage = {
                 "parent_session_id": parent_session_id,
                 "agent_type": _first_string(payload, "agent_type", "agentType"),
             }
-        elif is_fork:
+            inherited_env = _parent_session_env(parent_session_id)
+        elif is_fork and forked_from_session_id:
             lineage = {
                 "forked_from_session_id": forked_from_session_id,
             }
+            inherited_env = _parent_session_env(forked_from_session_id)
+        # Payload fields override inherited, so explicit nulls/changes are respected
+        session_env = {**inherited_env, **_session_env(payload)}
         coordinator.on_session_start(
             source=source,
-            session_env=_session_env(payload),
+            session_env=session_env,
             source_transcript_path=_first_string(payload, "transcript_path", "transcriptPath"),
             lineage=lineage,
         )
@@ -235,6 +259,18 @@ def _seed_opencode_env(session_id: str, payload: dict[str, Any]) -> None:
     agent_type = _first_string(payload, "agent_type", "agentType")
     if agent_type:
         os.environ.setdefault("OPENCODE_AGENT_TYPE", agent_type)
+    mcp_status = payload.get("mcp_status") or payload.get("mcpStatus")
+    if isinstance(mcp_status, dict):
+        try:
+            os.environ["OPENCODE_MCP_STATUS"] = json.dumps(mcp_status, separators=(",", ":"))
+        except (TypeError, ValueError):
+            pass
+    resolved_config = payload.get("resolved_config") or payload.get("resolvedConfig")
+    if isinstance(resolved_config, dict):
+        try:
+            os.environ["OPENCODE_RESOLVED_CONFIG"] = json.dumps(_redact_secret_object(resolved_config), separators=(",", ":"))
+        except (TypeError, ValueError):
+            pass
 
 
 def _session_env(payload: dict[str, Any]) -> dict[str, str]:
@@ -255,7 +291,107 @@ def _session_env(payload: dict[str, Any]) -> dict[str, str]:
         "approval_policy": _first_string(payload, "approval_policy", "approvalPolicy"),
         "sandbox_mode": _first_string(payload, "sandbox_mode", "sandboxMode", "sandbox_policy", "sandboxPolicy"),
     }
+    # OC2: Extract permission array from session_info if present (subagents with
+    # task deny policies, for example). Serialize to JSON for storage as string.
+    session_info = payload.get("session_info")
+    if isinstance(session_info, dict) and "permission" in session_info:
+        try:
+            fields["permission"] = json.dumps(session_info["permission"])
+        except (TypeError, ValueError):
+            pass  # Skip if not serializable
+    mcp_status = payload.get("mcp_status") or payload.get("mcpStatus")
+    if isinstance(mcp_status, dict):
+        try:
+            fields["mcp_status"] = json.dumps(mcp_status, separators=(",", ":"))
+        except (TypeError, ValueError):
+            pass
+    resolved_config = payload.get("resolved_config") or payload.get("resolvedConfig")
+    if isinstance(resolved_config, dict):
+        try:
+            fields["resolved_config"] = json.dumps(_redact_secret_object(resolved_config), separators=(",", ":"))
+        except (TypeError, ValueError):
+            pass
+    config_content = os.environ.get("OPENCODE_CONFIG_CONTENT")
+    if config_content:
+        fields["opencode_config_content"] = _redact_secret_text(config_content)
+    permission = os.environ.get("OPENCODE_PERMISSION")
+    if permission:
+        fields["opencode_permission"] = permission
+    runtime_env = _opencode_runtime_env()
+    if runtime_env:
+        fields["opencode_runtime_env"] = json.dumps(runtime_env, separators=(",", ":"))
+    config_skill_roots = _resolved_config_skill_paths(resolved_config if isinstance(resolved_config, dict) else None)
+    if config_skill_roots:
+        fields["opencode_config_skill_roots"] = json.dumps(config_skill_roots, separators=(",", ":"))
     return {key: value for key, value in fields.items() if value}
+
+
+_SECRET_KEY_PARTS = (
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "credential",
+    "bearer",
+    "api_key",
+    "apikey",
+    "access_key",
+    "private_key",
+)
+
+
+def _sanitize_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    sanitized = dict(payload)
+    for key in ("resolved_config", "resolvedConfig"):
+        value = sanitized.get(key)
+        if isinstance(value, dict):
+            sanitized[key] = _redact_secret_object(value)
+    return sanitized
+
+
+def _redact_secret_object(value: Any, key: str | None = None) -> Any:
+    if key and _secret_key(key):
+        return "***redacted***"
+    if isinstance(value, dict):
+        return {str(k): _redact_secret_object(v, str(k)) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_secret_object(item) for item in value]
+    return value
+
+
+def _redact_secret_text(text: str) -> str:
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return text
+    try:
+        return json.dumps(_redact_secret_object(data), separators=(",", ":"))
+    except (TypeError, ValueError):
+        return text
+
+
+def _secret_key(key: str) -> bool:
+    lowered = key.lower().replace("-", "_")
+    return any(part in lowered for part in _SECRET_KEY_PARTS)
+
+
+def _resolved_config_skill_paths(resolved_config: dict[str, Any] | None) -> list[str]:
+    if not isinstance(resolved_config, dict):
+        return []
+    skills = resolved_config.get("skills")
+    if not isinstance(skills, dict):
+        return []
+    paths = skills.get("paths")
+    if not isinstance(paths, list):
+        return []
+    return [item for item in paths if isinstance(item, str) and item]
+
+
+def _opencode_runtime_env() -> dict[str, str]:
+    result = {key: os.environ[key] for key in _RUNTIME_ENV_KEYS if os.environ.get(key)}
+    if os.environ.get("OPENCODE_PERMISSION"):
+        result["OPENCODE_PERMISSION"] = os.environ["OPENCODE_PERMISSION"]
+    return {key: _redact_secret_text(value) for key, value in result.items()}
 
 
 def _turn_record(payload: dict[str, Any]) -> TurnRecord:

@@ -210,3 +210,143 @@ def test_opencode_resume_preserves_parent_id_chain():
             f"parentID chain broken: assistant parentID={parent_id}, "
             f"but user id={messages[0]['info']['id']}"
         )
+
+
+def test_opencode_resume_preserves_session_info_fields(tmp_path):
+    from checkpoint_plugin.resume import _write_opencode_session
+
+    raw_messages = [
+        {
+            "info": {
+                "id": "msg_user",
+                "sessionID": "ses_orig",
+                "role": "user",
+                "time": {"created": 1000},
+                "agent": "build",
+            },
+            "parts": [
+                {
+                    "id": "prt_user",
+                    "type": "text",
+                    "text": "hello",
+                    "messageID": "msg_user",
+                    "sessionID": "ses_orig",
+                }
+            ],
+        },
+        {
+            "info": {
+                "id": "msg_assistant",
+                "sessionID": "ses_orig",
+                "role": "assistant",
+                "parentID": "msg_user",
+                "time": {"created": 2000, "completed": 3000},
+                "finish": "stop",
+                "agent": "build",
+                "path": {"cwd": "/old/cwd", "root": "/"},
+            },
+            "parts": [
+                {
+                    "id": "prt_assistant",
+                    "type": "text",
+                    "text": "Hi!",
+                    "messageID": "msg_assistant",
+                    "sessionID": "ses_orig",
+                }
+            ],
+        },
+    ]
+    session_info = {
+        "id": "ses_orig",
+        "parentID": "ses_parent",
+        "slug": "original-slug",
+        "projectID": "project-old",
+        "directory": "/old/cwd",
+        "path": "old/path",
+        "title": "Original title",
+        "agent": "build",
+        "model": {"id": "big-pickle", "providerID": "opencode"},
+        "permission": [{"permission": "task", "action": "deny", "pattern": "*"}],
+        "metadata": {"runtime": "kept"},
+        "workspaceID": "workspace-1",
+        "share": {"url": "https://example.com/share"},
+        "revert": {"messageID": "msg_user"},
+        "time": {"created": 1234, "updated": 2345},
+    }
+    trajectory = (
+        json.dumps(
+            {
+                "type": "turn",
+                "user_message": "hello",
+                "assistant_text": "Hi!",
+                "metadata": {
+                    "hook_payload": {
+                        "raw_messages": raw_messages,
+                        "session_info": session_info,
+                    }
+                },
+            }
+        )
+        + "\n"
+    ).encode()
+
+    opencode_home = tmp_path / ".config" / "opencode"
+    opencode_home.mkdir(parents=True)
+    import_path = _write_opencode_session(opencode_home, tmp_path, "ses_resumed", trajectory)
+
+    assert import_path is not None
+    import_data = json.loads(import_path.read_text())
+    info = import_data["info"]
+    assert info["id"] == "ses_resumed"
+    assert "parentID" not in info
+    assert info["directory"] == str(tmp_path)
+    assert info["agent"] == "build"
+    assert info["model"] == {"id": "big-pickle", "providerID": "opencode"}
+    assert info["permission"] == [{"permission": "task", "action": "deny", "pattern": "*"}]
+    assert info["metadata"] == {"runtime": "kept"}
+    assert info["workspaceID"] == "workspace-1"
+    assert info["share"] == {"url": "https://example.com/share"}
+    assert info["revert"] == {"messageID": "msg_user"}
+    assert info["time"]["created"] == 1234
+    assert info["time"]["updated"] >= 1234
+    assert all(
+        msg["info"].get("path", {}).get("cwd") == str(tmp_path)
+        for msg in import_data["messages"]
+        if msg["info"].get("path")
+    )
+
+
+def test_opencode_resume_command_carries_runtime_mcp_overlay(tmp_path):
+    from checkpoint_plugin.resume import _resume_command
+    from checkpoint_plugin.types import EnvironmentState
+
+    target_env = EnvironmentState(
+        provider="opencode",
+        mcp_servers={"context7": "inactive", "filesystem": "active", "failed_server": "failed"},
+        extra={
+            "opencode_config_content": json.dumps(
+                {
+                    "mcp": {"context7": {"enabled": True, "type": "local"}},
+                    "model": "opencode/model",
+                }
+            ),
+            "opencode_runtime_env": {
+                "OPENCODE_DISABLE_PROJECT_CONFIG": "1",
+                "OPENCODE_PERMISSION": json.dumps({"bash": {"*": "ask"}}),
+            },
+        },
+    )
+    import_path = tmp_path / "imports" / "ses_resumed.json"
+
+    command = _resume_command("opencode", "ses_resumed", import_path, target_env)
+
+    assert command is not None
+    assert "OPENCODE_CONFIG_CONTENT=" in command
+    assert '"context7":{"enabled":false' in command
+    assert '"filesystem":{"enabled":true}' in command
+    assert '"model":"opencode/model"' in command
+    assert "failed_server" not in command
+    assert "OPENCODE_DISABLE_PROJECT_CONFIG=1" in command
+    assert "OPENCODE_PERMISSION=" in command
+    assert f"opencode import {import_path}" in command
+    assert "opencode --session ses_resumed" in command

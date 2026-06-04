@@ -1,7 +1,8 @@
 from checkpoint_plugin.env.collector import collect_environment
-from checkpoint_plugin.env.providers import claude_layout, codex_layout
+from checkpoint_plugin.env.providers import claude_layout, codex_layout, opencode_layout
 from checkpoint_plugin.store import CheckpointStore
 import hashlib
+import json
 
 
 def test_collect_environment_with_mock_claude_home(tmp_path, monkeypatch):
@@ -241,6 +242,183 @@ def test_collect_claude_structured_env_status(tmp_path, monkeypatch):
         "code-review": "active",
         "context7": "present",
     }
+
+
+def test_collect_opencode_runtime_mcp_status_overrides_config(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    cwd = tmp_path / "project"
+    config_home = home / ".config" / "opencode"
+    config_home.mkdir(parents=True)
+    cwd.mkdir()
+    monkeypatch.setenv("TEST_HOME", str(home))
+    monkeypatch.setenv("OPENCODE_HOME", str(config_home))
+
+    (config_home / "opencode.json").write_text(
+        json.dumps(
+            {
+                "mcp": {
+                    "context7": {
+                        "type": "local",
+                        "command": ["npx", "-y", "@upstash/context7-mcp@latest"],
+                        "enabled": True,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    store = CheckpointStore(tmp_path / "session")
+    (store.session_dir / "metadata.json").write_text(
+        json.dumps(
+            {
+                "session_env": {
+                    "mcp_status": json.dumps({"context7": {"status": "disabled"}}),
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    env = collect_environment(cwd, opencode_layout(), store)
+
+    assert env.mcp_servers == {"context7": "inactive"}
+
+
+def test_collect_opencode_project_context_and_skills(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    cwd = project / "pkg"
+    config_home = home / ".config" / "opencode"
+    cwd.mkdir(parents=True)
+    (project / ".git").mkdir()
+    (config_home / "skills" / "global-skill").mkdir(parents=True)
+    monkeypatch.setenv("TEST_HOME", str(home))
+    monkeypatch.setenv("OPENCODE_HOME", str(config_home))
+
+    (project / "AGENTS.md").write_text("agents", encoding="utf-8")
+    (project / "opencode.json").write_text('{"mcp":{"root":{"type":"local","command":["x"]}}}', encoding="utf-8")
+    (project / "opencode.jsonc").write_text(
+        '{\n  // redacted before storage\n  "provider": {"x": {"options": {"apiKey": "secret-value"}}}\n}\n',
+        encoding="utf-8",
+    )
+    (project / ".opencode" / "agent").mkdir(parents=True)
+    (project / ".opencode" / "agent" / "build.md").write_text("agent", encoding="utf-8")
+    (project / ".opencode" / "commands").mkdir(parents=True)
+    (project / ".opencode" / "commands" / "fmt.md").write_text("command", encoding="utf-8")
+    (project / ".opencode" / "skills" / "project-skill").mkdir(parents=True)
+    (project / ".opencode" / "skills" / "project-skill" / "SKILL.md").write_text("project skill", encoding="utf-8")
+    (project / ".opencode" / "skill" / "legacy-skill").mkdir(parents=True)
+    (project / ".opencode" / "skill" / "legacy-skill" / "SKILL.md").write_text("legacy skill", encoding="utf-8")
+    (config_home / "skills" / "global-skill" / "SKILL.md").write_text("global skill", encoding="utf-8")
+
+    store = CheckpointStore(tmp_path / "session")
+    env = collect_environment(cwd, opencode_layout(), store)
+
+    assert str(project / "AGENTS.md") in env.project_context
+    assert str(project / "opencode.json") in env.project_context
+    assert str(project / "opencode.jsonc") in env.project_context
+    assert str(project / ".opencode" / "agent" / "build.md") in env.project_context
+    assert str(project / ".opencode" / "commands" / "fmt.md") in env.project_context
+    assert any(key.endswith(".opencode/skills/project-skill/SKILL.md") for key in env.skills)
+    assert any(key.endswith(".opencode/skill/legacy-skill/SKILL.md") for key in env.skills)
+    assert "opencode-user/global-skill/SKILL.md" in env.skills
+    stored_jsonc = store.load_blob(env.project_context[str(project / "opencode.jsonc")]).decode("utf-8")
+    assert "secret-value" not in stored_jsonc
+    assert "***redacted***" in stored_jsonc
+
+
+def test_collect_opencode_config_precedence_includes_config_content_and_dir(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    cwd = tmp_path / "project"
+    default_config = home / ".config" / "opencode"
+    overlay_config = tmp_path / "opencode-overlay"
+    default_config.mkdir(parents=True)
+    overlay_config.mkdir(parents=True)
+    cwd.mkdir()
+    monkeypatch.setenv("TEST_HOME", str(home))
+    monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(overlay_config))
+    monkeypatch.setenv(
+        "OPENCODE_CONFIG_CONTENT",
+        json.dumps({"mcp": {"context7": {"enabled": True}, "inline_only": {"enabled": False}}}),
+    )
+
+    (default_config / "opencode.json").write_text(
+        '{"mcp":{"context7":{"type":"local","command":["default"],"enabled":true}}}',
+        encoding="utf-8",
+    )
+    (overlay_config / "opencode.json").write_text(
+        '{"mcp":{"context7":{"type":"local","command":["overlay"],"enabled":false}}}',
+        encoding="utf-8",
+    )
+
+    store = CheckpointStore(tmp_path / "session")
+    env = collect_environment(cwd, opencode_layout(), store)
+
+    assert env.mcp_servers["context7"] == "active"
+    assert env.mcp_servers["inline_only"] == "inactive"
+
+
+def test_collect_opencode_resolved_config_and_saved_runtime_env(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    cwd = tmp_path / "project"
+    external_skills = tmp_path / "opencode-skills"
+    cwd.mkdir()
+    external_skills.mkdir()
+    monkeypatch.setenv("TEST_HOME", str(home))
+    monkeypatch.setenv("OPENCODE_HOME", str(home / ".config" / "opencode"))
+
+    store = CheckpointStore(tmp_path / "session")
+    (store.session_dir / "metadata.json").write_text(
+        json.dumps(
+            {
+                "session_env": {
+                    "resolved_config": json.dumps(
+                        {
+                            "model": "opencode/test-model",
+                            "plugin": ["npm-plugin", ["tuple-plugin", {"flag": True}]],
+                            "mcp": {
+                                "context7": {"enabled": True},
+                                "disabled_by_config": {"enabled": False},
+                            },
+                            "provider": {"x": {"options": {"apiKey": "secret-value"}}},
+                            "skills": {"paths": [str(external_skills)]},
+                        }
+                    ),
+                    "opencode_runtime_env": json.dumps({"OPENCODE_DISABLE_EXTERNAL_SKILLS": "1"}),
+                    "opencode_config_content": json.dumps(
+                        {"mcp": {"inline_only": {"enabled": False}}}
+                    ),
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (external_skills / "custom").mkdir()
+    (external_skills / "custom" / "SKILL.md").write_text("custom skill", encoding="utf-8")
+    (cwd / ".agents" / "skills" / "ignored").mkdir(parents=True)
+    (cwd / ".agents" / "skills" / "ignored" / "SKILL.md").write_text("ignored", encoding="utf-8")
+    (home / ".agents" / "skills" / "ignored-global").mkdir(parents=True)
+    (home / ".agents" / "skills" / "ignored-global" / "SKILL.md").write_text("ignored", encoding="utf-8")
+    (home / ".claude" / "skills" / "ignored-claude").mkdir(parents=True)
+    (home / ".claude" / "skills" / "ignored-claude" / "SKILL.md").write_text("ignored", encoding="utf-8")
+
+    env = collect_environment(cwd, opencode_layout(), store)
+
+    assert env.model == "opencode/test-model"
+    assert env.mcp_servers == {
+        "context7": "active",
+        "disabled_by_config": "inactive",
+        "inline_only": "inactive",
+    }
+    assert env.plugin_status == {"npm-plugin": "active", "tuple-plugin": "active"}
+    assert f"opencode-config-skills:{external_skills}/custom/SKILL.md" in env.skills
+    assert not any(".agents/skills/ignored" in key for key in env.skills)
+    assert "agent-user/ignored-global/SKILL.md" not in env.skills
+    assert "claude-user/ignored-claude/SKILL.md" not in env.skills
+    assert env.extra["opencode_runtime_env"] == {"OPENCODE_DISABLE_EXTERNAL_SKILLS": "1"}
+    assert env.extra["opencode_config_skill_roots"] == [str(external_skills)]
+    assert env.extra["opencode_resolved_config"]["provider"]["x"]["options"]["apiKey"] == "***redacted***"
 
 
 def test_collect_environment_never_stores_secret_files(tmp_path, monkeypatch):

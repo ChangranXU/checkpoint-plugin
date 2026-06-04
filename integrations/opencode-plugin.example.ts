@@ -23,6 +23,19 @@ function debug(msg: string) {
   try { appendFileSync(DEBUG_LOG, `${new Date().toISOString()} ${msg}\n`) } catch {}
 }
 
+const SECRET_KEY = /token|secret|password|passwd|credential|bearer|api[_-]?key|apikey|access[_-]?key|private[_-]?key/i
+
+function sanitizeConfig(value: any, key?: string): any {
+  if (key && SECRET_KEY.test(key)) return "***redacted***"
+  if (Array.isArray(value)) return value.map((item) => sanitizeConfig(item))
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([childKey, childValue]) => [childKey, sanitizeConfig(childValue, childKey)]),
+    )
+  }
+  return value
+}
+
 interface CheckpointPayload {
   sessionID: string
   directory?: string
@@ -35,6 +48,8 @@ interface CheckpointPayload {
   messages?: any[]
   raw_messages?: any[]
   session_info?: any
+  mcp_status?: Record<string, any>
+  resolved_config?: Record<string, any>
   event_metadata?: Record<string, unknown>
 }
 
@@ -98,6 +113,41 @@ export const CheckpointPlugin = async (ctx: {
     }
   }
 
+  async function getSessionInfo(sessionID: string): Promise<any | undefined> {
+    try {
+      const sess = await client.session.get({ path: { id: sessionID } })
+      return sess?.data
+    } catch {
+      return undefined
+    }
+  }
+
+  async function getMcpStatus(): Promise<Record<string, any> | undefined> {
+    try {
+      const resp = await callWithDirectory(client.mcp.status.bind(client.mcp))
+      return resp?.data
+    } catch {
+      return undefined
+    }
+  }
+
+  async function getResolvedConfig(): Promise<Record<string, any> | undefined> {
+    try {
+      const resp = await callWithDirectory(client.config.get.bind(client.config))
+      return sanitizeConfig(resp?.data)
+    } catch {
+      return undefined
+    }
+  }
+
+  async function callWithDirectory(fn: (arg?: any) => Promise<any>): Promise<any> {
+    try {
+      return await fn({ directory, query: { directory } })
+    } catch {
+      return await fn()
+    }
+  }
+
   return {
     /**
      * Bus events arrive here. OpenCode publishes session.created, session.idle,
@@ -111,7 +161,7 @@ export const CheckpointPlugin = async (ctx: {
           if (!sessionID) return
           activeSessions.add(sessionID)
 
-          const info = event.properties?.info
+          const info = event.properties?.info ?? (await getSessionInfo(sessionID))
           const parentID: string | undefined = info?.parentID
           const forkInfo = parseForkTitle(info?.title)
 
@@ -138,6 +188,9 @@ export const CheckpointPlugin = async (ctx: {
             parent_session_id: parentSessionId,
             forked_from_session_id: forkedFromSessionId,
             model: info?.model?.id,
+            session_info: info,
+            mcp_status: await getMcpStatus(),
+            resolved_config: await getResolvedConfig(),
             event_metadata: {
               timestamp: new Date().toISOString(),
               hook_event_name: "SessionStart",
@@ -189,14 +242,9 @@ export const CheckpointPlugin = async (ctx: {
           let parentID: string | undefined
           let sessTitle: string | undefined
           let sessData: any | undefined
-          try {
-            const sess = await client.session.get({ path: { id: sessionID } })
-            parentID = sess?.data?.parentID
-            sessTitle = sess?.data?.title
-            sessData = sess?.data
-          } catch {
-            // best-effort
-          }
+          sessData = await getSessionInfo(sessionID)
+          parentID = sessData?.parentID
+          sessTitle = sessData?.title
 
           let source: string | undefined
           let agentType: "primary" | "subagent" = "primary"
@@ -227,6 +275,8 @@ export const CheckpointPlugin = async (ctx: {
             raw_messages: messages,
             session_info: sessData,
             model: lastMsg.info?.modelID || sessData?.model?.id,
+            mcp_status: await getMcpStatus(),
+            resolved_config: await getResolvedConfig(),
             event_metadata: {
               timestamp: new Date().toISOString(),
               message_count: messages.length,
@@ -265,6 +315,9 @@ export const CheckpointPlugin = async (ctx: {
             worktree,
             messages: flatMessages,
             raw_messages: messages,
+            session_info: await getSessionInfo(sessionID),
+            mcp_status: await getMcpStatus(),
+            resolved_config: await getResolvedConfig(),
             event_metadata: {
               timestamp: new Date().toISOString(),
               removed_message_id: messageID,
@@ -295,15 +348,9 @@ export const CheckpointPlugin = async (ctx: {
         if (!sessionID || activeSessions.has(sessionID)) return
         activeSessions.add(sessionID)
 
-        let parentID: string | undefined
-        let sessTitle: string | undefined
-        try {
-          const sess = await client.session.get({ path: { id: sessionID } })
-          parentID = sess?.data?.parentID
-          sessTitle = sess?.data?.title
-        } catch {
-          // best-effort
-        }
+        const sessData = await getSessionInfo(sessionID)
+        const parentID: string | undefined = sessData?.parentID
+        const sessTitle: string | undefined = sessData?.title
 
         let source: string | undefined
         let agentType: "primary" | "subagent" = "primary"
@@ -330,10 +377,13 @@ export const CheckpointPlugin = async (ctx: {
           agent_type: agentType,
           parent_session_id: parentSessionId,
           forked_from_session_id: forkedFromSessionId,
+          session_info: sessData,
+          model: input.model?.modelID || sessData?.model?.id,
+          mcp_status: await getMcpStatus(),
+          resolved_config: await getResolvedConfig(),
           event_metadata: {
             timestamp: new Date().toISOString(),
             hook_event_name: "SessionStart",
-            model: input.model?.modelID,
           },
         }
 

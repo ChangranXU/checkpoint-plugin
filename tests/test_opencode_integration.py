@@ -138,3 +138,252 @@ def test_opencode_hook_handles_session_idle_payload(tmp_path, monkeypatch):
     # A turn should create a manifest file
     manifest_files = list(manifests_dir.glob("*.json"))
     assert len(manifest_files) > 0
+
+
+def test_opencode_fork_inherits_session_env(tmp_path, monkeypatch):
+    """OC1: Verify fork sessions inherit session_env fields from source session."""
+    from io import StringIO
+    from checkpoint_plugin.integrations.opencode_hook import main
+
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(tmp_path))
+
+    # Step 1: Create parent session with model
+    parent_id = "parent-session"
+    monkeypatch.setenv("OPENCODE_SESSION_ID", parent_id)
+
+    parent_payload = json.dumps({
+        "sessionID": parent_id,
+        "directory": str(tmp_path),
+        "agent_type": "primary",
+        "model": "big-pickle",
+        "effort": "max",
+        "event_metadata": {
+            "timestamp": "2026-06-03T14:00:00Z",
+            "hook_event_name": "SessionStart",
+        }
+    })
+
+    monkeypatch.setattr("sys.stdin", StringIO(parent_payload))
+    exit_code = main(["session_start"])
+    assert exit_code == 0
+
+    # Verify parent has model in session_env
+    parent_dir = tmp_path / "sessions" / parent_id
+    parent_meta = json.loads((parent_dir / "metadata.json").read_text())
+    assert parent_meta["session_env"]["model"] == "big-pickle"
+    assert parent_meta["session_env"]["effort"] == "max"
+
+    # Step 2: Create fork session WITHOUT model in payload (simulating real behavior)
+    fork_id = "fork-session"
+    monkeypatch.setenv("OPENCODE_SESSION_ID", fork_id)
+
+    fork_payload = json.dumps({
+        "sessionID": fork_id,
+        "directory": str(tmp_path),
+        "agent_type": "primary",
+        "source": "fork",
+        "forked_from_session_id": parent_id,
+        # Note: NO model field in payload (this is the bug scenario)
+        "event_metadata": {
+            "timestamp": "2026-06-03T14:05:00Z",
+            "hook_event_name": "SessionStart",
+        }
+    })
+
+    monkeypatch.setattr("sys.stdin", StringIO(fork_payload))
+    exit_code = main(["session_start"])
+    assert exit_code == 0
+
+    # Verify fork inherited model from parent (OC1 fix)
+    fork_dir = tmp_path / "sessions" / fork_id
+    fork_meta = json.loads((fork_dir / "metadata.json").read_text())
+    assert fork_meta["session_env"]["model"] == "big-pickle", "Fork should inherit model from parent"
+    assert fork_meta["session_env"]["effort"] == "max", "Fork should inherit effort from parent"
+    assert fork_meta["session_env"]["agent_type"] == "primary"
+
+
+def test_opencode_subagent_inherits_session_env(tmp_path, monkeypatch):
+    """OC1: Verify subagent sessions inherit session_env fields from parent session."""
+    from io import StringIO
+    from checkpoint_plugin.integrations.opencode_hook import main
+
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(tmp_path))
+
+    # Step 1: Create parent session with model
+    parent_id = "parent-session"
+    monkeypatch.setenv("OPENCODE_SESSION_ID", parent_id)
+
+    parent_payload = json.dumps({
+        "sessionID": parent_id,
+        "directory": str(tmp_path),
+        "agent_type": "primary",
+        "model": "big-pickle",
+        "permission_mode": "auto",
+        "event_metadata": {
+            "timestamp": "2026-06-03T14:00:00Z",
+            "hook_event_name": "SessionStart",
+        }
+    })
+
+    monkeypatch.setattr("sys.stdin", StringIO(parent_payload))
+    exit_code = main(["session_start"])
+    assert exit_code == 0
+
+    # Step 2: Create subagent session WITHOUT model in payload
+    subagent_id = "subagent-session"
+    monkeypatch.setenv("OPENCODE_SESSION_ID", subagent_id)
+
+    subagent_payload = json.dumps({
+        "sessionID": subagent_id,
+        "directory": str(tmp_path),
+        "agent_type": "subagent",
+        "parent_session_id": parent_id,
+        # Note: NO model or permission_mode (simulating real behavior)
+        "event_metadata": {
+            "timestamp": "2026-06-03T14:05:00Z",
+            "hook_event_name": "SessionStart",
+        }
+    })
+
+    monkeypatch.setattr("sys.stdin", StringIO(subagent_payload))
+    exit_code = main(["session_start"])
+    assert exit_code == 0
+
+    # Verify subagent inherited model from parent (OC1 fix)
+    subagent_dir = tmp_path / "sessions" / subagent_id
+    subagent_meta = json.loads((subagent_dir / "metadata.json").read_text())
+    assert subagent_meta["session_env"]["model"] == "big-pickle", "Subagent should inherit model from parent"
+    assert subagent_meta["session_env"]["permission_mode"] == "auto", "Subagent should inherit permission_mode"
+    assert subagent_meta["session_env"]["agent_type"] == "subagent"
+
+
+def test_opencode_permission_capture_from_session_info(tmp_path, monkeypatch):
+    """OC2: Verify permission policies are captured from session_info."""
+    from io import StringIO
+    from checkpoint_plugin.integrations.opencode_hook import main
+
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(tmp_path))
+    monkeypatch.setenv("OPENCODE_SESSION_ID", "test-session")
+
+    # Simulate hook payload with permission in session_info (typical for subagents)
+    payload = json.dumps({
+        "sessionID": "test-session",
+        "directory": str(tmp_path),
+        "agent_type": "subagent",
+        "model": "big-pickle",
+        "session_info": {
+            "id": "test-session",
+            "title": "Test subagent",
+            "permission": [
+                {"permission": "task", "action": "deny", "pattern": "*"}
+            ],
+        },
+        "event_metadata": {
+            "timestamp": "2026-06-03T14:00:00Z",
+            "hook_event_name": "SessionStart",
+        }
+    })
+
+    monkeypatch.setattr("sys.stdin", StringIO(payload))
+    exit_code = main(["session_start"])
+    assert exit_code == 0
+
+    # Verify permission was captured in session_env (OC2 fix)
+    session_dir = tmp_path / "sessions" / "test-session"
+    metadata = json.loads((session_dir / "metadata.json").read_text())
+
+    assert "permission" in metadata["session_env"], "Permission should be captured"
+    permission = json.loads(metadata["session_env"]["permission"])
+    assert len(permission) == 1
+    assert permission[0]["permission"] == "task"
+    assert permission[0]["action"] == "deny"
+    assert permission[0]["pattern"] == "*"
+
+
+def test_opencode_mcp_status_capture_from_payload(tmp_path, monkeypatch):
+    """Runtime MCP status from OpenCode is persisted for later turn snapshots."""
+    from io import StringIO
+    from checkpoint_plugin.integrations.opencode_hook import main
+
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(tmp_path))
+    monkeypatch.setenv("OPENCODE_SESSION_ID", "test-session")
+
+    payload = json.dumps({
+        "sessionID": "test-session",
+        "directory": str(tmp_path),
+        "agent_type": "primary",
+        "model": "big-pickle",
+        "mcp_status": {"context7": {"status": "disabled"}},
+        "event_metadata": {
+            "timestamp": "2026-06-03T14:00:00Z",
+            "hook_event_name": "SessionStart",
+        },
+    })
+
+    monkeypatch.setattr("sys.stdin", StringIO(payload))
+    assert main(["session_start"]) == 0
+
+    metadata = json.loads((tmp_path / "sessions" / "test-session" / "metadata.json").read_text())
+    assert json.loads(metadata["session_env"]["mcp_status"]) == {"context7": {"status": "disabled"}}
+
+
+def test_opencode_turn_end_uses_runtime_mcp_status_in_env_snapshot(tmp_path, monkeypatch):
+    """A runtime UI disconnect should override static opencode.json in the checkpoint env."""
+    from io import StringIO
+    from checkpoint_plugin.env.collector import environment_from_blob
+    from checkpoint_plugin.integrations.opencode_hook import main
+    from checkpoint_plugin.store import CheckpointStore
+
+    plugin_home = tmp_path / "plugin"
+    home = tmp_path / "home"
+    cwd = tmp_path / "project"
+    opencode_home = home / ".config" / "opencode"
+    cwd.mkdir()
+    opencode_home.mkdir(parents=True)
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
+    monkeypatch.setenv("TEST_HOME", str(home))
+    monkeypatch.setenv("OPENCODE_HOME", str(opencode_home))
+    monkeypatch.setenv("OPENCODE_SESSION_ID", "test-session")
+
+    (opencode_home / "opencode.json").write_text(
+        json.dumps(
+            {
+                "mcp": {
+                    "context7": {
+                        "type": "local",
+                        "command": ["npx", "-y", "@upstash/context7-mcp@latest"],
+                        "enabled": True,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    start_payload = json.dumps({
+        "sessionID": "test-session",
+        "directory": str(cwd),
+        "agent_type": "primary",
+        "mcp_status": {"context7": {"status": "disabled"}},
+        "event_metadata": {"hook_event_name": "SessionStart"},
+    })
+    monkeypatch.setattr("sys.stdin", StringIO(start_payload))
+    assert main(["session_start"]) == 0
+
+    stop_payload = json.dumps({
+        "sessionID": "test-session",
+        "directory": str(cwd),
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ],
+        "mcp_status": {"context7": {"status": "disabled"}},
+        "event_metadata": {"hook_event_name": "Stop"},
+    })
+    monkeypatch.setattr("sys.stdin", StringIO(stop_payload))
+    assert main(["turn_end"]) == 0
+
+    store = CheckpointStore(plugin_home / "sessions" / "test-session")
+    manifest = store.read_manifest(0)
+    env = environment_from_blob(manifest.env_ref, store)
+    assert env.mcp_servers == {"context7": "inactive"}

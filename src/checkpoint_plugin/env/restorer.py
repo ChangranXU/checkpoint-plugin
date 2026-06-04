@@ -34,13 +34,13 @@ def restore_environment(
     changed.extend(
         _restore_named_skill_trees(
             target.skills,
-            _skill_restore_roots(provider, Path(target.extra.get("cwd") or ".")),
+            _skill_restore_roots(provider, Path(target.extra.get("cwd") or "."), target.extra),
             store,
             backup_dir / "skills",
             backed_up,
         )
     )
-    if provider.mcp_config is not None:
+    if provider.mcp_config is not None and provider.name != "opencode":
         changed.extend(_restore_optional_file(target.mcp_config, provider.mcp_config, store, backup_dir / "mcp", backed_up))
     changed.extend(
         _restore_settings(
@@ -100,7 +100,7 @@ def _split_skill_root(key: str, roots: dict[str, Path]) -> tuple[str, str] | Non
     return None
 
 
-def _skill_restore_roots(provider: ProviderLayout, cwd: Path) -> dict[str, Path]:
+def _skill_restore_roots(provider: ProviderLayout, cwd: Path, extra: dict[str, object] | None = None) -> dict[str, Path]:
     roots = dict(provider.skills_dirs)
     roots.update(_plugin_skill_roots(provider))
     try:
@@ -116,6 +116,19 @@ def _skill_restore_roots(provider: ProviderLayout, cwd: Path) -> dict[str, Path]
             if (project_root / ".git").exists() or project_root == _nearest_project_root(cwd):
                 roots[f"project:{project_root}:.codex/skills"] = project_root / ".codex" / "skills"
                 roots[f"project:{project_root}:.agents/skills"] = project_root / ".agents" / "skills"
+    if provider.name == "opencode":
+        for project_root in (cwd, *cwd.parents):
+            if (project_root / ".git").exists() or project_root == _nearest_project_root(cwd):
+                roots[f"project:{project_root}:.opencode/skills"] = project_root / ".opencode" / "skills"
+                roots[f"project:{project_root}:.opencode/skill"] = project_root / ".opencode" / "skill"
+                roots[f"project:{project_root}:.agents/skills"] = project_root / ".agents" / "skills"
+                roots[f"project:{project_root}:.claude/skills"] = project_root / ".claude" / "skills"
+        config_roots = (extra or {}).get("opencode_config_skill_roots")
+        if isinstance(config_roots, list):
+            for root in config_roots:
+                if isinstance(root, str) and root:
+                    path = Path(root).expanduser()
+                    roots[f"opencode-config-skills:{path}"] = path
     return roots
 
 
@@ -162,32 +175,63 @@ def _restore_settings(
     provider_name: str,
     ignore_plugin_hooks: bool,
 ) -> list[str]:
-    by_name = {path.name: path for path in settings_files}
+    by_name = _settings_restore_paths(settings_files)
+    by_basename = _unique_basenames(settings_files)
     changed: list[str] = []
-    for name, path in by_name.items():
-        if name not in settings and path.exists():
-            if ignore_plugin_hooks and is_hook_config_basename(name, provider_name) and _is_plugin_hooks_only(path):
+    for key, path in by_name.items():
+        if not _setting_is_targeted(settings, key, path) and path.exists():
+            if ignore_plugin_hooks and is_hook_config_basename(path.name, provider_name) and _is_plugin_hooks_only(path):
                 continue
-            _backup(path, backup_dir / name, backed_up)
+            _backup(path, backup_dir / _setting_backup_rel(path), backed_up)
             path.unlink()
             changed.append(str(path))
     for name, sha in settings.items():
-        path = by_name.get(name)
+        path = by_name.get(name) or by_basename.get(name)
+        if path is None and Path(name).is_absolute():
+            path = Path(name)
         if path is None and settings_files:
             path = settings_files[0].parent / name
         if path is not None:
-            preserve_plugin_hooks = ignore_plugin_hooks and is_hook_config_basename(name, provider_name)
+            preserve_plugin_hooks = ignore_plugin_hooks and is_hook_config_basename(path.name, provider_name)
             restored = _restore_blob_to(
                 sha,
                 path,
                 store,
-                backup_dir,
+                backup_dir / _setting_backup_rel(path),
                 backed_up,
                 preserve_plugin_hooks=preserve_plugin_hooks,
             )
             if restored is not None:
                 changed.append(str(restored))
     return changed
+
+
+def _setting_is_targeted(settings: dict[str, str], key: str, path: Path) -> bool:
+    return key in settings or path.name in settings or str(path) in settings
+
+
+def _setting_backup_rel(path: Path) -> Path:
+    return _mirror_path(path) if path.is_absolute() else Path(path.name)
+
+
+def _settings_restore_paths(paths: list[Path]) -> dict[str, Path]:
+    basenames = _basename_counts(paths)
+    return {
+        str(path) if basenames[path.name] > 1 else path.name: path
+        for path in paths
+    }
+
+
+def _unique_basenames(paths: list[Path]) -> dict[str, Path]:
+    basenames = _basename_counts(paths)
+    return {path.name: path for path in paths if basenames[path.name] == 1}
+
+
+def _basename_counts(paths: list[Path]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for path in paths:
+        counts[path.name] = counts.get(path.name, 0) + 1
+    return counts
 
 
 def _restore_optional_file(

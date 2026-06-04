@@ -112,11 +112,81 @@ def codex_layout() -> ProviderLayout:
 
 def opencode_layout() -> ProviderLayout:
     home = _home()
-    # OpenCode uses XDG-style config directory, respecting OPENCODE_CONFIG_DIR env var
+    default_opencode_home = (Path(os.environ.get("XDG_CONFIG_HOME", str(home / ".config"))) / "opencode").expanduser()
+    # OpenCode's OPENCODE_CONFIG_DIR is the actual config directory
+    # (Global.Path.config), not the XDG parent. OPENCODE_HOME is kept for
+    # backwards-compatible hook installer tests and older plugin setups.
     opencode_home = Path(
         os.environ.get("OPENCODE_CONFIG_DIR")
-        or os.environ.get("XDG_CONFIG_HOME", str(home / ".config"))
-    ).expanduser() / "opencode"
+        or os.environ.get("OPENCODE_HOME")
+        or default_opencode_home
+    ).expanduser()
+    config_homes = []
+    if os.environ.get("OPENCODE_CONFIG_DIR") and default_opencode_home != opencode_home:
+        config_homes.append(default_opencode_home)
+    config_homes.append(opencode_home)
+    custom_config = os.environ.get("OPENCODE_CONFIG")
+    custom_tui_config = os.environ.get("OPENCODE_TUI_CONFIG")
+    custom_config_files = [Path(custom_config).expanduser()] if custom_config else []
+    custom_tui_files = [Path(custom_tui_config).expanduser()] if custom_tui_config else []
+    opencode_config_files = [
+        path
+        for config_home in config_homes
+        for path in (
+            config_home / "opencode.json",
+            config_home / "opencode.jsonc",
+            config_home / "config.json",
+        )
+    ]
+    opencode_settings_files = [
+        path
+        for config_home in config_homes
+        for path in (
+            config_home / "opencode.json",
+            config_home / "opencode.jsonc",
+            config_home / "config.json",
+            config_home / "tui.json",
+            config_home / "tui.jsonc",
+        )
+    ]
+    opencode_plugin_files = [
+        path
+        for config_home in config_homes
+        for path in (
+            config_home / "plugin" / "checkpoint.ts",
+            config_home / "plugin" / "checkpoint.js",
+            config_home / "plugins" / "checkpoint.ts",
+            config_home / "plugins" / "checkpoint.js",
+        )
+    ]
+    skills_dirs = {
+        "opencode-user": opencode_home / "skills",
+        "opencode-user-singular": opencode_home / "skill",
+        "opencode-home": home / ".opencode" / "skills",
+        "opencode-home-singular": home / ".opencode" / "skill",
+        "agent-user": home / ".agents" / "skills",
+    }
+    if not _truthy_env("OPENCODE_DISABLE_CLAUDE_CODE") and not _truthy_env("OPENCODE_DISABLE_CLAUDE_CODE_SKILLS"):
+        skills_dirs["claude-user"] = home / ".claude" / "skills"
+    if default_opencode_home != opencode_home:
+        skills_dirs["opencode-default"] = default_opencode_home / "skills"
+        skills_dirs["opencode-default-singular"] = default_opencode_home / "skill"
+    global_project_files = [
+        str(path)
+        for config_home in config_homes
+        for path in (
+            config_home / "agent/",
+            config_home / "agents/",
+            config_home / "command/",
+            config_home / "commands/",
+            config_home / "mode/",
+            config_home / "modes/",
+            config_home / "plugin/",
+            config_home / "plugins/",
+            config_home / "tool/",
+            config_home / "tools/",
+        )
+    ]
 
     return ProviderLayout(
         name="opencode",
@@ -125,40 +195,62 @@ def opencode_layout() -> ProviderLayout:
         # OpenCode config files - supports both .json and .jsonc formats
         mcp_config=opencode_home / "opencode.json",
         mcp_config_files=[
-            opencode_home / "opencode.json",
-            opencode_home / "opencode.jsonc",
-            opencode_home / "config.json",
+            *opencode_config_files,
+            *custom_config_files,
         ],
         settings_files=[
-            opencode_home / "opencode.json",
-            opencode_home / "opencode.jsonc",
-            opencode_home / "config.json",
+            *opencode_settings_files,
+            *custom_config_files,
+            *custom_tui_files,
             # TypeScript plugin files for checkpoint integration
-            opencode_home / "plugins" / "checkpoint.ts",
-            opencode_home / "plugins" / "checkpoint.js",
+            *opencode_plugin_files,
         ],
-        skills_dirs={
-            "opencode-user": opencode_home / "skills",
-        },
+        skills_dirs=skills_dirs,
         project_files=[
+            # OpenCode instruction/rule files (plus Claude-compatible prompt files)
+            "AGENTS.md",
+            "CLAUDE.md",
+            "CONTEXT.md",
             # Project-local OpenCode configuration
+            "opencode.json",
+            "opencode.jsonc",
+            "tui.json",
+            "tui.jsonc",
             ".opencode/opencode.json",
             ".opencode/opencode.jsonc",
-            ".opencode/config.json",
             ".opencode/tui.json",
+            ".opencode/tui.jsonc",
             ".opencode/env.d.ts",
             ".opencode/agent/*.md",
+            ".opencode/agents/*.md",
             ".opencode/command/*.md",
+            ".opencode/commands/*.md",
+            ".opencode/mode/*.md",
+            ".opencode/modes/*.md",
+            ".opencode/skill/",
             ".opencode/skills/",
             ".opencode/glossary/",
             ".opencode/themes/",
-            ".opencode/tool/",
+            ".opencode/plugin/",
             ".opencode/plugins/",
+            ".opencode/tool/",
+            ".opencode/tools/",
             # Project-local checkpoint plugin
+            ".opencode/plugin/checkpoint.ts",
+            ".opencode/plugin/checkpoint.js",
             ".opencode/plugins/checkpoint.ts",
             ".opencode/plugins/checkpoint.js",
+            # Global OpenCode commands/agents/modes live under the config dir.
+            *global_project_files,
+            str(home / ".opencode/"),
+            ".agents/skills/",
         ],
     )
+
+
+def _truthy_env(name: str) -> bool:
+    value = os.environ.get(name, "").lower()
+    return value in {"1", "true"}
 
 
 def generic_layout() -> ProviderLayout:
