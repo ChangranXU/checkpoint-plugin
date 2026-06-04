@@ -69,7 +69,7 @@ class _Stream(io.StringIO):
 def test_colorize_wraps_on_tty_and_is_plain_otherwise(monkeypatch):
     """The resume-command hint is colored only when stdout is a real TTY."""
     monkeypatch.delenv("NO_COLOR", raising=False)
-    cmd = "codex resume 4adbaa3b-f00a-4882-8dd8-0f6184650a60"
+    cmd = "checkpoint resume-open 4adbaa3b-f00a-4882-8dd8-0f6184650a60"
 
     colored = _colorize(cmd, "bold green", stream=_Stream(tty=True))
     assert colored == f"\033[1m\033[32m{cmd}\033[0m"
@@ -82,7 +82,7 @@ def test_colorize_wraps_on_tty_and_is_plain_otherwise(monkeypatch):
 
 def test_colorize_respects_no_color_env(monkeypatch):
     monkeypatch.setenv("NO_COLOR", "1")
-    cmd = "codex resume abc"
+    cmd = "checkpoint resume-open abc"
     assert _colorize(cmd, "bold green", stream=_Stream(tty=True)) == cmd
     assert _supports_color(_Stream(tty=True)) is False
 

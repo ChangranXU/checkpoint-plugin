@@ -7,6 +7,7 @@ import os
 import re
 import shlex
 import shutil
+import subprocess
 import sys
 import uuid
 from dataclasses import dataclass, field, replace
@@ -16,7 +17,7 @@ from typing import Callable
 
 from .env.collector import collect_environment, environment_from_blob
 from .env.differ import diff_environments, render_diff
-from .env.providers import layout_for_provider
+from .env.providers import ProviderLayout, layout_for_provider
 from .env.restorer import restore_environment
 from .fs.ignore import IgnoreMatcher
 from .fs.restorer import diff_filesystems, render_fs_diff, restore_cwd
@@ -47,6 +48,24 @@ class TrajectoryPrefix:
 class ResumeOptions:
     proceed: bool
     target_cwd: Path | None = None
+
+
+@dataclass(frozen=True)
+class ResumeRuntime:
+    root: Path
+    provider: ProviderLayout
+    env: dict[str, str]
+    path_map: dict[str, str]
+
+
+@dataclass(frozen=True)
+class ResumeOpenSpec:
+    provider: str
+    session_id: str
+    cwd: Path
+    env: dict[str, str]
+    preflight: list[list[str]]
+    command: list[str]
 
 
 class ResumeOrchestrator:
@@ -98,14 +117,29 @@ class ResumeOrchestrator:
         backup_root = backups_dir(self.home) / f"{_stamp()}-{plan.session_id}-{uuid.uuid4().hex[:8]}"
         target_cwd = _prepare_resume_cwd(self.cwd, options.target_cwd)
         self.cwd = target_cwd
-        provider = layout_for_provider(plan.target_env.provider)
+        source_provider = layout_for_provider(plan.target_env.provider)
+        new_session_id = _new_resume_session_id(source_provider.name)
+        runtime = _prepare_resume_runtime(source_provider, self.home, new_session_id, plan.target_env)
+        runtime_env = _environment_for_runtime(plan.target_env, runtime.path_map, target_cwd)
+        runtime = replace(
+            runtime,
+            env=_runtime_process_env(
+                runtime.provider.name,
+                runtime.provider.home,
+                runtime.root,
+                runtime_env,
+                runtime.path_map,
+            ),
+        )
         env_report = restore_environment(
-            plan.target_env,
-            provider,
+            runtime_env,
+            runtime.provider,
             original_store,
             backup_root / "environment",
             ignore_plugin_hooks=plan.ignore_plugin_hooks,
+            preserve_redacted_values=True,
         )
+        _materialize_runtime_config(runtime.provider.name, runtime.provider.home, runtime_env)
         config = load_config(self.home)
         ignore = IgnoreMatcher(target_cwd, config.get("exclude_patterns") or [])
         fs_report = restore_cwd(
@@ -117,35 +151,58 @@ class ResumeOrchestrator:
         )
         if not target_cwd.is_dir():
             raise RuntimeError(f"Resume workspace was not created: {target_cwd}")
-        new_session_id = _new_resume_session_id(provider.name)
         trajectory = _trajectory_prefix(original_store, plan)
-        source_meta = _codex_source_session_meta(plan) if provider.name == "codex" else None
+        source_meta = _codex_source_session_meta(plan) if runtime.provider.name == "codex" else None
         # P6-14: an inherited fork prefix is present when the earliest captured turn
         # anchors past byte 0 (records before it are pre-fork inherited history).
         has_inherited_prefix = _has_inherited_prefix(trajectory.spans, trajectory.data)
         provider_session_path = _write_provider_session(
-            provider.name,
-            provider.home,
+            runtime.provider.name,
+            runtime.provider.home,
             target_cwd,
             new_session_id,
             trajectory.data,
-            plan.target_env.model,
-            plan.target_env.effort,
-            plan.target_env.permission_mode,
-            plan.target_env.mode,
+            runtime_env.model,
+            runtime_env.effort,
+            runtime_env.permission_mode,
+            runtime_env.mode,
             source_meta,
             has_inherited_prefix,
             plan.session_id,
             trajectory.inherited_record_count,
         )
-        _carry_provider_session_state(provider.name, provider.home, plan.session_id, new_session_id, target_cwd)
-        if provider.name == "codex" and provider_session_path is not None:
+        _carry_provider_session_state(
+            runtime.provider.name,
+            source_provider.home,
+            plan.session_id,
+            new_session_id,
+            target_cwd,
+            dest_provider_home=runtime.provider.home,
+        )
+        if runtime.provider.name == "codex" and provider_session_path is not None:
             _append_codex_session_index(
-                provider.home,
+                runtime.provider.home,
                 new_session_id,
                 _source_session_title(original_store) or _derive_session_title(original_store, plan),
             )
-        self._copy_session_prefix(original_store, plan, new_session_id, provider_session_path, trajectory, target_cwd)
+        resume_open = _resume_open_spec(
+            runtime.provider.name,
+            new_session_id,
+            target_cwd,
+            provider_session_path,
+            runtime_env,
+            runtime.env,
+        )
+        self._copy_session_prefix(
+            original_store,
+            plan,
+            new_session_id,
+            provider_session_path,
+            trajectory,
+            target_cwd,
+            runtime,
+            resume_open,
+        )
         return ResumeReport(
             new_session_id=new_session_id,
             backup_dir=str(backup_root),
@@ -153,7 +210,8 @@ class ResumeOrchestrator:
             fs=fs_report,
             provider_session_path=str(provider_session_path) if provider_session_path is not None else None,
             target_cwd=str(target_cwd),
-            resume_command=_resume_command(provider.name, new_session_id, provider_session_path, plan.target_env),
+            env_state_dir=str(runtime.root),
+            resume_command=_resume_command(runtime.provider.name, new_session_id) if resume_open is not None else None,
         )
 
     def _copy_session_prefix(
@@ -164,10 +222,14 @@ class ResumeOrchestrator:
         provider_session_path: Path | None,
         trajectory: TrajectoryPrefix,
         cwd: Path,
+        runtime: ResumeRuntime,
+        resume_open: ResumeOpenSpec | None,
     ) -> None:
         target_dir = session_dir(new_session_id, self.home)
         target_store = CheckpointStore(target_dir)
-        _write_resumed_metadata(store, target_store, plan, new_session_id, provider_session_path, cwd)
+        _write_resumed_metadata(store, target_store, plan, new_session_id, provider_session_path, cwd, runtime)
+        if resume_open is not None:
+            _write_resume_open_spec(target_store, resume_open, runtime)
         if store.blobs_dir.exists():
             shutil.copytree(store.blobs_dir, target_store.blobs_dir, dirs_exist_ok=True)
         # P4-3/P6-2: realign spans to the REWRITTEN provider file so resumed
@@ -356,6 +418,240 @@ def _prepare_resume_cwd(current_cwd: Path | None, target_cwd: Path | None) -> Pa
 
     shutil.copytree(current_cwd, target_cwd, dirs_exist_ok=True, ignore=_ignore_special_files)
     return target_cwd
+
+
+def _prepare_resume_runtime(
+    source_provider: ProviderLayout,
+    home: Path,
+    new_session_id: str,
+    target_env: object,
+) -> ResumeRuntime:
+    root = home / "env-state" / new_session_id
+    runtime_home = root / source_provider.name
+    path_map = _runtime_path_map(source_provider, root, runtime_home)
+    runtime_provider = _provider_layout_with_path_map(source_provider, path_map)
+    runtime_provider.home.mkdir(parents=True, exist_ok=True)
+    _copy_runtime_seed_files(source_provider, runtime_provider, path_map)
+    _link_runtime_secret_files(source_provider.name, source_provider.home, runtime_provider.home)
+    env = _runtime_process_env(source_provider.name, runtime_provider.home, root, target_env, path_map)
+    return ResumeRuntime(root=root, provider=runtime_provider, env=env, path_map=path_map)
+
+
+def _runtime_path_map(source_provider: ProviderLayout, root: Path, runtime_home: Path) -> dict[str, str]:
+    path_map = {str(source_provider.home): str(runtime_home)}
+    external_root = root / "external"
+    for path in _provider_layout_paths(source_provider):
+        if path is None or not path.is_absolute():
+            continue
+        if _mapped_path(path, path_map) != path:
+            continue
+        path_map[str(path.parent)] = str(external_root / _mirror_path(path.parent))
+    return dict(sorted(path_map.items(), key=lambda item: len(item[0]), reverse=True))
+
+
+def _provider_layout_paths(provider: ProviderLayout) -> list[Path | None]:
+    paths: list[Path | None] = [
+        provider.home,
+        provider.memory_dir,
+        provider.mcp_config,
+        *provider.mcp_config_files,
+        *provider.settings_files,
+        *provider.skills_dirs.values(),
+    ]
+    for item in provider.project_files:
+        path = Path(item)
+        if path.is_absolute():
+            paths.append(path)
+    return paths
+
+
+def _provider_layout_with_path_map(provider: ProviderLayout, path_map: dict[str, str]) -> ProviderLayout:
+    return replace(
+        provider,
+        home=_mapped_path(provider.home, path_map),
+        memory_dir=_mapped_optional_path(provider.memory_dir, path_map),
+        mcp_config=_mapped_optional_path(provider.mcp_config, path_map),
+        mcp_config_files=[_mapped_path(path, path_map) for path in provider.mcp_config_files],
+        settings_files=[_mapped_path(path, path_map) for path in provider.settings_files],
+        skills_dirs={name: _mapped_path(path, path_map) for name, path in provider.skills_dirs.items()},
+        project_files=[_mapped_project_file(item, path_map) for item in provider.project_files],
+    )
+
+
+def _mapped_optional_path(path: Path | None, path_map: dict[str, str]) -> Path | None:
+    return _mapped_path(path, path_map) if path is not None else None
+
+
+def _mapped_project_file(value: str, path_map: dict[str, str]) -> str:
+    path = Path(value)
+    return str(_mapped_path(path, path_map)) if path.is_absolute() else value
+
+
+def _mapped_path(path: Path, path_map: dict[str, str]) -> Path:
+    if not path.is_absolute():
+        return path
+    text = str(path)
+    for source, dest in path_map.items():
+        if text == source:
+            return Path(dest)
+        if text.startswith(source + os.sep):
+            return Path(dest) / text[len(source) + 1 :]
+    return path
+
+
+def _environment_for_runtime(env: object, path_map: dict[str, str], target_cwd: Path) -> object:
+    extra = dict(getattr(env, "extra", {}) or {})
+    source_cwd = _string_value(extra.get("cwd"))
+    runtime_map = dict(path_map)
+    if source_cwd:
+        runtime_map[str(Path(source_cwd).expanduser())] = str(target_cwd)
+        runtime_map = dict(sorted(runtime_map.items(), key=lambda item: len(item[0]), reverse=True))
+
+    settings = _rewrite_path_keyed_map(getattr(env, "settings", {}) or {}, runtime_map)
+    project_context = _rewrite_path_keyed_map(getattr(env, "project_context", {}) or {}, runtime_map)
+    provider_home = extra.get("provider_home")
+    if provider_home:
+        extra["provider_home"] = str(_mapped_path(Path(str(provider_home)), path_map))
+    else:
+        extra["provider_home"] = provider_home
+    extra["cwd"] = str(target_cwd)
+
+    runtime_env = extra.get("opencode_runtime_env")
+    if isinstance(runtime_env, dict):
+        extra["opencode_runtime_env"] = _rewrite_opencode_runtime_env(runtime_env, runtime_map)
+
+    config_roots = extra.get("opencode_config_skill_roots")
+    if isinstance(config_roots, list):
+        extra["opencode_config_skill_roots"] = [
+            str(_mapped_path(Path(root).expanduser(), runtime_map)) if isinstance(root, str) else root
+            for root in config_roots
+        ]
+
+    return replace(env, settings=settings, project_context=project_context, extra=extra)
+
+
+def _rewrite_path_keyed_map(values: dict[str, str], path_map: dict[str, str]) -> dict[str, str]:
+    rewritten: dict[str, str] = {}
+    for key, value in values.items():
+        path = Path(key)
+        new_key = str(_mapped_path(path.expanduser(), path_map)) if path.is_absolute() else key
+        rewritten[new_key] = value
+    return rewritten
+
+
+def _rewrite_opencode_runtime_env(values: dict[object, object], path_map: dict[str, str]) -> dict[str, str]:
+    path_keys = {"OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "OPENCODE_TUI_CONFIG", "OPENCODE_DATA_DIR"}
+    rewritten: dict[str, str] = {}
+    for key, value in values.items():
+        if not isinstance(key, str) or not _safe_env_name(key) or key == "OPENCODE_CONFIG_CONTENT":
+            continue
+        text = str(value)
+        if key in path_keys:
+            path = Path(text).expanduser()
+            if path.is_absolute():
+                text = str(_mapped_path(path, path_map))
+        rewritten[key] = text
+    return rewritten
+
+
+def _runtime_process_env(
+    provider_name: str,
+    runtime_home: Path,
+    root: Path,
+    target_env: object,
+    path_map: dict[str, str],
+) -> dict[str, str]:
+    env: dict[str, str] = {}
+    if provider_name == "codex":
+        env["CODEX_HOME"] = str(runtime_home)
+    elif provider_name == "claude":
+        env["CLAUDE_CONFIG_DIR"] = str(runtime_home)
+        env["CLAUDE_HOME"] = str(runtime_home)
+    elif provider_name == "opencode":
+        env["OPENCODE_CONFIG_DIR"] = str(runtime_home)
+        env["OPENCODE_DATA_DIR"] = str(root / "opencode-data")
+        for key, value in _opencode_runtime_env(target_env).items():
+            if key in {"OPENCODE_CONFIG_CONTENT", "OPENCODE_CONFIG_DIR", "OPENCODE_DATA_DIR"}:
+                continue
+            if key in {"OPENCODE_CONFIG", "OPENCODE_TUI_CONFIG"}:
+                path = Path(value).expanduser()
+                if path.is_absolute():
+                    value = str(_mapped_path(path, path_map))
+            env[key] = value
+    return env
+
+
+def _materialize_runtime_config(provider_name: str, runtime_home: Path, target_env: object) -> None:
+    if provider_name != "opencode":
+        return
+    content = _opencode_config_content(target_env, keep_redacted=True)
+    if not content:
+        return
+    target = runtime_home / "opencode.json"
+    wanted = json.loads(content)
+    current = _load_json_value(target)
+    if current is not None:
+        wanted = _preserve_redacted_config_values(current, wanted)
+    cleaned = _without_redacted_values(wanted)
+    wanted = {} if cleaned is _REDACTED_CONFIG_VALUE else cleaned
+    runtime_home.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(wanted, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _copy_runtime_seed_files(
+    source_provider: ProviderLayout,
+    runtime_provider: ProviderLayout,
+    path_map: dict[str, str],
+) -> None:
+    source_paths = [
+        source_provider.mcp_config,
+        *source_provider.mcp_config_files,
+        *source_provider.settings_files,
+    ]
+    for source in source_paths:
+        if source is None or not source.exists() or not source.is_file():
+            continue
+        dest = _mapped_path(source, path_map)
+        if dest == source or dest.exists():
+            continue
+        _copy_file(source, dest)
+    # Keep this reference used by callers/tests that inspect the runtime layout.
+    runtime_provider.home.mkdir(parents=True, exist_ok=True)
+
+
+def _copy_file(source: Path, dest: Path) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, dest)
+
+
+def _link_runtime_secret_files(provider_name: str, source_home: Path, runtime_home: Path) -> None:
+    pairs: list[tuple[Path, Path]] = [
+        (source_home / "auth.json", runtime_home / "auth.json"),
+        (source_home / "credentials.json", runtime_home / "credentials.json"),
+        (source_home / "oauth.json", runtime_home / "oauth.json"),
+        (source_home / ".env", runtime_home / ".env"),
+    ]
+    if provider_name == "claude":
+        pairs.append((source_home.parent / ".claude.json", runtime_home.parent / ".claude.json"))
+    for source, dest in pairs:
+        if source.exists() and source.is_file() and not dest.exists():
+            _link_or_copy_file(source, dest)
+
+
+def _link_or_copy_file(source: Path, dest: Path) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        dest.symlink_to(source)
+    except OSError:
+        shutil.copy2(source, dest)
+
+
+def _mirror_path(path: Path) -> Path:
+    return Path(*path.parts[1:]) if path.is_absolute() else path
+
+
+def _string_value(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
 
 
 def _trajectory_resume_offset(plan: ResumePlan) -> int:
@@ -818,6 +1114,7 @@ def _write_resumed_metadata(
     new_session_id: str,
     provider_session_path: Path | None,
     cwd: Path,
+    runtime: ResumeRuntime,
 ) -> None:
     metadata: dict[str, object] = {}
     metadata_path = source_store.session_dir / "metadata.json"
@@ -837,6 +1134,7 @@ def _write_resumed_metadata(
     else:
         metadata.pop("provider_session_path", None)
     metadata["cwd"] = str(cwd)
+    metadata["resume_env_state_dir"] = str(runtime.root)
     # FK1: the source metadata is inherited wholesale, so a resume kept the SOURCE's
     # `source` (startup/fork), its stale `start_ts`, and — for a codex source — its
     # `forked_*` lineage fields. That made `list` (cli.py reads metadata["source"])
@@ -864,6 +1162,128 @@ def _write_resumed_metadata(
         target_store.session_dir / "metadata.json",
         canonical_json(metadata) + "\n",
     )
+
+
+def _write_resume_open_spec(target_store: CheckpointStore, spec: ResumeOpenSpec, runtime: ResumeRuntime) -> None:
+    data = {
+        "provider": spec.provider,
+        "session_id": spec.session_id,
+        "cwd": str(spec.cwd),
+        "env_state_dir": str(runtime.root),
+        "provider_home": str(runtime.provider.home),
+        "env": spec.env,
+        "preflight": spec.preflight,
+        "command": spec.command,
+    }
+    target_store._atomic_write(target_store.session_dir / "resume-open.json", canonical_json(data) + "\n")
+
+
+def load_resume_open_spec(session_id: str, plugin_home: Path | None = None) -> ResumeOpenSpec:
+    path = session_dir(session_id, plugin_home) / "resume-open.json"
+    if not path.exists():
+        raise RuntimeError(
+            f"No resume-open state found for session {session_id}; "
+            "create it with `checkpoint resume <session> <turn>`."
+        )
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Invalid resume-open state for session {session_id}: {path}") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError(f"Invalid resume-open state for session {session_id}: {path}")
+    provider = _required_string(data, "provider", path)
+    spec_session_id = _required_string(data, "session_id", path)
+    cwd = Path(_required_string(data, "cwd", path)).expanduser()
+    command = _required_string_list(data.get("command"), "command", path)
+    preflight = [_required_string_list(item, "preflight", path) for item in _list_value(data.get("preflight"))]
+    env = _string_dict(data.get("env"))
+    return ResumeOpenSpec(
+        provider=provider,
+        session_id=spec_session_id,
+        cwd=cwd,
+        env=env,
+        preflight=preflight,
+        command=command,
+    )
+
+
+def execute_resume_open(
+    session_id: str,
+    plugin_home: Path | None = None,
+    *,
+    exec_provider: bool = True,
+    runner: Callable[..., object] | None = None,
+    execvpe: Callable[[str, list[str], dict[str, str]], object] | None = None,
+) -> int:
+    spec = load_resume_open_spec(session_id, plugin_home)
+    env = os.environ.copy()
+    env.update(spec.env)
+    cwd = spec.cwd.expanduser()
+    if not cwd.is_dir():
+        raise RuntimeError(f"Resume workspace is missing: {cwd}")
+    run = runner or subprocess.run
+    for command in spec.preflight:
+        try:
+            run(command, cwd=str(cwd), env=env, check=True)
+        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+            raise RuntimeError(f"Resume preflight failed: {_shell_join(command)}") from exc
+    if not exec_provider:
+        return 0
+    try:
+        os.chdir(cwd)
+        (execvpe or os.execvpe)(spec.command[0], spec.command, env)
+    except OSError as exc:
+        raise RuntimeError(f"Failed to open resumed session: {_shell_join(spec.command)}") from exc
+    return 0
+
+
+def _resume_open_spec(
+    provider_name: str,
+    new_session_id: str,
+    cwd: Path,
+    provider_session_path: Path | None,
+    target_env: object,
+    env: dict[str, str],
+) -> ResumeOpenSpec | None:
+    if provider_session_path is None:
+        return None
+    if provider_name == "claude":
+        command = ["claude", *_provider_runtime_args("claude", target_env), "--resume", new_session_id]
+        return ResumeOpenSpec(provider_name, new_session_id, cwd, dict(env), [], command)
+    if provider_name == "codex":
+        command = ["codex", "resume", *_provider_runtime_args("codex", target_env), new_session_id]
+        return ResumeOpenSpec(provider_name, new_session_id, cwd, dict(env), [], command)
+    if provider_name == "opencode":
+        import_path = str(provider_session_path)
+        preflight = [
+            ["opencode", "import", import_path],
+            [sys.executable, "-m", "checkpoint_plugin.cli", "opencode-restore-metadata", import_path, new_session_id],
+        ]
+        return ResumeOpenSpec(provider_name, new_session_id, cwd, dict(env), preflight, ["opencode", "--session", new_session_id])
+    return None
+
+
+def _required_string(data: dict[str, object], key: str, path: Path) -> str:
+    value = data.get(key)
+    if not isinstance(value, str) or not value:
+        raise RuntimeError(f"Invalid resume-open state field {key!r}: {path}")
+    return value
+
+
+def _required_string_list(value: object, key: str, path: Path) -> list[str]:
+    if not isinstance(value, list) or not value or not all(isinstance(item, str) and item for item in value):
+        raise RuntimeError(f"Invalid resume-open state field {key!r}: {path}")
+    return list(value)
+
+
+def _list_value(value: object) -> list[object]:
+    return value if isinstance(value, list) else []
+
+
+def _string_dict(value: object) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    return {key: str(item) for key, item in value.items() if isinstance(key, str) and _safe_env_name(key)}
 
 
 def _session_env_from_environment(env: object) -> dict[str, str]:
@@ -2142,26 +2562,8 @@ def _resume_command(
     provider_session_path: Path | None = None,
     target_env: object | None = None,
 ) -> str | None:
-    if provider_name == "claude":
-        args = ["claude", *_provider_runtime_args("claude", target_env), "--resume", new_session_id]
-        return _shell_join(args)
-    if provider_name == "codex":
-        args = ["codex", "resume", *_provider_runtime_args("codex", target_env), new_session_id]
-        return _shell_join(args)
-    if provider_name == "opencode":
-        if provider_session_path is None:
-            return None
-        import_path = str(provider_session_path)
-        prefix = _opencode_env_prefix(target_env)
-        restore_cmd = (
-            f"{shlex.quote(sys.executable)} -m checkpoint_plugin.cli "
-            f"opencode-restore-metadata {shlex.quote(import_path)} {shlex.quote(new_session_id)}"
-        )
-        return (
-            f"{prefix}opencode import {shlex.quote(import_path)} && "
-            f"{prefix}{restore_cmd} && "
-            f"{prefix}opencode --session {shlex.quote(new_session_id)}"
-        )
+    if provider_name in {"claude", "codex", "opencode"}:
+        return _shell_join(["checkpoint", "resume-open", new_session_id])
     return None
 
 
@@ -2307,14 +2709,6 @@ def _opencode_json_text(value: object) -> str:
         return "{}"
 
 
-def _opencode_env_prefix(target_env: object | None) -> str:
-    env = _opencode_runtime_env(target_env)
-    config_content = _opencode_config_content(target_env)
-    if config_content:
-        env["OPENCODE_CONFIG_CONTENT"] = config_content
-    return "".join(f"{key}={shlex.quote(value)} " for key, value in sorted(env.items()))
-
-
 def _opencode_runtime_env(target_env: object | None) -> dict[str, str]:
     extra = getattr(target_env, "extra", None)
     if not isinstance(extra, dict):
@@ -2333,8 +2727,8 @@ def _opencode_runtime_env(target_env: object | None) -> dict[str, str]:
     return result
 
 
-def _opencode_config_content(target_env: object | None) -> str:
-    base = _opencode_config_content_base(target_env)
+def _opencode_config_content(target_env: object | None, *, keep_redacted: bool = False) -> str:
+    base = _opencode_config_content_base(target_env, keep_redacted=keep_redacted)
     mcp = _opencode_mcp_overlay(target_env)
     if not base and not mcp:
         return ""
@@ -2345,9 +2739,10 @@ def _opencode_config_content(target_env: object | None) -> str:
 
 
 _REDACTED_CONFIG_VALUE = object()
+_MISSING_CONFIG_VALUE = object()
 
 
-def _opencode_config_content_base(target_env: object | None) -> object:
+def _opencode_config_content_base(target_env: object | None, *, keep_redacted: bool = False) -> object:
     extra = getattr(target_env, "extra", None)
     if not isinstance(extra, dict):
         return {}
@@ -2355,9 +2750,10 @@ def _opencode_config_content_base(target_env: object | None) -> object:
     if not isinstance(raw, str) or not raw:
         return {}
     try:
-        return _without_redacted_values(json.loads(raw))
+        data = json.loads(raw)
     except json.JSONDecodeError:
         return {}
+    return data if keep_redacted else _without_redacted_values(data)
 
 
 def _without_redacted_values(value: object) -> object:
@@ -2373,6 +2769,36 @@ def _without_redacted_values(value: object) -> object:
     if isinstance(value, list):
         return [item for item in (_without_redacted_values(item) for item in value) if item is not _REDACTED_CONFIG_VALUE]
     return value
+
+
+def _load_json_value(path: Path) -> object | None:
+    if not path.exists() or not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _preserve_redacted_config_values(current: object, wanted: object) -> object:
+    if wanted == "***redacted***":
+        return wanted if current is _MISSING_CONFIG_VALUE else current
+    if isinstance(wanted, dict):
+        current_dict = current if isinstance(current, dict) else {}
+        return {
+            str(key): _preserve_redacted_config_values(current_dict.get(str(key), _MISSING_CONFIG_VALUE), value)
+            for key, value in wanted.items()
+        }
+    if isinstance(wanted, list):
+        current_list = current if isinstance(current, list) else []
+        return [
+            _preserve_redacted_config_values(
+                current_list[index] if index < len(current_list) else _MISSING_CONFIG_VALUE,
+                value,
+            )
+            for index, value in enumerate(wanted)
+        ]
+    return wanted
 
 
 def _opencode_mcp_overlay(target_env: object | None) -> dict[str, dict[str, bool]]:
@@ -2415,6 +2841,8 @@ def _carry_provider_session_state(
     old_session_id: str,
     new_session_id: str,
     cwd: Path,
+    *,
+    dest_provider_home: Path | None = None,
 ) -> None:
     """Reuse the original session's append-only state under the new session id.
 
@@ -2424,16 +2852,22 @@ def _carry_provider_session_state(
     """
     if provider_name != "claude":
         return
+    target_home = dest_provider_home or provider_home
     _hardlink_tree(
         provider_home / "file-history" / old_session_id,
-        provider_home / "file-history" / new_session_id,
+        target_home / "file-history" / new_session_id,
     )
-    _hardlink_todos(provider_home / "todos", old_session_id, new_session_id)
-    _carry_claude_subagents(provider_home, old_session_id, new_session_id, cwd)
+    _hardlink_todos_to(provider_home / "todos", target_home / "todos", old_session_id, new_session_id)
+    _carry_claude_subagents(provider_home, old_session_id, new_session_id, cwd, dest_provider_home=target_home)
 
 
 def _carry_claude_subagents(
-    provider_home: Path, old_session_id: str, new_session_id: str, cwd: Path
+    provider_home: Path,
+    old_session_id: str,
+    new_session_id: str,
+    cwd: Path,
+    *,
+    dest_provider_home: Path | None = None,
 ) -> None:
     """Carry a session's subagent transcripts to the resumed session (B4).
 
@@ -2451,7 +2885,8 @@ def _carry_claude_subagents(
     projects_root = provider_home / "projects"
     if not projects_root.exists() or not projects_root.is_dir():
         return
-    dst_project_dir = projects_root / _claude_project_dir_name(cwd)
+    dst_projects_root = (dest_provider_home or provider_home) / "projects"
+    dst_project_dir = dst_projects_root / _claude_project_dir_name(cwd)
     for project_dir in projects_root.iterdir():
         if not project_dir.is_dir():
             continue
@@ -2525,13 +2960,14 @@ def _hardlink_tree(src: Path, dst: Path) -> None:
             shutil.copy2(entry, target)
 
 
-def _hardlink_todos(todos_dir: Path, old_session_id: str, new_session_id: str) -> None:
-    if not todos_dir.exists() or not todos_dir.is_dir():
+def _hardlink_todos_to(src_todos_dir: Path, dst_todos_dir: Path, old_session_id: str, new_session_id: str) -> None:
+    if not src_todos_dir.exists() or not src_todos_dir.is_dir():
         return
-    for entry in todos_dir.glob(f"{old_session_id}-*"):
+    dst_todos_dir.mkdir(parents=True, exist_ok=True)
+    for entry in src_todos_dir.glob(f"{old_session_id}-*"):
         if not entry.is_file():
             continue
-        target = todos_dir / entry.name.replace(old_session_id, new_session_id, 1)
+        target = dst_todos_dir / entry.name.replace(old_session_id, new_session_id, 1)
         if target.exists():
             continue
         try:

@@ -15,7 +15,7 @@ from .env.collector import environment_from_blob
 from .fs.snapshot import filesystem_from_blob
 from .integrations.hook_installer import install_hooks, uninstall_hooks
 from .paths import config_path, load_config, sessions_dir, write_config
-from .resume import ResumeOptions, ResumeOrchestrator, restore_opencode_metadata
+from .resume import ResumeOptions, ResumeOrchestrator, execute_resume_open, restore_opencode_metadata
 from .retention import clean_empty_sessions, clean_keep_last
 from .store import CheckpointStore
 from .types import ResumePlan
@@ -67,6 +67,9 @@ def main(argv: list[str] | None = None) -> int:
     resume.add_argument("turn", type=int)
     resume.add_argument("--yes", action="store_true")
     resume.add_argument("--target")
+
+    resume_open = sub.add_parser("resume-open", help="Open a resumed provider session")
+    resume_open.add_argument("session")
 
     clean = sub.add_parser("clean", help="Apply retention or remove empty sessions")
     clean.add_argument("--keep-last", type=int, help="Keep only last N turns per session")
@@ -147,12 +150,17 @@ def _dispatch(args: argparse.Namespace) -> int:
         # report carries this but it was previously never shown to the user.
         if report.provider_session_path is not None:
             print(f"Provider session: {report.provider_session_path}")
+        if report.env_state_dir is not None:
+            print(f"Env state: {report.env_state_dir}")
         if report.resume_command is not None:
-            if report.target_cwd is not None:
-                print(f"Resume with: {_colorize(f'cd {report.target_cwd} && {report.resume_command}', 'bold green')}")
-            else:
-                print(f"Resume with: {_colorize(report.resume_command, 'bold green')}")
+            print(f"Resume with: {_colorize(report.resume_command, 'bold green')}")
         return 0
+    if args.command == "resume-open":
+        try:
+            return execute_resume_open(args.session)
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
     if args.command == "clean":
         if args.empty:
             result = clean_empty_sessions(dry_run=args.dry_run)

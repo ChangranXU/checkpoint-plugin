@@ -423,8 +423,8 @@ def test_opencode_resume_restores_session_messages_and_todos(tmp_path, monkeypat
     assert todo_row == ("ses_resumed", "Keep todo", "pending", "medium", 0, 211, 212)
 
 
-def test_opencode_resume_command_carries_runtime_mcp_overlay(tmp_path):
-    from checkpoint_plugin.resume import _resume_command
+def test_opencode_runtime_config_carries_mcp_overlay_without_secrets(tmp_path):
+    from checkpoint_plugin.resume import _materialize_runtime_config, _runtime_process_env
     from checkpoint_plugin.types import EnvironmentState
 
     target_env = EnvironmentState(
@@ -444,28 +444,68 @@ def test_opencode_resume_command_carries_runtime_mcp_overlay(tmp_path):
             },
         },
     )
-    import_path = tmp_path / "imports" / "ses_resumed.json"
+    root = tmp_path / "env-state" / "ses_resumed"
+    runtime_home = root / "opencode"
+    runtime_home.mkdir(parents=True)
+    (runtime_home / "opencode.json").write_text(
+        json.dumps(
+            {
+                "mcp": {"context7": {"enabled": True, "type": "local"}},
+                "model": "current/model",
+                "provider": {"custom": {"options": {"apiKey": "secret-value"}}},
+            }
+        ),
+        encoding="utf-8",
+    )
 
-    command = _resume_command("opencode", "ses_resumed", import_path, target_env)
+    _materialize_runtime_config("opencode", runtime_home, target_env)
+    runtime_env = _runtime_process_env("opencode", runtime_home, root, target_env, {})
 
-    assert command is not None
-    assert "OPENCODE_CONFIG_CONTENT=" in command
-    assert '"context7":{"enabled":false' in command
-    assert '"filesystem":{"enabled":true}' in command
-    assert '"model":"opencode/model"' in command
-    assert "apiKey" not in command
-    assert "***redacted***" not in command
-    assert "failed_server" not in command
-    assert "OPENCODE_DISABLE_PROJECT_CONFIG=1" in command
-    assert "OPENCODE_PERMISSION=" in command
-    assert f"opencode import {import_path}" in command
-    assert "opencode --session ses_resumed" in command
+    config = json.loads((runtime_home / "opencode.json").read_text(encoding="utf-8"))
+    assert config["mcp"]["context7"]["enabled"] is False
+    assert config["mcp"]["context7"]["type"] == "local"
+    assert config["mcp"]["filesystem"] == {"enabled": True}
+    assert config["model"] == "opencode/model"
+    assert config["provider"]["custom"]["options"]["apiKey"] == "secret-value"
+    assert "***redacted***" not in json.dumps(config)
+    assert "failed_server" not in config["mcp"]
+    assert runtime_env["OPENCODE_CONFIG_DIR"] == str(runtime_home)
+    assert runtime_env["OPENCODE_DATA_DIR"] == str(root / "opencode-data")
+    assert runtime_env["OPENCODE_DISABLE_PROJECT_CONFIG"] == "1"
+    assert "OPENCODE_PERMISSION" in runtime_env
+    assert "OPENCODE_CONFIG_CONTENT" not in runtime_env
 
 
-def test_opencode_resume_command_requires_materialized_import_file():
+def test_opencode_resume_command_is_simple_resume_open():
     from checkpoint_plugin.resume import _resume_command
 
-    assert _resume_command("opencode", "ses_resumed", None) is None
+    assert _resume_command("opencode", "ses_resumed", None) == "checkpoint resume-open ses_resumed"
+
+
+def test_opencode_resume_open_spec_imports_metadata_then_opens(tmp_path):
+    import sys
+
+    from checkpoint_plugin.resume import _resume_open_spec
+    from checkpoint_plugin.types import EnvironmentState
+
+    import_path = tmp_path / "imports" / "ses_resumed.json"
+    runtime_env = {"OPENCODE_CONFIG_DIR": str(tmp_path / "env-state" / "opencode")}
+    spec = _resume_open_spec(
+        "opencode",
+        "ses_resumed",
+        tmp_path,
+        import_path,
+        EnvironmentState(provider="opencode"),
+        runtime_env,
+    )
+
+    assert spec is not None
+    assert spec.env == runtime_env
+    assert spec.preflight == [
+        ["opencode", "import", str(import_path)],
+        [sys.executable, "-m", "checkpoint_plugin.cli", "opencode-restore-metadata", str(import_path), "ses_resumed"],
+    ]
+    assert spec.command == ["opencode", "--session", "ses_resumed"]
 
 
 def test_opencode_resume_of_resume_uses_checkpoint_jsonl(tmp_path, monkeypatch):

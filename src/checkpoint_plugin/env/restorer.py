@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from pathlib import Path
 
@@ -26,6 +27,7 @@ def restore_environment(
     backup_dir: Path,
     *,
     ignore_plugin_hooks: bool = False,
+    preserve_redacted_values: bool = False,
 ) -> RestoreReport:
     changed: list[str] = []
     backed_up: list[str] = []
@@ -41,7 +43,16 @@ def restore_environment(
         )
     )
     if provider.mcp_config is not None and provider.name != "opencode":
-        changed.extend(_restore_optional_file(target.mcp_config, provider.mcp_config, store, backup_dir / "mcp", backed_up))
+        changed.extend(
+            _restore_optional_file(
+                target.mcp_config,
+                provider.mcp_config,
+                store,
+                backup_dir / "mcp",
+                backed_up,
+                preserve_redacted_values=preserve_redacted_values,
+            )
+        )
     changed.extend(
         _restore_settings(
             target.settings,
@@ -51,6 +62,7 @@ def restore_environment(
             backed_up,
             provider_name=provider.name,
             ignore_plugin_hooks=ignore_plugin_hooks,
+            preserve_redacted_values=preserve_redacted_values,
         )
     )
     changed.extend(
@@ -61,6 +73,7 @@ def restore_environment(
             backed_up,
             provider_name=provider.name,
             ignore_plugin_hooks=ignore_plugin_hooks,
+            preserve_redacted_values=preserve_redacted_values,
         )
     )
 
@@ -174,6 +187,7 @@ def _restore_settings(
     *,
     provider_name: str,
     ignore_plugin_hooks: bool,
+    preserve_redacted_values: bool,
 ) -> list[str]:
     by_name = _settings_restore_paths(settings_files)
     by_basename = _unique_basenames(settings_files)
@@ -200,6 +214,7 @@ def _restore_settings(
                 backup_dir / _setting_backup_rel(path),
                 backed_up,
                 preserve_plugin_hooks=preserve_plugin_hooks,
+                preserve_redacted_values=preserve_redacted_values,
             )
             if restored is not None:
                 changed.append(str(restored))
@@ -240,6 +255,8 @@ def _restore_optional_file(
     store: CheckpointStore,
     backup_dir: Path,
     backed_up: list[str],
+    *,
+    preserve_redacted_values: bool = False,
 ) -> list[str]:
     if sha is None:
         if path.exists():
@@ -247,7 +264,14 @@ def _restore_optional_file(
             path.unlink()
             return [str(path)]
         return []
-    restored = _restore_blob_to(sha, path, store, backup_dir, backed_up)
+    restored = _restore_blob_to(
+        sha,
+        path,
+        store,
+        backup_dir,
+        backed_up,
+        preserve_redacted_values=preserve_redacted_values,
+    )
     return [str(restored)] if restored is not None else []
 
 
@@ -259,6 +283,7 @@ def _restore_project_context(
     *,
     provider_name: str,
     ignore_plugin_hooks: bool,
+    preserve_redacted_values: bool,
 ) -> list[str]:
     changed: list[str] = []
     for key, sha in project_context.items():
@@ -273,6 +298,7 @@ def _restore_project_context(
             backup_dir / _mirror_path(path),
             backed_up,
             preserve_plugin_hooks=preserve_plugin_hooks,
+            preserve_redacted_values=preserve_redacted_values,
         )
         if restored is not None:
             changed.append(str(restored))
@@ -287,9 +313,12 @@ def _restore_blob_to(
     backed_up: list[str],
     *,
     preserve_plugin_hooks: bool = False,
+    preserve_redacted_values: bool = False,
 ) -> Path | None:
     wanted = store.load_blob(sha)
     current = path.read_bytes() if path.exists() and path.is_file() else None
+    if preserve_redacted_values:
+        wanted = _preserve_redacted_values(current, wanted)
     if preserve_plugin_hooks:
         wanted = merge_plugin_hooks(current or b"", wanted)
     if current == wanted:
@@ -329,3 +358,42 @@ def _backup(path: Path, backup_path: Path, backed_up: list[str]) -> None:
 
 def _mirror_path(path: Path) -> Path:
     return Path(*path.parts[1:]) if path.is_absolute() else path
+
+
+_REDACTED = "***redacted***"
+_ASSIGNMENT = re.compile(
+    r'(?P<prefix>(?P<q>["\']?)(?P<key>[\w.-]+)(?P=q)\s*[:=]\s*)'
+    r'(?P<val>"(?:[^"\\]|\\.)*"|\'[^\']*\')'
+)
+
+
+def _preserve_redacted_values(current: bytes | None, wanted: bytes) -> bytes:
+    if current is None or _REDACTED.encode("utf-8") not in wanted:
+        return wanted
+    try:
+        current_text = current.decode("utf-8")
+        wanted_text = wanted.decode("utf-8")
+    except UnicodeDecodeError:
+        return wanted
+    values = _assignment_values_by_key(current_text)
+
+    def replace(match: re.Match[str]) -> str:
+        raw = match.group("val")
+        if raw.strip("\"'") != _REDACTED:
+            return match.group(0)
+        candidates = values.get(match.group("key")) or []
+        if not candidates:
+            return match.group(0)
+        return match.group("prefix") + candidates.pop(0)
+
+    return _ASSIGNMENT.sub(replace, wanted_text).encode("utf-8")
+
+
+def _assignment_values_by_key(text: str) -> dict[str, list[str]]:
+    values: dict[str, list[str]] = {}
+    for match in _ASSIGNMENT.finditer(text):
+        raw = match.group("val")
+        if raw.strip("\"'") == _REDACTED:
+            continue
+        values.setdefault(match.group("key"), []).append(raw)
+    return values

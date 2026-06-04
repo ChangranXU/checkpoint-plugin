@@ -25,6 +25,8 @@ checkpoint
   - saves conversation trajectory + environment config + filesystem together, not just file diffs
 - **Resume into your agent** 
   - rebuilds a native provider session so you can continue the conversation from any prior turn
+- **Isolated resume environments**
+  - restored config does not overwrite your current Claude Code, Codex, or OpenCode settings
 - **Cross-provider** 
   - one checkpoint history works across Claude Code, Codex, and OpenCode
 - **Forks & subagents** 
@@ -57,7 +59,7 @@ Each turn, the plugin atomically captures:
 - **Filesystem** — all project files (respects `.gitignore`; excludes `.git`, `node_modules`, `.env`*, etc.)
 - **Trajectory** — the conversation transcript through that turn
 
-On restore, the plugin shows a summary diff (enter `d` for detailed diffs), creates backups, restores your files, and writes a native provider session you can reopen with the printed `codex resume` / `claude --resume` command.
+On restore, the plugin shows a summary diff (enter `d` for detailed diffs), creates backups, restores your files, and writes a native provider session plus an isolated environment state. Reopen it with the printed `checkpoint resume-open <new-session-id>` command.
 
 ## Common Commands
 
@@ -79,6 +81,9 @@ checkpoint diff <session-id> <turn>      # preview restore changes
 # Restore (shows diff + confirmation prompt)
 checkpoint resume <session-id> <turn>
 checkpoint resume <session-id> <turn> --yes  # skip confirmation
+
+# Open the newly restored provider session shown by resume
+checkpoint resume-open <new-session-id>
 
 # Cleanup
 checkpoint clean --empty                 # remove empty/incomplete sessions
@@ -108,6 +113,14 @@ d = view detailed environment and filesystem diffs
 ```
 
 On confirm, choose to restore in place or into a new folder copy. Copy mode leaves your current workspace untouched.
+
+Resume also prints:
+
+- `Provider session` — the native Claude Code, Codex, or OpenCode session artifact
+- `Env state` — the copied provider config/env directory under `~/.checkpoint-plugin/env-state/<new-session-id>/`
+- `Resume with` — a short opener command, for example `checkpoint resume-open ses_abc123`
+
+`resume-open` loads that env-state copy and then launches the provider, so restored model/MCP/config state does not overwrite your current provider home. Auth-like local files such as `auth.json`, `credentials.json`, `oauth.json`, `.env`, and Claude's sibling `.claude.json` are linked or copied into the env-state when present.
 
 ## Storage Layout
 

@@ -183,6 +183,7 @@ class ResumeReport:
     fs: RestoreReport
     provider_session_path: str | None = None
     target_cwd: str | None = None
+    env_state_dir: str | None = None
     resume_command: str | None = None
 
     @property

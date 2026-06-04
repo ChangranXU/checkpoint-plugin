@@ -282,11 +282,10 @@ def test_resume_materializes_codex_native_session(tmp_path, monkeypatch):
     report = ResumeOrchestrator(cwd=cwd).execute(ResumeOrchestrator(cwd=cwd).plan("s1", 0), lambda _text: True)
 
     assert report.provider_session_path is not None
-    assert (
-        report.resume_command
-        == f"codex resume --model gpt-target -c 'model_reasoning_effort=\"low\"' {report.new_session_id}"
-    )
-    provider_path = codex_home / "sessions"
+    assert report.env_state_dir is not None
+    assert report.resume_command == f"checkpoint resume-open {report.new_session_id}"
+    runtime_codex_home = Path(report.env_state_dir) / "codex"
+    provider_path = runtime_codex_home / "sessions"
     materialized = list(provider_path.glob("**/*.jsonl"))
     assert [path.as_posix() for path in materialized] == [report.provider_session_path]
     records = [json.loads(line) for line in materialized[0].read_text(encoding="utf-8").splitlines()]
@@ -316,8 +315,9 @@ def test_resume_materializes_codex_native_session(tmp_path, monkeypatch):
     # whatever the original transcript recorded.
     assert turn_context["payload"]["sandbox_policy"] == "workspace-write"
     # M5: the resumed codex session is registered in the picker index.
-    index_path = codex_home / "session_index.jsonl"
+    index_path = runtime_codex_home / "session_index.jsonl"
     assert index_path.exists()
+    assert not (codex_home / "session_index.jsonl").exists()
     index_ids = [
         json.loads(line)["id"]
         for line in index_path.read_text(encoding="utf-8").splitlines()
@@ -408,10 +408,7 @@ def test_codex_resume_uses_turn_context_effort_over_stale_config(tmp_path, monke
 
     report = orchestrator.execute(plan, lambda _text: True)
 
-    assert (
-        report.resume_command
-        == f"codex resume --model gpt-5.5 -c 'model_reasoning_effort=\"high\"' {report.new_session_id}"
-    )
+    assert report.resume_command == f"checkpoint resume-open {report.new_session_id}"
     records = [
         json.loads(line)
         for line in Path(report.provider_session_path).read_text(encoding="utf-8").splitlines()
@@ -569,7 +566,9 @@ def test_resume_materializes_claude_native_session(tmp_path, monkeypatch):
     report = ResumeOrchestrator(cwd=cwd).execute(ResumeOrchestrator(cwd=cwd).plan("s1", 0), lambda _text: True)
 
     assert report.provider_session_path is not None
-    materialized = claude_home / "projects" / str(cwd).replace("/", "-") / f"{report.new_session_id}.jsonl"
+    assert report.env_state_dir is not None
+    runtime_claude_home = Path(report.env_state_dir) / "claude"
+    materialized = runtime_claude_home / "projects" / str(cwd).replace("/", "-") / f"{report.new_session_id}.jsonl"
     assert str(materialized) == report.provider_session_path
     records = [json.loads(line) for line in materialized.read_text(encoding="utf-8").splitlines()]
     # F4: a claude resume is fork-shaped — the leading keyless permission-mode record
@@ -614,10 +613,14 @@ def test_resume_restores_environment_with_target_provider_layout(tmp_path, monke
     monkeypatch.setenv("CHECKPOINT_PROVIDER", "codex")
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
 
-    ResumeOrchestrator(cwd=cwd).execute(ResumeOrchestrator(cwd=cwd).plan("s1", 0), lambda _text: True)
+    report = ResumeOrchestrator(cwd=cwd).execute(ResumeOrchestrator(cwd=cwd).plan("s1", 0), lambda _text: True)
 
-    assert (claude_home / "skills" / "skill-a" / "SKILL.md").read_text(encoding="utf-8") == "claude skill"
+    assert report.env_state_dir is not None
+    runtime_claude_home = Path(report.env_state_dir) / "claude"
+    assert (claude_home / "skills" / "skill-a" / "SKILL.md").read_text(encoding="utf-8") == "changed"
     assert (claude_home / "settings.json").read_text(encoding="utf-8") == '{"target": true}'
+    assert (runtime_claude_home / "skills" / "skill-a" / "SKILL.md").read_text(encoding="utf-8") == "claude skill"
+    assert (runtime_claude_home / "settings.json").read_text(encoding="utf-8") == '{"target": true}'
     assert (codex_home / "skills" / "codex-only" / "SKILL.md").read_text(encoding="utf-8") == "do not delete"
 
 
@@ -633,14 +636,14 @@ def test_resume_reports_only_environment_files_that_changed(tmp_path, monkeypatc
     monkeypatch.setenv("CHECKPOINT_PROVIDER", "codex")
 
     codex_home.mkdir(parents=True)
-    (codex_home / "config.toml").write_text("model = 'old'\n", encoding="utf-8")
+    (codex_home / "config.toml").write_text("model = 'old'\napi_key = 'secret-value'\n", encoding="utf-8")
     (codex_home / "auth.json").write_text('{"token":"same"}\n', encoding="utf-8")
     (cwd / "README.md").write_text("v1\n", encoding="utf-8")
     coordinator = CheckpointCoordinator(session_id="s1", cwd=cwd)
     coordinator.on_session_start()
     coordinator.on_turn_end(TurnRecord(user_message="checkpoint"))
 
-    (codex_home / "config.toml").write_text("model = 'new'\n", encoding="utf-8")
+    (codex_home / "config.toml").write_text("model = 'new'\napi_key = 'secret-value'\n", encoding="utf-8")
     (cwd / "README.md").write_text("v2\n", encoding="utf-8")
 
     orchestrator = ResumeOrchestrator(cwd=cwd)
@@ -649,6 +652,14 @@ def test_resume_reports_only_environment_files_that_changed(tmp_path, monkeypatc
     assert sorted(Path(path).name for path in report.env.changed) == ["config.toml"]
     assert sorted(Path(path).name for path in report.fs.changed) == ["README.md"]
     assert len(report.changed_files) == 2
+    assert report.env_state_dir is not None
+    runtime_codex_home = Path(report.env_state_dir) / "codex"
+    runtime_config = (runtime_codex_home / "config.toml").read_text(encoding="utf-8")
+    assert "model = 'old'" in runtime_config
+    assert "api_key = 'secret-value'" in runtime_config
+    assert "***redacted***" not in runtime_config
+    assert (runtime_codex_home / "auth.json").read_text(encoding="utf-8") == '{"token":"same"}\n'
+    assert (codex_home / "config.toml").read_text(encoding="utf-8") == "model = 'new'\napi_key = 'secret-value'\n"
 
 
 def test_resume_plan_diffs_environment_with_target_provider_layout(tmp_path, monkeypatch):
@@ -739,8 +750,7 @@ def test_cli_resume_can_show_file_diff_then_restore(tmp_path, monkeypatch, capsy
 
 
 def test_cli_resume_prints_resume_command_hint(tmp_path, monkeypatch, capsys):
-    """P4-6: the CLI must surface the `claude --resume <id>` hint and the
-    materialized provider session path (previously built but never printed)."""
+    """P4-6: the CLI must surface the simple resume-open hint and env state."""
     plugin_home = tmp_path / "plugin"
     home = tmp_path / "home"
     cwd = tmp_path / "work"
@@ -768,8 +778,23 @@ def test_cli_resume_prints_resume_command_hint(tmp_path, monkeypatch, capsys):
     assert main(["resume", "s1", "0", "--yes"]) == 0
     out = capsys.readouterr().out
     assert "Resume with:" in out
-    assert "claude --resume" in out
+    assert "checkpoint resume-open" in out
+    assert "claude --resume" not in out
     assert "Provider session:" in out
+    assert "Env state:" in out
+
+
+def test_cli_resume_open_dispatches_to_descriptor_executor(monkeypatch):
+    calls = []
+
+    def fake_resume_open(session_id):
+        calls.append(session_id)
+        return 0
+
+    monkeypatch.setattr("checkpoint_plugin.cli.execute_resume_open", fake_resume_open)
+
+    assert main(["resume-open", "session-123"]) == 0
+    assert calls == ["session-123"]
 
 
 def test_cli_resume_can_show_file_diff_then_cancel(tmp_path, monkeypatch, capsys):
@@ -1063,9 +1088,11 @@ def test_resume_keeps_freshly_installed_plugin_hooks(tmp_path, monkeypatch):
     plan = orchestrator.plan("s1", 0)
     assert "Settings" not in plan.env_diff_text
 
-    orchestrator.execute(plan, lambda _text: True)
+    report = orchestrator.execute(plan, lambda _text: True)
 
-    after = (claude_home / "settings.json").read_text(encoding="utf-8")
+    assert report.env_state_dir is not None
+    runtime_claude_home = Path(report.env_state_dir) / "claude"
+    after = (runtime_claude_home / "settings.json").read_text(encoding="utf-8")
     parsed = json.loads(after)
     assert parsed["model"] == "sonnet"
     commands = [
@@ -1100,9 +1127,11 @@ def test_resume_does_not_reinstall_uninstalled_plugin_hooks(tmp_path, monkeypatc
     plan = orchestrator.plan("s1", 0)
     assert "Settings" not in plan.env_diff_text
 
-    orchestrator.execute(plan, lambda _text: True)
+    report = orchestrator.execute(plan, lambda _text: True)
 
-    after = json.loads((claude_home / "settings.json").read_text(encoding="utf-8"))
+    assert report.env_state_dir is not None
+    runtime_claude_home = Path(report.env_state_dir) / "claude"
+    after = json.loads((runtime_claude_home / "settings.json").read_text(encoding="utf-8"))
     assert after["model"] == "sonnet"
     assert after["hooks"] == {}
 
@@ -1135,9 +1164,11 @@ def test_resume_reverts_plugin_hooks_when_flag_disabled(tmp_path, monkeypatch):
     plan = orchestrator.plan("s1", 0)
     assert "Settings" in plan.env_diff_text
 
-    orchestrator.execute(plan, lambda _text: True)
+    report = orchestrator.execute(plan, lambda _text: True)
 
-    after = json.loads((claude_home / "settings.json").read_text(encoding="utf-8"))
+    assert report.env_state_dir is not None
+    runtime_claude_home = Path(report.env_state_dir) / "claude"
+    after = json.loads((runtime_claude_home / "settings.json").read_text(encoding="utf-8"))
     assert after["hooks"] == {}
 
 
@@ -1257,12 +1288,14 @@ def test_resume_hardlinks_file_history_and_todos(tmp_path, monkeypatch):
         ResumeOrchestrator(cwd=cwd).plan("s1", 0), lambda _text: True
     )
 
+    assert report.env_state_dir is not None
+    runtime_claude_home = Path(report.env_state_dir) / "claude"
     src_history = home / ".claude" / "file-history" / "s1" / "006a1ba@v1"
-    dst_history = home / ".claude" / "file-history" / report.new_session_id / "006a1ba@v1"
+    dst_history = runtime_claude_home / "file-history" / report.new_session_id / "006a1ba@v1"
     assert dst_history.exists()
     assert src_history.stat().st_ino == dst_history.stat().st_ino  # hardlink, not copy
 
-    dst_todo = home / ".claude" / "todos" / f"{report.new_session_id}-agent-x.json"
+    dst_todo = runtime_claude_home / "todos" / f"{report.new_session_id}-agent-x.json"
     src_todo = home / ".claude" / "todos" / "s1-agent-x.json"
     assert dst_todo.exists()
     assert src_todo.stat().st_ino == dst_todo.stat().st_ino
@@ -1284,7 +1317,12 @@ def test_resume_command_is_set_in_report(tmp_path, monkeypatch):
     report = ResumeOrchestrator(cwd=cwd).execute(
         ResumeOrchestrator(cwd=cwd).plan("s1", 0), lambda _text: True
     )
-    assert report.resume_command == f"claude --resume {report.new_session_id}"
+    assert report.resume_command == f"checkpoint resume-open {report.new_session_id}"
+    resume_open = json.loads(
+        (plugin_home / "sessions" / report.new_session_id / "resume-open.json").read_text(encoding="utf-8")
+    )
+    assert resume_open["env_state_dir"] == report.env_state_dir
+    assert resume_open["command"] == ["claude", "--resume", report.new_session_id]
 
 
 def test_resume_command_pins_claude_model_effort_and_permission():
@@ -1299,8 +1337,7 @@ def test_resume_command_pins_claude_model_effort_and_permission():
 
     assert (
         _resume_command("claude", "019e91aa-5d69-7180-8729-1a9a31c7e182", target_env=target_env)
-        == "claude --model 'Opus 4.8' --effort xhigh --permission-mode acceptEdits "
-        "--resume 019e91aa-5d69-7180-8729-1a9a31c7e182"
+        == "checkpoint resume-open 019e91aa-5d69-7180-8729-1a9a31c7e182"
     )
 
 
@@ -1311,8 +1348,7 @@ def test_resume_command_pins_codex_model_and_effort():
 
     assert (
         _resume_command("codex", "019e91aa-5d69-7180-8729-1a9a31c7e182", target_env=target_env)
-        == "codex resume --model gpt-5.5 -c 'model_reasoning_effort=\"xhigh\"' "
-        "019e91aa-5d69-7180-8729-1a9a31c7e182"
+        == "checkpoint resume-open 019e91aa-5d69-7180-8729-1a9a31c7e182"
     )
 
 
@@ -2052,7 +2088,9 @@ def test_parent_resume_rewrites_carried_subagent_sessionid(tmp_path, monkeypatch
 
     report = ResumeOrchestrator(cwd=cwd).execute(ResumeOrchestrator(cwd=cwd).plan("s1", 0), lambda _text: True)
 
-    carried = claude_home / "projects" / project / report.new_session_id / "subagents" / "agent-abc.jsonl"
+    assert report.env_state_dir is not None
+    runtime_claude_home = Path(report.env_state_dir) / "claude"
+    carried = runtime_claude_home / "projects" / project / report.new_session_id / "subagents" / "agent-abc.jsonl"
     assert carried.exists()
     out = [json.loads(line) for line in carried.read_text(encoding="utf-8").splitlines() if line.strip()]
     assert {r["sessionId"] for r in out} == {report.new_session_id}
