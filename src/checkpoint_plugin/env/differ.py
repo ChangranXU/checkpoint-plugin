@@ -33,6 +33,7 @@ class EnvDiff:
     mcp_servers: CategoryDiff
     skills: CategoryDiff
     skill_status: CategoryDiff
+    plugin_files: CategoryDiff
     plugin_status: CategoryDiff
     settings: CategoryDiff
     project_context: CategoryDiff
@@ -50,6 +51,7 @@ class EnvDiff:
                 self.mcp_servers.has_changes(),
                 self.skills.has_changes(),
                 self.skill_status.has_changes(),
+                self.plugin_files.has_changes(),
                 self.plugin_status.has_changes(),
                 self.settings.has_changes(),
                 self.project_context.has_changes(),
@@ -81,6 +83,7 @@ def diff_environments(
         mcp_servers=_diff_maps(current.mcp_servers, target.mcp_servers),
         skills=_diff_maps(current.skills, target.skills),
         skill_status=_diff_maps(current.skill_status, target.skill_status),
+        plugin_files=_diff_maps(current.plugin_files, target.plugin_files),
         plugin_status=_diff_maps(current.plugin_status, target.plugin_status),
         settings=_diff_maps(current.settings, target.settings, normalize=settings_normalize),
         project_context=_diff_maps(
@@ -109,6 +112,7 @@ def render_diff(diff: EnvDiff, current: EnvironmentState, target: EnvironmentSta
     _append_category(lines, "Memory", diff.memory)
     _append_category(lines, "Skills", diff.skills)
     _append_category(lines, "Skill status", diff.skill_status)
+    _append_category(lines, "Plugin files", diff.plugin_files)
     _append_category(lines, "Plugin status", diff.plugin_status)
     _append_category(lines, "Settings", diff.settings)
     _append_category(lines, "Project context", diff.project_context)

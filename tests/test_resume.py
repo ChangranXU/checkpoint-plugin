@@ -720,27 +720,68 @@ def test_resume_restores_codex_plugin_cache_skills(tmp_path, monkeypatch):
     home = tmp_path / "home"
     codex_home = home / ".codex"
     cwd = tmp_path / "work"
-    plugin_skill = (
+    plugin_root = (
         codex_home
         / "plugins"
         / "cache"
         / "openai-bundled"
         / "browser"
         / "26.1.0"
+    )
+    plugin_skill = (
+        plugin_root
         / "skills"
         / "control-browser"
         / "SKILL.md"
     )
+    plugin_script = plugin_root / "scripts" / "browser-client.mjs"
+    marketplace_root = codex_home / ".tmp" / "bundled-marketplaces" / "openai-bundled"
+    marketplace_plugin = marketplace_root / "plugins" / "browser"
+    implicit_marketplace_root = codex_home / ".tmp" / "plugins"
+    implicit_marketplace_manifest = implicit_marketplace_root / ".agents" / "plugins" / "marketplace.json"
+    implicit_marketplace_plugin = implicit_marketplace_root / "plugins" / "github" / ".codex-plugin" / "plugin.json"
     cwd.mkdir()
     plugin_skill.parent.mkdir(parents=True)
+    (plugin_root / ".codex-plugin").mkdir(parents=True)
+    plugin_script.parent.mkdir(parents=True)
+    (marketplace_plugin / ".codex-plugin").mkdir(parents=True)
+    implicit_marketplace_manifest.parent.mkdir(parents=True)
+    implicit_marketplace_plugin.parent.mkdir(parents=True)
     monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
     monkeypatch.setenv("TEST_HOME", str(home))
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
     monkeypatch.setenv("CHECKPOINT_PROVIDER", "codex")
 
     plugin_skill.write_text("browser skill", encoding="utf-8")
+    plugin_script.write_text("export const run = true;\n", encoding="utf-8")
+    (plugin_root / ".codex-plugin" / "plugin.json").write_text('{"name":"browser","version":"26.1.0"}', encoding="utf-8")
+    (marketplace_plugin / ".codex-plugin" / "plugin.json").write_text('{"name":"browser"}', encoding="utf-8")
+    implicit_marketplace_manifest.write_text(
+        """
+{
+  "name": "openai-curated",
+  "plugins": [
+    {
+      "name": "github",
+      "source": {"source": "local", "path": "./plugins/github"}
+    }
+  ]
+}
+""",
+        encoding="utf-8",
+    )
+    implicit_marketplace_plugin.write_text('{"name":"github"}', encoding="utf-8")
     (codex_home / "config.toml").parent.mkdir(parents=True, exist_ok=True)
-    (codex_home / "config.toml").write_text("[plugins]\n", encoding="utf-8")
+    (codex_home / "config.toml").write_text(
+        f"""
+[marketplaces.openai-bundled]
+source = "{marketplace_root}"
+
+[plugins."browser@openai-bundled"]
+enabled = true
+""",
+        encoding="utf-8",
+    )
     (cwd / "file.txt").write_text("v1", encoding="utf-8")
 
     coordinator = CheckpointCoordinator(session_id="s1", cwd=cwd)
@@ -766,6 +807,65 @@ def test_resume_restores_codex_plugin_cache_skills(tmp_path, monkeypatch):
         / "SKILL.md"
     )
     assert restored.read_text(encoding="utf-8") == "browser skill"
+    restored_script = (
+        Path(report.env_state_dir)
+        / "codex"
+        / "plugins"
+        / "cache"
+        / "openai-bundled"
+        / "browser"
+        / "26.1.0"
+        / "scripts"
+        / "browser-client.mjs"
+    )
+    assert restored_script.read_text(encoding="utf-8") == "export const run = true;\n"
+    restored_manifest = (
+        Path(report.env_state_dir)
+        / "codex"
+        / "plugins"
+        / "cache"
+        / "openai-bundled"
+        / "browser"
+        / "26.1.0"
+        / ".codex-plugin"
+        / "plugin.json"
+    )
+    assert restored_manifest.read_text(encoding="utf-8") == '{"name":"browser","version":"26.1.0"}'
+    runtime_config = (Path(report.env_state_dir) / "codex" / "config.toml").read_text(encoding="utf-8")
+    assert str(marketplace_root) not in runtime_config
+    restored_marketplace_manifest = (
+        Path(report.env_state_dir)
+        / "codex"
+        / ".tmp"
+        / "bundled-marketplaces"
+        / "openai-bundled"
+        / "plugins"
+        / "browser"
+        / ".codex-plugin"
+        / "plugin.json"
+    )
+    assert restored_marketplace_manifest.read_text(encoding="utf-8") == '{"name":"browser"}'
+    restored_implicit_marketplace_manifest = (
+        Path(report.env_state_dir)
+        / "codex"
+        / ".tmp"
+        / "plugins"
+        / ".agents"
+        / "plugins"
+        / "marketplace.json"
+    )
+    assert '"name": "openai-curated"' in restored_implicit_marketplace_manifest.read_text(encoding="utf-8")
+    restored_implicit_marketplace_plugin = (
+        Path(report.env_state_dir)
+        / "codex"
+        / ".tmp"
+        / "plugins"
+        / "plugins"
+        / "github"
+        / ".codex-plugin"
+        / "plugin.json"
+    )
+    assert restored_implicit_marketplace_plugin.read_text(encoding="utf-8") == '{"name":"github"}'
 
 
 def test_resume_rewrites_claude_settings_paths_to_runtime_home(tmp_path, monkeypatch):

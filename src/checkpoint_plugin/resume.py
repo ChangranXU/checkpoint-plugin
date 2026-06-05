@@ -442,6 +442,7 @@ def _prepare_resume_runtime(
         root,
         runtime_home,
         captured_provider_home=_captured_provider_home(target_env),
+        target_env=target_env,
     )
     runtime_provider = _provider_layout_with_path_map(source_provider, path_map)
     runtime_provider.home.mkdir(parents=True, exist_ok=True)
@@ -457,6 +458,7 @@ def _runtime_path_map(
     runtime_home: Path,
     *,
     captured_provider_home: Path | None = None,
+    target_env: object | None = None,
 ) -> dict[str, str]:
     path_map = {str(source_provider.home): str(runtime_home)}
     if captured_provider_home is not None and captured_provider_home.is_absolute():
@@ -468,6 +470,12 @@ def _runtime_path_map(
         if _mapped_path(path, path_map) != path:
             continue
         path_map[str(path.parent)] = str(external_root / mirror_path(path.parent))
+    for path in _captured_plugin_file_roots(target_env):
+        if not path.is_absolute():
+            continue
+        if _mapped_path(path, path_map) != path:
+            continue
+        path_map[str(path)] = str(external_root / mirror_path(path))
     return _validated_path_map(path_map, root)
 
 
@@ -479,6 +487,20 @@ def _captured_provider_home(env: object) -> Path | None:
     if not provider_home:
         return None
     return Path(provider_home).expanduser()
+
+
+def _captured_plugin_file_roots(env: object) -> list[Path]:
+    extra = getattr(env, "extra", None)
+    if not isinstance(extra, dict):
+        return []
+    raw = extra.get("plugin_file_roots")
+    if not isinstance(raw, dict):
+        return []
+    roots: list[Path] = []
+    for value in raw.values():
+        if isinstance(value, str) and value:
+            roots.append(Path(value).expanduser())
+    return roots
 
 
 def _validated_path_map(path_map: dict[str, str], root: Path) -> dict[str, str]:
@@ -570,6 +592,16 @@ def _environment_for_runtime(env: object, path_map: dict[str, str], target_cwd: 
         extra["provider_home"] = str(_mapped_path(Path(str(provider_home)), path_map))
     else:
         extra["provider_home"] = provider_home
+
+    plugin_file_roots = extra.get("plugin_file_roots")
+    if isinstance(plugin_file_roots, dict):
+        rewritten_roots: dict[str, str] = {}
+        for name, root in plugin_file_roots.items():
+            if not isinstance(name, str) or not isinstance(root, str) or not root:
+                continue
+            rewritten_roots[name] = str(_mapped_path(Path(root).expanduser(), runtime_map))
+        extra["plugin_file_roots"] = rewritten_roots
+
     extra["cwd"] = str(target_cwd)
     extra["runtime_path_map"] = runtime_map
 

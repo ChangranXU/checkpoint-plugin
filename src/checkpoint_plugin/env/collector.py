@@ -103,6 +103,8 @@ def collect_environment(
     session_env = _session_env_fallback(store)
     skill_roots = _skill_roots(provider, cwd, session_env)
     skills = _collect_named_trees(skill_roots, store, follow_symlink_dirs=True)
+    plugin_file_roots = _plugin_file_roots(provider, cwd)
+    plugin_status = _collect_plugin_status(provider, cwd, session_env)
     opencode_configs = _opencode_configs(provider, cwd, session_env) if provider.name == "opencode" else []
     return EnvironmentState(
         provider=provider.name,
@@ -120,13 +122,15 @@ def collect_environment(
         mcp_servers=_collect_mcp_servers(provider, cwd, session_env, trajectory_ref),
         skills=skills,
         skill_status=_collect_skill_status(provider, cwd, skills),
-        plugin_status=_collect_plugin_status(provider, cwd, session_env),
+        plugin_files=_collect_plugin_files(plugin_file_roots, store, installed_plugins=set(plugin_status)),
+        plugin_status=plugin_status,
         settings=_collect_settings(provider.settings_files, store, force_absolute=_force_absolute_settings(provider)),
         project_context=_collect_project_context(cwd, provider.project_files, store),
         extra={
             "provider_home": str(provider.home),
             "cwd": str(cwd),
             "skill_symlinks": _collect_named_symlinks(skill_roots),
+            **_codex_plugin_file_roots_extra(provider, plugin_file_roots),
             **_codex_history_extra(provider, store),
             **_opencode_extra(provider, session_env),
         },
@@ -292,6 +296,120 @@ def _plugin_skill_roots(provider: ProviderLayout) -> dict[str, Path]:
         marketplace, plugin, version, _skills = rel.parts
         roots[f"plugin:{marketplace}:{plugin}:{version}"] = skills_dir
     return roots
+
+
+def _plugin_file_roots(provider: ProviderLayout, cwd: Path) -> dict[str, Path]:
+    if provider.name != "codex":
+        return {}
+
+    roots: dict[str, Path] = {}
+    cache_root = provider.home / "plugins" / "cache"
+    if cache_root.exists() and cache_root.is_dir():
+        roots["codex-plugin-cache"] = cache_root
+
+    for config in _codex_configs(provider, cwd):
+        marketplaces = config.get("marketplaces")
+        if not isinstance(marketplaces, dict):
+            continue
+        for name, marketplace_config in marketplaces.items():
+            if not isinstance(marketplace_config, dict):
+                continue
+            source = marketplace_config.get("source")
+            if not isinstance(source, str) or not source:
+                continue
+            path = Path(source).expanduser()
+            if path.exists() and path.is_dir():
+                roots[f"codex-marketplace:{name}"] = path
+
+    for name, path in _codex_implicit_marketplace_roots(provider.home).items():
+        roots.setdefault(f"codex-marketplace:{name}", path)
+
+    return roots
+
+
+def _codex_implicit_marketplace_roots(codex_home: Path) -> dict[str, Path]:
+    roots: dict[str, Path] = {}
+    tmp = codex_home / ".tmp"
+    if not tmp.exists() or not tmp.is_dir():
+        return roots
+    for manifest in sorted(tmp.glob("*/.agents/plugins/marketplace.json")):
+        root = manifest.parent.parent.parent
+        data = _load_json(manifest)
+        name = data.get("name")
+        if isinstance(name, str) and name and root.is_dir():
+            roots[name] = root
+    for manifest in sorted((tmp / "bundled-marketplaces").glob("*/.agents/plugins/marketplace.json")):
+        root = manifest.parent.parent.parent
+        data = _load_json(manifest)
+        name = data.get("name")
+        if isinstance(name, str) and name and root.is_dir():
+            roots.setdefault(name, root)
+    return roots
+
+
+def _collect_plugin_files(
+    roots: dict[str, Path],
+    store: CheckpointStore,
+    *,
+    installed_plugins: set[str] | None = None,
+) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for name, root in sorted(roots.items()):
+        for rel, sha in _collect_plugin_file_tree(
+            root,
+            store,
+            installed_plugins=installed_plugins if name == "codex-plugin-cache" else None,
+        ).items():
+            result[f"{name}/{rel}"] = sha
+    return result
+
+
+def _collect_plugin_file_tree(
+    root: Path | None,
+    store: CheckpointStore,
+    *,
+    installed_plugins: set[str] | None = None,
+) -> dict[str, str]:
+    if root is None or not root.exists() or not root.is_dir():
+        return {}
+    result: dict[str, str] = {}
+    for path in _iter_files(root):
+        if _is_secret_path(path):
+            continue
+        rel = path.relative_to(root).as_posix()
+        if not _is_plugin_metadata_path(rel, installed_plugins=installed_plugins):
+            continue
+        result[rel] = store.store_blob(_read_blob_bytes(path))
+    return result
+
+
+def _is_plugin_metadata_path(rel: str, *, installed_plugins: set[str] | None = None) -> bool:
+    parts = PurePosixPath(rel).parts
+    name = parts[-1] if parts else ""
+    if installed_plugins is not None and _is_installed_plugin_cache_path(parts, installed_plugins):
+        return True
+    if ".codex-plugin" in parts:
+        return True
+    if "assets" in parts:
+        return True
+    if name in {".app.json", ".mcp.json", "marketplace.json"}:
+        return True
+    return len(parts) >= 3 and parts[-3:] == (".agents", "plugins", "marketplace.json")
+
+
+def _is_installed_plugin_cache_path(parts: tuple[str, ...], installed_plugins: set[str]) -> bool:
+    if len(parts) < 4:
+        return False
+    marketplace, plugin, version = parts[:3]
+    if not marketplace or not plugin or not version:
+        return False
+    return f"{plugin}@{marketplace}" in installed_plugins
+
+
+def _codex_plugin_file_roots_extra(provider: ProviderLayout, roots: dict[str, Path]) -> dict[str, object]:
+    if provider.name != "codex" or not roots:
+        return {}
+    return {"plugin_file_roots": {name: str(path) for name, path in sorted(roots.items())}}
 
 
 def _mcp_config_files(provider: ProviderLayout, cwd: Path) -> dict[str, Path]:

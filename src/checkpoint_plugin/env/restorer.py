@@ -53,6 +53,15 @@ def restore_environment(
             backed_up,
         )
     )
+    changed.extend(
+        _restore_named_plugin_files(
+            target.plugin_files,
+            _plugin_file_restore_roots(provider, target.extra),
+            store,
+            backup_dir / "plugins",
+            backed_up,
+        )
+    )
     if provider.mcp_config is not None and provider.name != "opencode":
         changed.extend(
             _restore_optional_file(
@@ -179,6 +188,42 @@ def _codex_plugin_skill_restore_roots(provider: ProviderLayout, skills: dict[str
             continue
         _prefix, marketplace, plugin, version = parts
         roots[root_name] = provider.home / "plugins" / "cache" / marketplace / plugin / version / "skills"
+    return roots
+
+
+def _restore_named_plugin_files(
+    target: dict[str, str],
+    roots: dict[str, Path],
+    store: CheckpointStore,
+    backup_dir: Path,
+    backed_up: list[str],
+) -> list[str]:
+    if not target:
+        return []
+
+    changed: list[str] = []
+    for key, sha in target.items():
+        match = _split_skill_root(key, roots)
+        if match is None:
+            continue
+        root_name, rel = match
+        restored = _restore_blob_to(sha, roots[root_name] / rel, store, backup_dir / root_name / rel, backed_up)
+        if restored is not None:
+            changed.append(str(restored))
+    return changed
+
+
+def _plugin_file_restore_roots(provider: ProviderLayout, extra: dict[str, object] | None = None) -> dict[str, Path]:
+    if provider.name != "codex":
+        return {}
+
+    roots: dict[str, Path] = {"codex-plugin-cache": provider.home / "plugins" / "cache"}
+    raw = (extra or {}).get("plugin_file_roots")
+    if isinstance(raw, dict):
+        for name, path in raw.items():
+            if not isinstance(name, str) or not isinstance(path, str) or not path:
+                continue
+            roots[name] = Path(path).expanduser()
     return roots
 
 

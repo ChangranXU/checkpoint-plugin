@@ -174,11 +174,44 @@ def test_collect_codex_plugin_cache_skills(tmp_path, monkeypatch):
         / "skills"
         / "browser"
     )
+    plugin_manifest = plugin_skill.parent.parent / ".codex-plugin" / "plugin.json"
+    plugin_script = plugin_skill.parent.parent / "scripts" / "browser-client.mjs"
+    marketplace = home / ".codex" / ".tmp" / "plugins"
+    marketplace_manifest = marketplace / ".agents" / "plugins" / "marketplace.json"
+    marketplace_plugin = marketplace / "plugins" / "github" / ".codex-plugin" / "plugin.json"
     cwd.mkdir()
     plugin_skill.mkdir(parents=True)
+    plugin_manifest.parent.mkdir(parents=True)
+    plugin_script.parent.mkdir(parents=True)
+    marketplace_manifest.parent.mkdir(parents=True)
+    marketplace_plugin.parent.mkdir(parents=True)
     monkeypatch.setenv("TEST_HOME", str(home))
 
     (plugin_skill / "SKILL.md").write_text("browser skill", encoding="utf-8")
+    plugin_manifest.write_text('{"name":"browser"}', encoding="utf-8")
+    plugin_script.write_text("export const run = true;\n", encoding="utf-8")
+    (home / ".codex" / "config.toml").write_text(
+        """
+[plugins."browser@openai-bundled"]
+enabled = true
+""",
+        encoding="utf-8",
+    )
+    marketplace_manifest.write_text(
+        """
+{
+  "name": "openai-curated",
+  "plugins": [
+    {
+      "name": "github",
+      "source": {"source": "local", "path": "./plugins/github"}
+    }
+  ]
+}
+""",
+        encoding="utf-8",
+    )
+    marketplace_plugin.write_text('{"name":"github"}', encoding="utf-8")
 
     store = CheckpointStore(tmp_path / "session")
     env = collect_environment(cwd, codex_layout(), store)
@@ -186,6 +219,18 @@ def test_collect_codex_plugin_cache_skills(tmp_path, monkeypatch):
     key = "plugin:openai-bundled:browser:26.519.81530/browser/SKILL.md"
     assert key in env.skills
     assert store.load_blob(env.skills[key]) == b"browser skill"
+    manifest_key = "codex-plugin-cache/openai-bundled/browser/26.519.81530/.codex-plugin/plugin.json"
+    assert manifest_key in env.plugin_files
+    assert store.load_blob(env.plugin_files[manifest_key]) == b'{"name":"browser"}'
+    script_key = "codex-plugin-cache/openai-bundled/browser/26.519.81530/scripts/browser-client.mjs"
+    assert script_key in env.plugin_files
+    assert store.load_blob(env.plugin_files[script_key]) == b"export const run = true;\n"
+    marketplace_key = "codex-marketplace:openai-curated/.agents/plugins/marketplace.json"
+    assert marketplace_key in env.plugin_files
+    assert store.load_blob(env.plugin_files[marketplace_key]).lstrip().startswith(b"{")
+    marketplace_plugin_key = "codex-marketplace:openai-curated/plugins/github/.codex-plugin/plugin.json"
+    assert marketplace_plugin_key in env.plugin_files
+    assert store.load_blob(env.plugin_files[marketplace_plugin_key]) == b'{"name":"github"}'
     assert env.skill_status["browser"] == "present"
 
 

@@ -20,6 +20,7 @@ class EnvironmentState:
     mcp_servers: dict[str, str] = field(default_factory=dict)
     skills: dict[str, str] = field(default_factory=dict)
     skill_status: dict[str, str] = field(default_factory=dict)
+    plugin_files: dict[str, str] = field(default_factory=dict)
     plugin_status: dict[str, str] = field(default_factory=dict)
     settings: dict[str, str] = field(default_factory=dict)
     project_context: dict[str, str] = field(default_factory=dict)
@@ -43,6 +44,7 @@ class EnvironmentState:
             mcp_servers=dict(data.get("mcp_servers") or {}),
             skills=dict(data.get("skills") or {}),
             skill_status=dict(data.get("skill_status") or {}),
+            plugin_files=dict(data.get("plugin_files") or {}),
             plugin_status=dict(data.get("plugin_status") or {}),
             settings=dict(data.get("settings") or {}),
             project_context=dict(data.get("project_context") or {}),
