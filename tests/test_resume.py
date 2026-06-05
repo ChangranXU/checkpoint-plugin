@@ -662,6 +662,70 @@ def test_resume_reports_only_environment_files_that_changed(tmp_path, monkeypatc
     assert (codex_home / "config.toml").read_text(encoding="utf-8") == "model = 'new'\napi_key = 'secret-value'\n"
 
 
+def test_path_map_rejects_destinations_outside_runtime_root(tmp_path):
+    from checkpoint_plugin.resume import _validated_path_map
+
+    root = tmp_path / "runtime"
+    path_map = _validated_path_map({"/source": str(tmp_path / "outside")}, root)
+
+    assert path_map == {}
+
+
+def test_secret_runtime_copy_ignores_symlink_source(tmp_path):
+    from checkpoint_plugin.resume import _link_runtime_secret_files
+
+    source_home = tmp_path / "source"
+    runtime_home = tmp_path / "runtime"
+    attacker_target = tmp_path / "attacker-auth.json"
+    source_home.mkdir()
+    runtime_home.mkdir()
+    attacker_target.write_text('{"token":"attacker"}\n', encoding="utf-8")
+    (source_home / "auth.json").symlink_to(attacker_target)
+
+    _link_runtime_secret_files("codex", source_home, runtime_home)
+
+    assert not (runtime_home / "auth.json").exists()
+
+
+def test_secret_runtime_copy_preserves_restrictive_mode(tmp_path):
+    from checkpoint_plugin.resume import _link_runtime_secret_files
+
+    source_home = tmp_path / "source"
+    runtime_home = tmp_path / "runtime"
+    source_home.mkdir()
+    runtime_home.mkdir()
+    source = source_home / "auth.json"
+    source.write_text('{"token":"secret"}\n', encoding="utf-8")
+    source.chmod(0o600)
+
+    _link_runtime_secret_files("codex", source_home, runtime_home)
+
+    dest = runtime_home / "auth.json"
+    assert dest.read_text(encoding="utf-8") == '{"token":"secret"}\n'
+    assert dest.stat().st_mode & 0o777 == 0o600
+
+
+def test_secret_runtime_copy_without_fchmod(tmp_path, monkeypatch):
+    import os
+
+    from checkpoint_plugin.resume import _link_runtime_secret_files
+
+    source_home = tmp_path / "source"
+    runtime_home = tmp_path / "runtime"
+    source_home.mkdir()
+    runtime_home.mkdir()
+    source = source_home / "auth.json"
+    source.write_text('{"token":"secret"}\n', encoding="utf-8")
+    source.chmod(0o600)
+    monkeypatch.delattr(os, "fchmod", raising=False)
+
+    _link_runtime_secret_files("codex", source_home, runtime_home)
+
+    dest = runtime_home / "auth.json"
+    assert dest.read_text(encoding="utf-8") == '{"token":"secret"}\n'
+    assert dest.stat().st_mode & 0o777 == 0o600
+
+
 def test_resume_plan_diffs_environment_with_target_provider_layout(tmp_path, monkeypatch):
     plugin_home = tmp_path / "plugin"
     home = tmp_path / "home"
@@ -795,6 +859,298 @@ def test_cli_resume_open_dispatches_to_descriptor_executor(monkeypatch):
 
     assert main(["resume-open", "session-123"]) == 0
     assert calls == ["session-123"]
+
+
+def test_resume_open_rejects_tampered_descriptor_command(tmp_path):
+    import pytest
+
+    from checkpoint_plugin.resume import execute_resume_open
+
+    session_id = "019e91aa-5d69-7180-8729-1a9a31c7e182"
+    plugin_home = tmp_path / "plugin"
+    cwd = tmp_path / "work"
+    provider_home = tmp_path / "env-state" / session_id / "codex"
+    session_path = plugin_home / "sessions" / session_id
+    cwd.mkdir(parents=True)
+    provider_home.mkdir(parents=True)
+    session_path.mkdir(parents=True)
+    (session_path / "resume-open.json").write_text(
+        json.dumps(
+            {
+                "provider": "codex",
+                "session_id": session_id,
+                "cwd": str(cwd),
+                "env_state_dir": str(provider_home.parent),
+                "provider_home": str(provider_home),
+                "env": {"CODEX_HOME": str(provider_home)},
+                "preflight": [],
+                "command": ["rm", "-rf", "/"],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="command"):
+        execute_resume_open(session_id, plugin_home, execvpe=lambda *_args: None)
+
+
+def test_resume_open_rejects_env_path_hijack(tmp_path):
+    import pytest
+
+    from checkpoint_plugin.resume import execute_resume_open
+
+    session_id = "019e91aa-5d69-7180-8729-1a9a31c7e182"
+    plugin_home = tmp_path / "plugin"
+    cwd = tmp_path / "work"
+    provider_home = tmp_path / "env-state" / session_id / "codex"
+    session_path = plugin_home / "sessions" / session_id
+    cwd.mkdir(parents=True)
+    provider_home.mkdir(parents=True)
+    session_path.mkdir(parents=True)
+    (session_path / "resume-open.json").write_text(
+        json.dumps(
+            {
+                "provider": "codex",
+                "session_id": session_id,
+                "cwd": str(cwd),
+                "env_state_dir": str(provider_home.parent),
+                "provider_home": str(provider_home),
+                "env": {"CODEX_HOME": str(provider_home), "PATH": str(tmp_path / "bin")},
+                "preflight": [],
+                "command": ["codex", "resume", session_id],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="env"):
+        execute_resume_open(session_id, plugin_home, execvpe=lambda *_args: None)
+
+
+def test_resume_open_rejects_path_like_session_id(tmp_path):
+    import pytest
+
+    from checkpoint_plugin.resume import execute_resume_open
+
+    with pytest.raises(RuntimeError, match="session id"):
+        execute_resume_open("../evil", tmp_path / "plugin", execvpe=lambda *_args: None)
+
+
+def test_restore_environment_refuses_absolute_path_outside_allowed_roots(tmp_path):
+    from checkpoint_plugin.env.providers import ProviderLayout
+    from checkpoint_plugin.env.restorer import restore_environment
+    from checkpoint_plugin.store import CheckpointStore
+    from checkpoint_plugin.types import EnvironmentState
+
+    cwd = tmp_path / "work"
+    provider_home = tmp_path / "provider"
+    backup_dir = tmp_path / "backup"
+    outside = tmp_path / "outside.txt"
+    cwd.mkdir()
+    provider_home.mkdir()
+    store = CheckpointStore(tmp_path / "session")
+    good_sha = store.store_blob(b"good")
+    bad_sha = store.store_blob(b"bad")
+    provider = ProviderLayout(
+        name="codex",
+        home=provider_home,
+        memory_dir=None,
+        mcp_config=None,
+        mcp_config_files=[],
+        settings_files=[],
+        skills_dirs={},
+        project_files=["AGENTS.md"],
+    )
+    target = EnvironmentState(
+        provider="codex",
+        project_context={
+            str(cwd / "AGENTS.md"): good_sha,
+            str(outside): bad_sha,
+        },
+        extra={"cwd": str(cwd)},
+    )
+
+    report = restore_environment(target, provider, store, backup_dir)
+
+    assert (cwd / "AGENTS.md").read_text(encoding="utf-8") == "good"
+    assert not outside.exists()
+    assert str(outside) not in report.changed
+
+
+def test_restore_environment_refuses_ancestor_chain_path_traversal(tmp_path):
+    from checkpoint_plugin.env.providers import ProviderLayout
+    from checkpoint_plugin.env.restorer import restore_environment
+    from checkpoint_plugin.store import CheckpointStore
+    from checkpoint_plugin.types import EnvironmentState
+
+    repo = tmp_path / "repo"
+    nested = repo / "sub"
+    escaped = tmp_path / "outside"
+    provider_home = tmp_path / "provider"
+    (repo / ".git").mkdir(parents=True)
+    nested.mkdir()
+    provider_home.mkdir()
+    store = CheckpointStore(tmp_path / "session")
+    sha = store.store_blob(b"escaped")
+    provider = ProviderLayout(
+        name="codex",
+        home=provider_home,
+        memory_dir=None,
+        mcp_config=None,
+        mcp_config_files=[],
+        settings_files=[],
+        skills_dirs={},
+        project_files=["AGENTS.md"],
+    )
+    target = EnvironmentState(
+        provider="codex",
+        project_context={str(escaped / "AGENTS.md"): sha},
+        extra={"cwd": str(nested / ".." / ".." / "outside")},
+    )
+
+    report = restore_environment(target, provider, store, tmp_path / "backup")
+
+    assert not (escaped / "AGENTS.md").exists()
+    assert str(escaped / "AGENTS.md") not in report.changed
+
+
+def test_restore_environment_allows_project_root_from_nested_cwd(tmp_path):
+    from checkpoint_plugin.env.providers import ProviderLayout
+    from checkpoint_plugin.env.restorer import restore_environment
+    from checkpoint_plugin.store import CheckpointStore
+    from checkpoint_plugin.types import EnvironmentState
+
+    repo = tmp_path / "repo"
+    cwd = repo / "pkg"
+    provider_home = tmp_path / "provider"
+    (repo / ".git").mkdir(parents=True)
+    cwd.mkdir()
+    provider_home.mkdir()
+    store = CheckpointStore(tmp_path / "session")
+    sha = store.store_blob(b"root instructions")
+    provider = ProviderLayout(
+        name="codex",
+        home=provider_home,
+        memory_dir=None,
+        mcp_config=None,
+        mcp_config_files=[],
+        settings_files=[],
+        skills_dirs={},
+        project_files=["AGENTS.md"],
+    )
+    target = EnvironmentState(
+        provider="codex",
+        project_context={str(repo / "AGENTS.md"): sha},
+        extra={"cwd": str(cwd)},
+    )
+
+    restore_environment(target, provider, store, tmp_path / "backup")
+
+    assert (repo / "AGENTS.md").read_text(encoding="utf-8") == "root instructions"
+
+
+def test_restore_environment_allows_dot_named_project_directory(tmp_path):
+    from checkpoint_plugin.env.providers import ProviderLayout
+    from checkpoint_plugin.env.restorer import restore_environment
+    from checkpoint_plugin.store import CheckpointStore
+    from checkpoint_plugin.types import EnvironmentState
+
+    repo = tmp_path / "my.repo"
+    provider_home = tmp_path / "provider"
+    repo.mkdir()
+    provider_home.mkdir()
+    store = CheckpointStore(tmp_path / "session")
+    sha = store.store_blob(b"dot repo instructions")
+    provider = ProviderLayout(
+        name="codex",
+        home=provider_home,
+        memory_dir=None,
+        mcp_config=None,
+        mcp_config_files=[],
+        settings_files=[],
+        skills_dirs={},
+        project_files=["AGENTS.md"],
+    )
+    target = EnvironmentState(
+        provider="codex",
+        project_context={str(repo / "AGENTS.md"): sha},
+        extra={"cwd": str(repo)},
+    )
+
+    restore_environment(target, provider, store, tmp_path / "backup")
+
+    assert (repo / "AGENTS.md").read_text(encoding="utf-8") == "dot repo instructions"
+
+
+def test_restore_environment_allows_stringified_absolute_project_directory_root(tmp_path):
+    from checkpoint_plugin.env.providers import ProviderLayout
+    from checkpoint_plugin.env.restorer import restore_environment
+    from checkpoint_plugin.store import CheckpointStore
+    from checkpoint_plugin.types import EnvironmentState
+
+    provider_home = tmp_path / "provider"
+    config_home = tmp_path / "config"
+    cwd = tmp_path / "work"
+    provider_home.mkdir()
+    config_home.mkdir()
+    cwd.mkdir()
+    store = CheckpointStore(tmp_path / "session")
+    sha = store.store_blob(b"agent docs")
+    provider = ProviderLayout(
+        name="opencode",
+        home=provider_home,
+        memory_dir=None,
+        mcp_config=None,
+        mcp_config_files=[],
+        settings_files=[],
+        skills_dirs={},
+        project_files=[str(config_home / "agent") + "/"],
+    )
+    target = EnvironmentState(
+        provider="opencode",
+        project_context={str(config_home / "agent" / "build.md"): sha},
+        extra={"cwd": str(cwd)},
+    )
+
+    restore_environment(target, provider, store, tmp_path / "backup")
+
+    assert (config_home / "agent" / "build.md").read_text(encoding="utf-8") == "agent docs"
+
+
+def test_restore_environment_allows_remapped_global_opencode_directory_root(tmp_path):
+    from checkpoint_plugin.env.providers import ProviderLayout
+    from checkpoint_plugin.env.restorer import restore_environment
+    from checkpoint_plugin.store import CheckpointStore
+    from checkpoint_plugin.types import EnvironmentState
+
+    provider_home = tmp_path / "runtime" / "opencode"
+    opencode_root = tmp_path / "runtime" / "external" / "home" / ".opencode"
+    cwd = tmp_path / "work"
+    provider_home.mkdir(parents=True)
+    cwd.mkdir()
+    store = CheckpointStore(tmp_path / "session")
+    sha = store.store_blob(b"global agent docs")
+    provider = ProviderLayout(
+        name="opencode",
+        home=provider_home,
+        memory_dir=None,
+        mcp_config=None,
+        mcp_config_files=[],
+        settings_files=[],
+        skills_dirs={},
+        project_files=[str(opencode_root) + "/"],
+    )
+    target = EnvironmentState(
+        provider="opencode",
+        project_context={str(opencode_root / "agent" / "build.md"): sha},
+        extra={"cwd": str(cwd)},
+    )
+
+    restore_environment(target, provider, store, tmp_path / "backup")
+
+    assert (opencode_root / "agent" / "build.md").read_text(encoding="utf-8") == "global agent docs"
 
 
 def test_cli_resume_can_show_file_diff_then_cancel(tmp_path, monkeypatch, capsys):

@@ -7,6 +7,78 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+RESUME_SESSION_ID = "{session_id}"
+RESUME_RUNTIME_ARGS = "{runtime_args}"
+
+
+@dataclass(frozen=True)
+class ProviderResumePolicy:
+    allowed_env: frozenset[str]
+    home_env_keys: tuple[str, ...]
+    command_template: tuple[str, ...]
+    data_dir_env_key: str | None = None
+    data_dir_name: str | None = None
+    path_env_keys: frozenset[str] = frozenset()
+    runtime_env_extra: str | None = None
+    runtime_env_skip_keys: frozenset[str] = frozenset()
+    preflight_kind: str = "none"
+    runtime_arg_fields: tuple[tuple[str, str], ...] = ()
+    runtime_json_config_arg_fields: tuple[tuple[str, str, str], ...] = ()
+
+
+_OPENCODE_ALLOWED_RUNTIME_ENV = frozenset(
+    {
+        "OPENCODE_CONFIG",
+        "OPENCODE_CONFIG_DIR",
+        "OPENCODE_TUI_CONFIG",
+        "OPENCODE_DATA_DIR",
+        "OPENCODE_DISABLE_PROJECT_CONFIG",
+        "OPENCODE_DISABLE_EXTERNAL_SKILLS",
+        "OPENCODE_DISABLE_CLAUDE_CODE",
+        "OPENCODE_DISABLE_CLAUDE_CODE_SKILLS",
+        "OPENCODE_DISABLE_AUTOCOMPACT",
+        "OPENCODE_DISABLE_PRUNE",
+        "OPENCODE_DISABLE_DEFAULT_PLUGINS",
+        "OPENCODE_PURE",
+        "OPENCODE_WORKSPACE_ID",
+        "OPENCODE_EXPERIMENTAL_WORKSPACES",
+        "OPENCODE_PERMISSION",
+    }
+)
+
+
+CODEX_RESUME_POLICY = ProviderResumePolicy(
+    allowed_env=frozenset({"CODEX_HOME"}),
+    home_env_keys=("CODEX_HOME",),
+    command_template=("codex", "resume", RESUME_RUNTIME_ARGS, RESUME_SESSION_ID),
+    runtime_arg_fields=(("model", "--model"),),
+    runtime_json_config_arg_fields=(("effort", "-c", "model_reasoning_effort"),),
+)
+
+CLAUDE_RESUME_POLICY = ProviderResumePolicy(
+    allowed_env=frozenset({"CLAUDE_CONFIG_DIR", "CLAUDE_HOME"}),
+    home_env_keys=("CLAUDE_CONFIG_DIR", "CLAUDE_HOME"),
+    command_template=("claude", RESUME_RUNTIME_ARGS, "--resume", RESUME_SESSION_ID),
+    runtime_arg_fields=(
+        ("model", "--model"),
+        ("effort", "--effort"),
+        ("permission_mode", "--permission-mode"),
+    ),
+)
+
+OPENCODE_RESUME_POLICY = ProviderResumePolicy(
+    allowed_env=_OPENCODE_ALLOWED_RUNTIME_ENV,
+    home_env_keys=("OPENCODE_CONFIG_DIR",),
+    command_template=("opencode", "--session", RESUME_SESSION_ID),
+    data_dir_env_key="OPENCODE_DATA_DIR",
+    data_dir_name="opencode-data",
+    path_env_keys=frozenset({"OPENCODE_CONFIG", "OPENCODE_TUI_CONFIG"}),
+    runtime_env_extra="opencode_runtime_env",
+    runtime_env_skip_keys=frozenset({"OPENCODE_CONFIG_CONTENT", "OPENCODE_CONFIG_DIR", "OPENCODE_DATA_DIR"}),
+    preflight_kind="opencode_import",
+)
+
+
 @dataclass(frozen=True)
 class ProviderLayout:
     name: str
@@ -17,10 +89,15 @@ class ProviderLayout:
     settings_files: list[Path]
     skills_dirs: dict[str, Path]
     project_files: list[str]
+    resume_policy: ProviderResumePolicy | None = None
 
 
 def _home() -> Path:
     return Path(os.environ.get("TEST_HOME", str(Path.home()))).expanduser()
+
+
+def _directory_project_file(path: Path | str) -> str:
+    return str(path).rstrip("/\\") + os.sep
 
 
 def claude_layout() -> ProviderLayout:
@@ -52,6 +129,7 @@ def claude_layout() -> ProviderLayout:
         skills_dirs={
             "user": claude_home / "skills",
         },
+        resume_policy=CLAUDE_RESUME_POLICY,
         project_files=[
             "CLAUDE.md",
             "CLAUDE.local.md",
@@ -96,6 +174,7 @@ def codex_layout() -> ProviderLayout:
             "agent-user": home / ".agents" / "skills",
             "codex-admin": Path("/etc/codex/skills"),
         },
+        resume_policy=CODEX_RESUME_POLICY,
         project_files=[
             "AGENTS.override.md",
             "AGENTS.md",
@@ -172,19 +251,19 @@ def opencode_layout() -> ProviderLayout:
         skills_dirs["opencode-default"] = default_opencode_home / "skills"
         skills_dirs["opencode-default-singular"] = default_opencode_home / "skill"
     global_project_files = [
-        str(path)
+        _directory_project_file(path)
         for config_home in config_homes
         for path in (
-            config_home / "agent/",
-            config_home / "agents/",
-            config_home / "command/",
-            config_home / "commands/",
-            config_home / "mode/",
-            config_home / "modes/",
-            config_home / "plugin/",
-            config_home / "plugins/",
-            config_home / "tool/",
-            config_home / "tools/",
+            config_home / "agent",
+            config_home / "agents",
+            config_home / "command",
+            config_home / "commands",
+            config_home / "mode",
+            config_home / "modes",
+            config_home / "plugin",
+            config_home / "plugins",
+            config_home / "tool",
+            config_home / "tools",
         )
     ]
 
@@ -206,6 +285,7 @@ def opencode_layout() -> ProviderLayout:
             *opencode_plugin_files,
         ],
         skills_dirs=skills_dirs,
+        resume_policy=OPENCODE_RESUME_POLICY,
         project_files=[
             # OpenCode instruction/rule files (plus Claude-compatible prompt files)
             "AGENTS.md",
@@ -242,7 +322,7 @@ def opencode_layout() -> ProviderLayout:
             ".opencode/plugins/checkpoint.js",
             # Global OpenCode commands/agents/modes live under the config dir.
             *global_project_files,
-            str(home / ".opencode/"),
+            _directory_project_file(home / ".opencode"),
             ".agents/skills/",
         ],
     )
@@ -276,6 +356,17 @@ def layout_for_provider(name: str) -> ProviderLayout:
     if normalized == "opencode":
         return opencode_layout()
     return generic_layout()
+
+
+def resume_policy_for_provider(name: str) -> ProviderResumePolicy | None:
+    normalized = name.strip().lower()
+    if normalized == "claude":
+        return CLAUDE_RESUME_POLICY
+    if normalized == "codex":
+        return CODEX_RESUME_POLICY
+    if normalized == "opencode":
+        return OPENCODE_RESUME_POLICY
+    return None
 
 
 def detect_provider(cwd: Path) -> ProviderLayout:

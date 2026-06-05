@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
 
+from checkpoint_plugin.path_utils import PathRootKind, mirror_path, path_matches_root
 from checkpoint_plugin.store import CheckpointStore
 from checkpoint_plugin.types import EnvironmentState, RestoreReport
 
-from .collector import _nearest_project_root, _plugin_skill_roots
+from .collector import _ancestor_chain, _nearest_project_root, _plugin_skill_roots
 from .hook_filter import (
     is_hook_config_basename,
     is_hook_config_path,
@@ -18,6 +21,12 @@ from .hook_filter import (
     strip_plugin_hooks,
 )
 from .providers import ProviderLayout
+
+
+@dataclass(frozen=True)
+class RestoreRoot:
+    path: Path
+    kind: PathRootKind = "directory"
 
 
 def restore_environment(
@@ -31,6 +40,7 @@ def restore_environment(
 ) -> RestoreReport:
     changed: list[str] = []
     backed_up: list[str] = []
+    allowed_roots = _allowed_restore_roots(provider, target)
 
     changed.extend(_restore_tree(target.memory_files, provider.memory_dir, store, backup_dir / "memory", backed_up))
     changed.extend(
@@ -57,6 +67,7 @@ def restore_environment(
         _restore_settings(
             target.settings,
             provider.settings_files,
+            allowed_roots,
             store,
             backup_dir / "settings",
             backed_up,
@@ -68,6 +79,7 @@ def restore_environment(
     changed.extend(
         _restore_project_context(
             target.project_context,
+            allowed_roots,
             store,
             backup_dir / "project-context",
             backed_up,
@@ -145,6 +157,27 @@ def _skill_restore_roots(provider: ProviderLayout, cwd: Path, extra: dict[str, o
     return roots
 
 
+def _allowed_restore_roots(provider: ProviderLayout, target: EnvironmentState) -> list[RestoreRoot]:
+    roots: list[RestoreRoot] = [RestoreRoot(provider.home)]
+    if provider.memory_dir is not None:
+        roots.append(RestoreRoot(provider.memory_dir))
+    roots.extend(RestoreRoot(path, "file") for path in provider.mcp_config_files)
+    roots.extend(RestoreRoot(path, "file") for path in provider.settings_files)
+    roots.extend(RestoreRoot(path) for path in provider.skills_dirs.values())
+    cwd = target.extra.get("cwd")
+    if isinstance(cwd, str) and cwd:
+        cwd_path = Path(cwd).expanduser()
+        roots.extend(RestoreRoot(path) for path in _ancestor_chain(_nearest_project_root(cwd_path), cwd_path))
+    for item in provider.project_files:
+        path = Path(item).expanduser()
+        if path.is_absolute():
+            roots.append(RestoreRoot(path, _project_file_root_kind(item, path)))
+    config_roots = target.extra.get("opencode_config_skill_roots")
+    if isinstance(config_roots, list):
+        roots.extend(RestoreRoot(Path(root).expanduser()) for root in config_roots if isinstance(root, str) and root)
+    return roots
+
+
 def _restore_tree(
     target: dict[str, str],
     root: Path | None,
@@ -181,6 +214,7 @@ def _restore_tree(
 def _restore_settings(
     settings: dict[str, str],
     settings_files: list[Path],
+    allowed_roots: list[RestoreRoot],
     store: CheckpointStore,
     backup_dir: Path,
     backed_up: list[str],
@@ -205,7 +239,7 @@ def _restore_settings(
             path = Path(name)
         if path is None and settings_files:
             path = settings_files[0].parent / name
-        if path is not None:
+        if path is not None and _path_allowed(path, allowed_roots):
             preserve_plugin_hooks = ignore_plugin_hooks and is_hook_config_basename(path.name, provider_name)
             restored = _restore_blob_to(
                 sha,
@@ -226,7 +260,7 @@ def _setting_is_targeted(settings: dict[str, str], key: str, path: Path) -> bool
 
 
 def _setting_backup_rel(path: Path) -> Path:
-    return _mirror_path(path) if path.is_absolute() else Path(path.name)
+    return mirror_path(path) if path.is_absolute() else Path(path.name)
 
 
 def _settings_restore_paths(paths: list[Path]) -> dict[str, Path]:
@@ -277,6 +311,7 @@ def _restore_optional_file(
 
 def _restore_project_context(
     project_context: dict[str, str],
+    allowed_roots: list[RestoreRoot],
     store: CheckpointStore,
     backup_dir: Path,
     backed_up: list[str],
@@ -290,12 +325,14 @@ def _restore_project_context(
         path = Path(key)
         if not path.is_absolute():
             continue
+        if not _path_allowed(path, allowed_roots):
+            continue
         preserve_plugin_hooks = ignore_plugin_hooks and is_hook_config_path(path, provider_name)
         restored = _restore_blob_to(
             sha,
             path,
             store,
-            backup_dir / _mirror_path(path),
+            backup_dir / mirror_path(path),
             backed_up,
             preserve_plugin_hooks=preserve_plugin_hooks,
             preserve_redacted_values=preserve_redacted_values,
@@ -303,6 +340,16 @@ def _restore_project_context(
         if restored is not None:
             changed.append(str(restored))
     return changed
+
+
+def _path_allowed(path: Path, roots: list[RestoreRoot]) -> bool:
+    return any(path_matches_root(path, root.path, kind=root.kind) for root in roots)
+
+
+def _project_file_root_kind(item: str, path: Path) -> PathRootKind:
+    if item.endswith(("/", os.sep)) or any(char in item for char in "*?["):
+        return "directory"
+    return "file"
 
 
 def _restore_blob_to(
@@ -354,10 +401,6 @@ def _backup(path: Path, backup_path: Path, backed_up: list[str]) -> None:
     backup_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(path, backup_path)
     backed_up.append(str(backup_path))
-
-
-def _mirror_path(path: Path) -> Path:
-    return Path(*path.parts[1:]) if path.is_absolute() else path
 
 
 _REDACTED = "***redacted***"

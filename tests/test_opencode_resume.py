@@ -476,6 +476,48 @@ def test_opencode_runtime_config_carries_mcp_overlay_without_secrets(tmp_path):
     assert "OPENCODE_CONFIG_CONTENT" not in runtime_env
 
 
+def test_opencode_runtime_config_skips_redacted_only_config(tmp_path):
+    from checkpoint_plugin.resume import _materialize_runtime_config
+    from checkpoint_plugin.types import EnvironmentState
+
+    runtime_home = tmp_path / "opencode"
+    runtime_home.mkdir()
+    existing = {"provider": {"custom": {"options": {"apiKey": "secret-value"}}}}
+    (runtime_home / "opencode.json").write_text(json.dumps(existing), encoding="utf-8")
+    target_env = EnvironmentState(
+        provider="opencode",
+        extra={
+            "opencode_config_content": json.dumps(
+                {"provider": {"custom": {"options": {"apiKey": "***redacted***"}}}}
+            )
+        },
+    )
+
+    _materialize_runtime_config("opencode", runtime_home, target_env)
+
+    assert json.loads((runtime_home / "opencode.json").read_text(encoding="utf-8")) == existing
+
+
+def test_opencode_runtime_config_preserves_empty_container_overrides(tmp_path):
+    from checkpoint_plugin.resume import _materialize_runtime_config
+    from checkpoint_plugin.types import EnvironmentState
+
+    runtime_home = tmp_path / "opencode"
+    runtime_home.mkdir()
+    (runtime_home / "opencode.json").write_text(
+        json.dumps({"plugin": [{"path": "current.ts"}], "mcp": {"old": {"enabled": True}}}),
+        encoding="utf-8",
+    )
+    target_env = EnvironmentState(
+        provider="opencode",
+        extra={"opencode_config_content": json.dumps({"plugin": [], "mcp": {}})},
+    )
+
+    _materialize_runtime_config("opencode", runtime_home, target_env)
+
+    assert json.loads((runtime_home / "opencode.json").read_text(encoding="utf-8")) == {"mcp": {}, "plugin": []}
+
+
 def test_opencode_resume_command_is_simple_resume_open():
     from checkpoint_plugin.resume import _resume_command
 

@@ -7,22 +7,31 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterable
 
 from .env.collector import collect_environment, environment_from_blob
 from .env.differ import diff_environments, render_diff
-from .env.providers import ProviderLayout, layout_for_provider
+from .env.providers import (
+    RESUME_RUNTIME_ARGS,
+    RESUME_SESSION_ID,
+    ProviderLayout,
+    ProviderResumePolicy,
+    layout_for_provider,
+    resume_policy_for_provider,
+)
 from .env.restorer import restore_environment
 from .fs.ignore import IgnoreMatcher
 from .fs.restorer import diff_filesystems, render_fs_diff, restore_cwd
 from .fs.snapshot import filesystem_from_blob, snapshot_cwd
 from .integrations._trajectory_slicer import claude_key, codex_key, jsonl_count_records, recover_trailing_tail
+from .path_utils import mirror_path, path_within
 from .paths import backups_dir, ensure_home, load_config, session_dir
 from .store import CheckpointStore, canonical_json
 from .types import CheckpointManifest, ResumePlan, ResumeReport, TrajectoryReference
@@ -445,8 +454,21 @@ def _runtime_path_map(source_provider: ProviderLayout, root: Path, runtime_home:
             continue
         if _mapped_path(path, path_map) != path:
             continue
-        path_map[str(path.parent)] = str(external_root / _mirror_path(path.parent))
-    return dict(sorted(path_map.items(), key=lambda item: len(item[0]), reverse=True))
+        path_map[str(path.parent)] = str(external_root / mirror_path(path.parent))
+    return _validated_path_map(path_map, root)
+
+
+def _validated_path_map(path_map: dict[str, str], root: Path) -> dict[str, str]:
+    validated: dict[str, str] = {}
+    for source, dest in path_map.items():
+        source_path = Path(source)
+        dest_path = Path(dest)
+        if not source_path.is_absolute() or not dest_path.is_absolute():
+            continue
+        if not path_within(dest_path, root):
+            continue
+        validated[str(source_path)] = str(dest_path)
+    return dict(sorted(validated.items(), key=lambda item: len(item[0]), reverse=True))
 
 
 def _provider_layout_paths(provider: ProviderLayout) -> list[Path | None]:
@@ -484,7 +506,12 @@ def _mapped_optional_path(path: Path | None, path_map: dict[str, str]) -> Path |
 
 def _mapped_project_file(value: str, path_map: dict[str, str]) -> str:
     path = Path(value)
-    return str(_mapped_path(path, path_map)) if path.is_absolute() else value
+    if not path.is_absolute():
+        return value
+    mapped = str(_mapped_path(path, path_map))
+    if value.endswith(("/", os.sep)) and not mapped.endswith(os.sep):
+        return mapped + os.sep
+    return mapped
 
 
 def _mapped_path(path: Path, path_map: dict[str, str]) -> Path:
@@ -492,10 +519,16 @@ def _mapped_path(path: Path, path_map: dict[str, str]) -> Path:
         return path
     text = str(path)
     for source, dest in path_map.items():
+        if text != source and not text.startswith(source + os.sep):
+            continue
+        dest_path = Path(dest)
+        if not dest_path.is_absolute():
+            continue
         if text == source:
-            return Path(dest)
-        if text.startswith(source + os.sep):
-            return Path(dest) / text[len(source) + 1 :]
+            return dest_path
+        mapped = dest_path / text[len(source) + 1 :]
+        if path_within(mapped, dest_path):
+            return mapped
     return path
 
 
@@ -554,6 +587,117 @@ def _rewrite_opencode_runtime_env(values: dict[object, object], path_map: dict[s
     return rewritten
 
 
+def _resume_policy(provider: str, path: Path) -> ProviderResumePolicy:
+    policy = resume_policy_for_provider(provider)
+    if policy is None:
+        raise RuntimeError(f"Invalid resume-open state field 'provider': {path}")
+    return policy
+
+
+def _build_resume_command_from_policy(
+    policy: ProviderResumePolicy,
+    session_id: str,
+    target_env: object | None,
+) -> list[str]:
+    runtime_args = _provider_runtime_args(policy, target_env)
+    command: list[str] = []
+    for token in policy.command_template:
+        if token == RESUME_SESSION_ID:
+            command.append(session_id)
+        elif token == RESUME_RUNTIME_ARGS:
+            command.extend(runtime_args)
+        else:
+            command.append(token)
+    return command
+
+
+def _validate_resume_command_from_policy(
+    policy: ProviderResumePolicy,
+    session_id: str,
+    command: list[str],
+    path: Path,
+) -> None:
+    try:
+        runtime_index = policy.command_template.index(RESUME_RUNTIME_ARGS)
+    except ValueError:
+        expected = _substitute_resume_command_template(policy.command_template, session_id)
+        if command != expected:
+            raise RuntimeError(f"Invalid resume-open state field 'command': {path}")
+        return
+
+    prefix = _substitute_resume_command_template(policy.command_template[:runtime_index], session_id)
+    suffix = _substitute_resume_command_template(policy.command_template[runtime_index + 1 :], session_id)
+    if command[: len(prefix)] != prefix:
+        raise RuntimeError(f"Invalid resume-open state field 'command': {path}")
+    if suffix and command[-len(suffix) :] != suffix:
+        raise RuntimeError(f"Invalid resume-open state field 'command': {path}")
+    runtime_end = len(command) - len(suffix) if suffix else len(command)
+    if runtime_end < len(prefix):
+        raise RuntimeError(f"Invalid resume-open state field 'command': {path}")
+    _validate_provider_runtime_args(command[len(prefix) : runtime_end], policy, path)
+
+
+def _substitute_resume_command_template(template: tuple[str, ...], session_id: str) -> list[str]:
+    values: list[str] = []
+    for token in template:
+        if token == RESUME_SESSION_ID:
+            values.append(session_id)
+        elif token == RESUME_RUNTIME_ARGS:
+            raise ValueError("runtime args placeholder must be handled by caller")
+        else:
+            values.append(token)
+    return values
+
+
+def _validate_provider_runtime_args(args: list[str], policy: ProviderResumePolicy, path: Path) -> None:
+    value_options = {option for _field, option in policy.runtime_arg_fields}
+    json_config_options: dict[str, set[str]] = {}
+    for _field, option, config_key in policy.runtime_json_config_arg_fields:
+        json_config_options.setdefault(option, set()).add(config_key)
+
+    index = 0
+    while index < len(args):
+        option = args[index]
+        if option in value_options and index + 1 < len(args) and not args[index + 1].startswith("-"):
+            index += 2
+            continue
+        if option in json_config_options and index + 1 < len(args):
+            if _valid_json_config_assignment(args[index + 1], json_config_options[option]):
+                index += 2
+                continue
+        raise RuntimeError(f"Invalid resume-open state field 'command': {path}")
+
+
+def _valid_json_config_assignment(value: str, allowed_keys: set[str]) -> bool:
+    key, separator, raw = value.partition("=")
+    if separator != "=" or key not in allowed_keys:
+        return False
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(parsed, str) and bool(parsed)
+
+
+def _runtime_policy_extra_env(
+    policy: ProviderResumePolicy,
+    target_env: object,
+    path_map: dict[str, str],
+) -> dict[str, str]:
+    if policy.runtime_env_extra != "opencode_runtime_env":
+        return {}
+    env: dict[str, str] = {}
+    for key, value in _opencode_runtime_env(target_env).items():
+        if key in policy.runtime_env_skip_keys:
+            continue
+        if key in policy.path_env_keys:
+            path = Path(value).expanduser()
+            if path.is_absolute():
+                value = str(_mapped_path(path, path_map))
+        env[key] = value
+    return env
+
+
 def _runtime_process_env(
     provider_name: str,
     runtime_home: Path,
@@ -561,23 +705,13 @@ def _runtime_process_env(
     target_env: object,
     path_map: dict[str, str],
 ) -> dict[str, str]:
-    env: dict[str, str] = {}
-    if provider_name == "codex":
-        env["CODEX_HOME"] = str(runtime_home)
-    elif provider_name == "claude":
-        env["CLAUDE_CONFIG_DIR"] = str(runtime_home)
-        env["CLAUDE_HOME"] = str(runtime_home)
-    elif provider_name == "opencode":
-        env["OPENCODE_CONFIG_DIR"] = str(runtime_home)
-        env["OPENCODE_DATA_DIR"] = str(root / "opencode-data")
-        for key, value in _opencode_runtime_env(target_env).items():
-            if key in {"OPENCODE_CONFIG_CONTENT", "OPENCODE_CONFIG_DIR", "OPENCODE_DATA_DIR"}:
-                continue
-            if key in {"OPENCODE_CONFIG", "OPENCODE_TUI_CONFIG"}:
-                path = Path(value).expanduser()
-                if path.is_absolute():
-                    value = str(_mapped_path(path, path_map))
-            env[key] = value
+    policy = resume_policy_for_provider(provider_name)
+    if policy is None:
+        return {}
+    env = {key: str(runtime_home) for key in policy.home_env_keys}
+    if policy.data_dir_env_key is not None and policy.data_dir_name is not None:
+        env[policy.data_dir_env_key] = str(root / policy.data_dir_name)
+    env.update(_runtime_policy_extra_env(policy, target_env, path_map))
     return env
 
 
@@ -593,7 +727,9 @@ def _materialize_runtime_config(provider_name: str, runtime_home: Path, target_e
     if current is not None:
         wanted = _preserve_redacted_config_values(current, wanted)
     cleaned = _without_redacted_values(wanted)
-    wanted = {} if cleaned is _REDACTED_CONFIG_VALUE else cleaned
+    if cleaned is _REDACTED_CONFIG_VALUE:
+        return
+    wanted = cleaned
     runtime_home.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(wanted, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -634,20 +770,59 @@ def _link_runtime_secret_files(provider_name: str, source_home: Path, runtime_ho
     if provider_name == "claude":
         pairs.append((source_home.parent / ".claude.json", runtime_home.parent / ".claude.json"))
     for source, dest in pairs:
-        if source.exists() and source.is_file() and not dest.exists():
+        if _regular_file_no_symlink(source) and not dest.exists():
             _link_or_copy_file(source, dest)
 
 
 def _link_or_copy_file(source: Path, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
+    _copy_regular_file_no_symlink(source, dest)
+
+
+def _regular_file_no_symlink(path: Path) -> bool:
     try:
-        dest.symlink_to(source)
+        return path.is_file() and not path.is_symlink()
     except OSError:
-        shutil.copy2(source, dest)
+        return False
 
 
-def _mirror_path(path: Path) -> Path:
-    return Path(*path.parts[1:]) if path.is_absolute() else path
+def _copy_regular_file_no_symlink(source: Path, dest: Path) -> None:
+    try:
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(source, flags)
+    except OSError:
+        return
+    try:
+        with os.fdopen(fd, "rb") as handle:
+            stat_result = os.fstat(handle.fileno())
+            if not _stat_is_regular(stat_result.st_mode):
+                return
+            mode = stat_result.st_mode & 0o777
+            dest_fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+            try:
+                with os.fdopen(dest_fd, "wb") as output:
+                    shutil.copyfileobj(handle, output)
+                    _chmod_open_file_or_path(output.fileno(), dest, mode)
+            except Exception:
+                try:
+                    os.unlink(dest)
+                finally:
+                    raise
+    except FileExistsError:
+        return
+
+
+def _stat_is_regular(mode: int) -> bool:
+    return stat.S_ISREG(mode)
+
+
+def _chmod_open_file_or_path(fd: int, path: Path, mode: int) -> None:
+    if hasattr(os, "fchmod"):
+        os.fchmod(fd, mode)
+    else:
+        os.chmod(path, mode)
 
 
 def _string_value(value: object) -> str | None:
@@ -1055,7 +1230,7 @@ def _codex_runtime_from_manifest(
 
 def _codex_runtime_from_trajectory(trajectory: bytes) -> dict[str, str]:
     runtime: dict[str, str] = {}
-    for record in _jsonl_records(trajectory):
+    for record in _iter_jsonl_records(trajectory):
         if record.get("type") != "turn_context":
             continue
         payload = record.get("payload")
@@ -1179,6 +1354,7 @@ def _write_resume_open_spec(target_store: CheckpointStore, spec: ResumeOpenSpec,
 
 
 def load_resume_open_spec(session_id: str, plugin_home: Path | None = None) -> ResumeOpenSpec:
+    _require_resume_session_id(session_id, "session id", Path("resume-open"))
     path = session_dir(session_id, plugin_home) / "resume-open.json"
     if not path.exists():
         raise RuntimeError(
@@ -1193,10 +1369,18 @@ def load_resume_open_spec(session_id: str, plugin_home: Path | None = None) -> R
         raise RuntimeError(f"Invalid resume-open state for session {session_id}: {path}")
     provider = _required_string(data, "provider", path)
     spec_session_id = _required_string(data, "session_id", path)
+    if spec_session_id != session_id:
+        raise RuntimeError(f"Invalid resume-open state field 'session_id': {path}")
     cwd = Path(_required_string(data, "cwd", path)).expanduser()
-    command = _required_string_list(data.get("command"), "command", path)
+    command = _validated_resume_open_command(
+        provider,
+        spec_session_id,
+        _required_string_list(data.get("command"), "command", path),
+        path,
+    )
     preflight = [_required_string_list(item, "preflight", path) for item in _list_value(data.get("preflight"))]
-    env = _string_dict(data.get("env"))
+    preflight = _validated_resume_open_preflight(provider, spec_session_id, preflight, path)
+    env = _validated_resume_open_env(provider, data.get("env"), data, path)
     return ResumeOpenSpec(
         provider=provider,
         session_id=spec_session_id,
@@ -1247,20 +1431,26 @@ def _resume_open_spec(
 ) -> ResumeOpenSpec | None:
     if provider_session_path is None:
         return None
-    if provider_name == "claude":
-        command = ["claude", *_provider_runtime_args("claude", target_env), "--resume", new_session_id]
-        return ResumeOpenSpec(provider_name, new_session_id, cwd, dict(env), [], command)
-    if provider_name == "codex":
-        command = ["codex", "resume", *_provider_runtime_args("codex", target_env), new_session_id]
-        return ResumeOpenSpec(provider_name, new_session_id, cwd, dict(env), [], command)
-    if provider_name == "opencode":
-        import_path = str(provider_session_path)
-        preflight = [
-            ["opencode", "import", import_path],
-            [sys.executable, "-m", "checkpoint_plugin.cli", "opencode-restore-metadata", import_path, new_session_id],
-        ]
-        return ResumeOpenSpec(provider_name, new_session_id, cwd, dict(env), preflight, ["opencode", "--session", new_session_id])
-    return None
+    policy = resume_policy_for_provider(provider_name)
+    if policy is None:
+        return None
+    preflight = _resume_open_preflight(policy, provider_session_path, new_session_id)
+    command = _build_resume_command_from_policy(policy, new_session_id, target_env)
+    return ResumeOpenSpec(provider_name, new_session_id, cwd, dict(env), preflight, command)
+
+
+def _resume_open_preflight(
+    policy: ProviderResumePolicy,
+    provider_session_path: Path,
+    session_id: str,
+) -> list[list[str]]:
+    if policy.preflight_kind != "opencode_import":
+        return []
+    import_path = str(provider_session_path)
+    return [
+        ["opencode", "import", import_path],
+        [sys.executable, "-m", "checkpoint_plugin.cli", "opencode-restore-metadata", import_path, session_id],
+    ]
 
 
 def _required_string(data: dict[str, object], key: str, path: Path) -> str:
@@ -1268,6 +1458,20 @@ def _required_string(data: dict[str, object], key: str, path: Path) -> str:
     if not isinstance(value, str) or not value:
         raise RuntimeError(f"Invalid resume-open state field {key!r}: {path}")
     return value
+
+
+def _require_resume_session_id(value: str, key: str, path: Path) -> None:
+    if not _valid_resume_session_id(value):
+        raise RuntimeError(f"Invalid resume-open state field {key!r}: {path}")
+
+
+def _valid_resume_session_id(value: str) -> bool:
+    return bool(
+        re.fullmatch(
+            r"(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|ses_[A-Za-z0-9_-]{1,80})",
+            value,
+        )
+    )
 
 
 def _required_string_list(value: object, key: str, path: Path) -> list[str]:
@@ -1284,6 +1488,86 @@ def _string_dict(value: object) -> dict[str, str]:
     if not isinstance(value, dict):
         return {}
     return {key: str(item) for key, item in value.items() if isinstance(key, str) and _safe_env_name(key)}
+
+
+def _validated_resume_open_env(
+    provider: str,
+    value: object,
+    data: dict[str, object],
+    path: Path,
+) -> dict[str, str]:
+    env = _string_dict(value)
+    policy = _resume_policy(provider, path)
+    if set(env) - policy.allowed_env:
+        raise RuntimeError(f"Invalid resume-open state field 'env': {path}")
+    provider_home = _required_path_field(data, "provider_home", path)
+    env_state_dir = _required_path_field(data, "env_state_dir", path)
+    for key in policy.home_env_keys:
+        if env.get(key) != str(provider_home):
+            raise RuntimeError(f"Invalid resume-open state field 'env': {path}")
+    if policy.data_dir_env_key is not None and policy.data_dir_name is not None:
+        expected_data_dir = str(env_state_dir / policy.data_dir_name)
+        if env.get(policy.data_dir_env_key) != expected_data_dir:
+            raise RuntimeError(f"Invalid resume-open state field 'env': {path}")
+    for key in policy.path_env_keys:
+        if key in env and not Path(env[key]).expanduser().is_absolute():
+            raise RuntimeError(f"Invalid resume-open state field 'env': {path}")
+    return env
+
+
+def _allowed_resume_open_env(provider: str, path: Path) -> set[str]:
+    return set(_resume_policy(provider, path).allowed_env)
+
+
+def _required_path_field(data: dict[str, object], key: str, path: Path) -> Path:
+    raw = _required_string(data, key, path)
+    value = Path(raw).expanduser()
+    if not value.is_absolute():
+        raise RuntimeError(f"Invalid resume-open state field {key!r}: {path}")
+    return value
+
+
+def _validated_resume_open_command(
+    provider: str,
+    session_id: str,
+    command: list[str],
+    path: Path,
+) -> list[str]:
+    _require_resume_session_id(session_id, "session_id", path)
+    _validate_resume_command_from_policy(_resume_policy(provider, path), session_id, command, path)
+    return command
+
+
+def _validated_resume_open_preflight(
+    provider: str,
+    session_id: str,
+    preflight: list[list[str]],
+    path: Path,
+) -> list[list[str]]:
+    policy = _resume_policy(provider, path)
+    if policy.preflight_kind == "none":
+        if preflight:
+            raise RuntimeError(f"Invalid resume-open state field 'preflight': {path}")
+        return []
+    if policy.preflight_kind != "opencode_import":
+        raise RuntimeError(f"Invalid resume-open state field 'preflight': {path}")
+    if len(preflight) != 2:
+        raise RuntimeError(f"Invalid resume-open state field 'preflight': {path}")
+    import_command, metadata_command = preflight
+    if import_command[:2] != ["opencode", "import"] or len(import_command) != 3:
+        raise RuntimeError(f"Invalid resume-open state field 'preflight': {path}")
+    import_path = import_command[2]
+    if not _valid_opencode_import_path(import_path, session_id):
+        raise RuntimeError(f"Invalid resume-open state field 'preflight': {path}")
+    expected_metadata = [sys.executable, "-m", "checkpoint_plugin.cli", "opencode-restore-metadata", import_path, session_id]
+    if metadata_command != expected_metadata:
+        raise RuntimeError(f"Invalid resume-open state field 'preflight': {path}")
+    return preflight
+
+
+def _valid_opencode_import_path(value: str, session_id: str) -> bool:
+    path = Path(value).expanduser()
+    return path.is_absolute() and path.name == f"{session_id}.json" and path.parent.name == "imports"
 
 
 def _session_env_from_environment(env: object) -> dict[str, str]:
@@ -2450,8 +2734,7 @@ def _claude_project_dir_name(cwd: Path) -> str:
     return str(cwd).replace("/", "-")
 
 
-def _jsonl_records(data: bytes) -> list[dict[str, object]]:
-    records: list[dict[str, object]] = []
+def _iter_jsonl_records(data: bytes) -> Iterable[dict[str, object]]:
     for line in data.splitlines():
         if not line.strip():
             continue
@@ -2460,8 +2743,11 @@ def _jsonl_records(data: bytes) -> list[dict[str, object]]:
         except json.JSONDecodeError:
             continue
         if isinstance(value, dict):
-            records.append(value)
-    return records
+            yield value
+
+
+def _jsonl_records(data: bytes) -> list[dict[str, object]]:
+    return list(_iter_jsonl_records(data))
 
 
 def _json_line(record: dict[str, object]) -> bytes:
@@ -2562,28 +2848,21 @@ def _resume_command(
     provider_session_path: Path | None = None,
     target_env: object | None = None,
 ) -> str | None:
-    if provider_name in {"claude", "codex", "opencode"}:
+    if resume_policy_for_provider(provider_name) is not None:
         return _shell_join(["checkpoint", "resume-open", new_session_id])
     return None
 
 
-def _provider_runtime_args(provider_name: str, target_env: object | None) -> list[str]:
-    model = _string_attr(target_env, "model")
-    effort = _string_attr(target_env, "effort")
-    permission_mode = _string_attr(target_env, "permission_mode")
+def _provider_runtime_args(policy: ProviderResumePolicy, target_env: object | None) -> list[str]:
     args: list[str] = []
-    if provider_name == "claude":
-        if model:
-            args.extend(["--model", model])
-        if effort:
-            args.extend(["--effort", effort])
-        if permission_mode:
-            args.extend(["--permission-mode", permission_mode])
-    elif provider_name == "codex":
-        if model:
-            args.extend(["--model", model])
-        if effort:
-            args.extend(["-c", f"model_reasoning_effort={json.dumps(effort)}"])
+    for field_name, option in policy.runtime_arg_fields:
+        value = _string_attr(target_env, field_name)
+        if value:
+            args.extend([option, value])
+    for field_name, option, config_key in policy.runtime_json_config_arg_fields:
+        value = _string_attr(target_env, field_name)
+        if value:
+            args.extend([option, f"{config_key}={json.dumps(value)}"])
     return args
 
 

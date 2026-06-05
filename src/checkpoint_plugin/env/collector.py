@@ -956,10 +956,12 @@ def _nearest_project_root(cwd: Path) -> Path:
 
 
 def _ancestor_chain(root: Path, cwd: Path) -> list[Path]:
+    root = root.resolve(strict=False)
+    cwd = cwd.resolve(strict=False)
     try:
         relative = cwd.relative_to(root)
     except ValueError:
-        return [cwd]
+        return []
 
     paths = [root]
     current = root
