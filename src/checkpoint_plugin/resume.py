@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Iterable
 
-from .env.collector import collect_environment, environment_from_blob
+from .env.collector import claude_mcp_statuses_from_trajectory, collect_environment, environment_from_blob
 from .env.differ import diff_environments, render_diff
 from .env.providers import (
     RESUME_RUNTIME_ARGS,
@@ -744,6 +744,9 @@ def _runtime_process_env(
 
 
 def _materialize_runtime_config(provider_name: str, runtime_home: Path, target_env: object) -> None:
+    if provider_name == "claude":
+        _materialize_claude_runtime_config(runtime_home, target_env)
+        return
     if provider_name != "opencode":
         return
     content = _opencode_config_content(target_env, keep_redacted=True)
@@ -760,6 +763,50 @@ def _materialize_runtime_config(provider_name: str, runtime_home: Path, target_e
     wanted = cleaned
     runtime_home.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(wanted, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _materialize_claude_runtime_config(runtime_home: Path, target_env: object) -> None:
+    if not _has_mcp_server_statuses(target_env):
+        return
+    inactive = _inactive_mcp_server_names(target_env)
+    cwd = _target_env_cwd(target_env)
+    if cwd is None:
+        return
+    target = runtime_home / ".claude.json"
+    current = _json_object(_load_json_value(target))
+    projects = _json_object(current.get("projects"))
+    project = _json_object(projects.get(str(cwd)))
+    project["disabledMcpServers"] = inactive
+    projects[str(cwd)] = project
+    current["projects"] = projects
+    runtime_home.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(current, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _has_mcp_server_statuses(target_env: object) -> bool:
+    mcp_servers = getattr(target_env, "mcp_servers", None)
+    return isinstance(mcp_servers, dict) and bool(mcp_servers)
+
+
+def _inactive_mcp_server_names(target_env: object) -> list[str]:
+    mcp_servers = getattr(target_env, "mcp_servers", None)
+    if not isinstance(mcp_servers, dict):
+        return []
+    return sorted(
+        name
+        for name, status in mcp_servers.items()
+        if isinstance(name, str) and isinstance(status, str) and status == "inactive"
+    )
+
+
+def _target_env_cwd(target_env: object) -> Path | None:
+    extra = getattr(target_env, "extra", None)
+    if not isinstance(extra, dict):
+        return None
+    cwd = extra.get("cwd")
+    if not isinstance(cwd, str) or not cwd:
+        return None
+    return Path(cwd).expanduser()
 
 
 def _copy_runtime_seed_files(
@@ -796,7 +843,7 @@ def _link_runtime_secret_files(provider_name: str, source_home: Path, runtime_ho
         (source_home / ".env", runtime_home / ".env"),
     ]
     if provider_name == "claude":
-        pairs.append((source_home.parent / ".claude.json", runtime_home.parent / ".claude.json"))
+        pairs.append((source_home.parent / ".claude.json", runtime_home / ".claude.json"))
     for source, dest in pairs:
         if _regular_file_no_symlink(source) and not dest.exists():
             _link_or_copy_file(source, dest)
@@ -1234,12 +1281,35 @@ def _target_env_with_provider_runtime(
     target_env: object,
     store: CheckpointStore,
 ) -> object:
+    if getattr(target_env, "provider", None) == "claude":
+        return _target_env_with_claude_runtime(manifest, target_env, store)
     if getattr(target_env, "provider", None) != "codex":
         return target_env
     runtime = _codex_runtime_from_manifest(manifest, store)
     if not runtime:
         return target_env
     return replace(target_env, **runtime)
+
+
+def _target_env_with_claude_runtime(
+    manifest: CheckpointManifest,
+    target_env: object,
+    store: CheckpointStore,
+) -> object:
+    ref = manifest.trajectory_ref
+    if ref is None or ref.provider != "claude":
+        return target_env
+    try:
+        trajectory = _read_trajectory_slice_for_manifest(store, manifest, extend_to_eof=True)
+    except (OSError, ValueError):
+        return target_env
+    statuses = claude_mcp_statuses_from_trajectory(trajectory)
+    if not statuses:
+        return target_env
+    current = getattr(target_env, "mcp_servers", None)
+    mcp_servers = dict(current) if isinstance(current, dict) else {}
+    mcp_servers.update(statuses)
+    return replace(target_env, mcp_servers=mcp_servers)
 
 
 def _codex_runtime_from_manifest(

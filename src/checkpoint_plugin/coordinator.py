@@ -177,7 +177,7 @@ class CheckpointCoordinator:
                 trajectory_ref = self._write_manual_trajectory_ref(provider.name, turn_id, turn_record)
             self._close_previous_trajectory_ref(latest, trajectory_ref)
             self._refresh_metadata_title(provider.name, provider.home, trajectory_ref)
-            env_state = collect_environment(self.cwd, provider, self.store)
+            env_state = collect_environment(self.cwd, provider, self.store, trajectory_ref)
             env_ref = environment_to_blob(env_state, self.store)
             config = load_config(self.home)
             ignore = IgnoreMatcher(self.cwd, config.get("exclude_patterns") or [])

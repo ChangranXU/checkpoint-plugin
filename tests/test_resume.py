@@ -1845,6 +1845,145 @@ def test_resume_command_is_set_in_report(tmp_path, monkeypatch):
     assert resume_open["command"] == ["claude", "--resume", report.new_session_id]
 
 
+def test_resume_places_claude_json_under_config_dir_for_mcp(tmp_path, monkeypatch):
+    plugin_home = tmp_path / "plugin"
+    home = tmp_path / "home"
+    cwd = tmp_path / "work"
+    copy_cwd = tmp_path / "work-copy"
+    transcript = tmp_path / "claude.jsonl"
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
+    monkeypatch.setenv("TEST_HOME", str(home))
+    monkeypatch.setenv("CHECKPOINT_PROVIDER", "claude")
+
+    home.mkdir()
+    (home / ".claude.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {"context7": {"type": "stdio", "command": "npx"}},
+                "projects": {str(cwd): {"disabledMcpServers": ["context7"]}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    captured = json.dumps({"type": "user", "promptId": "p-1", "uuid": "u1", "parentUuid": None,
+                           "message": {"role": "user", "content": "hi"}}) + "\n"
+    _seed_claude_session_for_resume(plugin_home, home, cwd, transcript, transcript_text=captured)
+
+    report = ResumeOrchestrator(cwd=cwd).execute(
+        ResumeOrchestrator(cwd=cwd).plan("s1", 0),
+        lambda _text: ResumeOptions(proceed=True, target_cwd=copy_cwd),
+    )
+
+    assert report.env_state_dir is not None
+    runtime_claude_home = Path(report.env_state_dir) / "claude"
+    runtime_claude_json = runtime_claude_home / ".claude.json"
+    assert runtime_claude_json.exists()
+    runtime_config = json.loads(runtime_claude_json.read_text(encoding="utf-8"))
+    assert runtime_config["mcpServers"] == {
+        "context7": {"type": "stdio", "command": "npx"}
+    }
+    assert runtime_config["projects"][str(copy_cwd)]["disabledMcpServers"] == ["context7"]
+    assert not (Path(report.env_state_dir) / ".claude.json").exists()
+
+
+def test_resume_clears_claude_disabled_mcp_servers_when_active(tmp_path, monkeypatch):
+    plugin_home = tmp_path / "plugin"
+    home = tmp_path / "home"
+    cwd = tmp_path / "work"
+    copy_cwd = tmp_path / "work-copy"
+    transcript = tmp_path / "claude.jsonl"
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
+    monkeypatch.setenv("TEST_HOME", str(home))
+    monkeypatch.setenv("CHECKPOINT_PROVIDER", "claude")
+
+    home.mkdir()
+    (home / ".claude.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {"context7": {"type": "stdio", "command": "npx"}},
+                "projects": {str(cwd): {"disabledMcpServers": []}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    captured = json.dumps({"type": "user", "promptId": "p-1", "uuid": "u1", "parentUuid": None,
+                           "message": {"role": "user", "content": "hi"}}) + "\n"
+    _seed_claude_session_for_resume(plugin_home, home, cwd, transcript, transcript_text=captured)
+
+    report = ResumeOrchestrator(cwd=cwd).execute(
+        ResumeOrchestrator(cwd=cwd).plan("s1", 0),
+        lambda _text: ResumeOptions(proceed=True, target_cwd=copy_cwd),
+    )
+
+    assert report.env_state_dir is not None
+    runtime_config = json.loads(
+        (Path(report.env_state_dir) / "claude" / ".claude.json").read_text(encoding="utf-8")
+    )
+    assert runtime_config["projects"][str(copy_cwd)]["disabledMcpServers"] == []
+
+
+def test_resume_replays_claude_mcp_delta_when_snapshot_config_was_stale(tmp_path, monkeypatch):
+    plugin_home = tmp_path / "plugin"
+    home = tmp_path / "home"
+    cwd = tmp_path / "work"
+    copy_cwd = tmp_path / "work-copy"
+    transcript = tmp_path / "claude.jsonl"
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
+    monkeypatch.setenv("TEST_HOME", str(home))
+    monkeypatch.setenv("CHECKPOINT_PROVIDER", "claude")
+
+    home.mkdir()
+    (home / ".claude.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {"context7": {"type": "stdio", "command": "npx"}},
+                "projects": {str(cwd): {"disabledMcpServers": ["context7"]}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    captured = "\n".join(
+        [
+            json.dumps({"type": "user", "promptId": "p-1", "uuid": "u1", "parentUuid": None,
+                        "message": {"role": "user", "content": "hi"}}),
+            json.dumps(
+                {
+                    "type": "attachment",
+                    "attachment": {
+                        "type": "deferred_tools_delta",
+                        "addedNames": ["mcp__context7__query-docs"],
+                        "removedNames": [],
+                        "readdedNames": ["mcp__context7__resolve-library-id"],
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "attachment",
+                    "attachment": {
+                        "type": "mcp_instructions_delta",
+                        "addedNames": ["context7"],
+                        "removedNames": [],
+                    },
+                }
+            ),
+            "",
+        ]
+    )
+    _seed_claude_session_for_resume(plugin_home, home, cwd, transcript, transcript_text=captured)
+
+    report = ResumeOrchestrator(cwd=cwd).execute(
+        ResumeOrchestrator(cwd=cwd).plan("s1", 0),
+        lambda _text: ResumeOptions(proceed=True, target_cwd=copy_cwd),
+    )
+
+    assert report.env_state_dir is not None
+    runtime_config = json.loads(
+        (Path(report.env_state_dir) / "claude" / ".claude.json").read_text(encoding="utf-8")
+    )
+    assert runtime_config["projects"][str(copy_cwd)]["disabledMcpServers"] == []
+
+
 def test_resume_command_pins_claude_model_effort_and_permission():
     from checkpoint_plugin.types import EnvironmentState
 

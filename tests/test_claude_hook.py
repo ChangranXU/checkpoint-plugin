@@ -414,6 +414,72 @@ def test_claude_seeds_payload_fields(tmp_path, monkeypatch):
     assert env.agent_type == "Explore"
 
 
+def test_claude_mcp_delta_overrides_stale_config_status(tmp_path, monkeypatch):
+    plugin_home = tmp_path / "plugin"
+    home = tmp_path / "home"
+    cwd = tmp_path / "work"
+    transcript = tmp_path / "claude.jsonl"
+    cwd.mkdir()
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
+    monkeypatch.setenv("TEST_HOME", str(home))
+    monkeypatch.setenv("CHECKPOINT_PROVIDER", "claude")
+    monkeypatch.setenv("CLAUDE_SESSION_ID", "claude-mcp")
+    home.mkdir()
+    (home / ".claude.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {"context7": {"type": "stdio", "command": "npx"}},
+                "projects": {str(cwd): {"disabledMcpServers": ["context7"]}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    transcript.write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "user", "promptId": "p-1", "message": {"role": "user", "content": "hi"}}),
+                json.dumps(
+                    {
+                        "type": "attachment",
+                        "attachment": {
+                            "type": "deferred_tools_delta",
+                            "addedNames": ["mcp__context7__query-docs"],
+                            "removedNames": [],
+                            "readdedNames": ["mcp__context7__resolve-library-id"],
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "attachment",
+                        "attachment": {
+                            "type": "mcp_instructions_delta",
+                            "addedNames": ["context7"],
+                            "removedNames": [],
+                        },
+                    }
+                ),
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    payload = {
+        "hook_event_name": "Stop",
+        "session_id": "claude-mcp",
+        "cwd": str(cwd),
+        "transcript_path": str(transcript),
+    }
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
+    assert claude_code_hook.main(["turn_end"]) == 0
+
+    store = CheckpointStore(plugin_home / "sessions" / "claude-mcp")
+    manifest = store.list_manifests()[0]
+    env = environment_from_blob(manifest.env_ref, store)
+    assert env.mcp_servers["context7"] == "active"
+
+
 
 def test_claude_subagent_settle_captures_late_flushed_deliverable(tmp_path, monkeypatch):
     """F12: SubagentStop can fire before the subagent's final assistant deliverable

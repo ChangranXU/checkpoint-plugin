@@ -12,7 +12,7 @@ from pathlib import Path, PurePosixPath
 from typing import Iterable
 
 from checkpoint_plugin.store import CheckpointStore
-from checkpoint_plugin.types import EnvironmentState
+from checkpoint_plugin.types import EnvironmentState, TrajectoryReference
 
 from .providers import ProviderLayout
 
@@ -93,6 +93,7 @@ def collect_environment(
     cwd: Path,
     provider: ProviderLayout,
     store: CheckpointStore,
+    trajectory_ref: TrajectoryReference | None = None,
 ) -> EnvironmentState:
     cwd = cwd.expanduser().resolve()
     # Some provider fields (notably Claude's model) are only delivered to the
@@ -116,7 +117,7 @@ def collect_environment(
         memory_files=_collect_tree(provider.memory_dir, store),
         mcp_config=_store_file(provider.mcp_config, store),
         mcp_configs=_collect_named_files(_mcp_config_files(provider, cwd), store),
-        mcp_servers=_collect_mcp_servers(provider, cwd, session_env),
+        mcp_servers=_collect_mcp_servers(provider, cwd, session_env, trajectory_ref),
         skills=skills,
         skill_status=_collect_skill_status(provider, cwd, skills),
         plugin_status=_collect_plugin_status(provider, cwd, session_env),
@@ -153,7 +154,12 @@ def _session_env_fallback(store: CheckpointStore) -> dict[str, str]:
     return {str(key): str(value) for key, value in session_env.items() if value}
 
 
-def _collect_mcp_servers(provider: ProviderLayout, cwd: Path, session_env: dict[str, str] | None = None) -> dict[str, str]:
+def _collect_mcp_servers(
+    provider: ProviderLayout,
+    cwd: Path,
+    session_env: dict[str, str] | None = None,
+    trajectory_ref: TrajectoryReference | None = None,
+) -> dict[str, str]:
     if provider.name == "codex":
         servers: dict[str, str] = {}
         for config in _codex_configs(provider, cwd):
@@ -177,6 +183,9 @@ def _collect_mcp_servers(provider: ProviderLayout, cwd: Path, session_env: dict[
                 servers[str(name)] = "active"
             for name in project.get("disabledMcpjsonServers") or []:
                 servers[str(name)] = "inactive"
+            for name in project.get("disabledMcpServers") or []:
+                servers[str(name)] = "inactive"
+        servers.update(_claude_mcp_statuses_from_trajectory_ref(trajectory_ref))
         return servers
     if provider.name == "opencode":
         servers: dict[str, str] = {}
@@ -481,6 +490,79 @@ def _opencode_runtime_mcp_servers(session_env: dict[str, str]) -> dict[str, str]
         elif isinstance(status, str) and status:
             statuses[str(name)] = status
     return statuses
+
+
+def _claude_mcp_statuses_from_trajectory_ref(ref: TrajectoryReference | None) -> dict[str, str]:
+    if ref is None or ref.provider != "claude" or not ref.transcript_path:
+        return {}
+    path = Path(ref.transcript_path).expanduser()
+    if not path.is_file() or ref.start_offset < 0 or ref.end_offset < ref.start_offset:
+        return {}
+    try:
+        with path.open("rb") as handle:
+            handle.seek(ref.start_offset)
+            data = handle.read(ref.end_offset - ref.start_offset)
+    except OSError:
+        return {}
+    return claude_mcp_statuses_from_trajectory(data)
+
+
+def claude_mcp_statuses_from_trajectory(data: bytes) -> dict[str, str]:
+    """Infer Claude's live MCP status from transcript deltas.
+
+    Claude can re-add/remove MCP tools for a turn before `~/.claude.json` reflects
+    the final project field. The transcript attachments are the source of truth
+    for the tool surface that the model actually saw in that turn.
+    """
+    statuses: dict[str, str] = {}
+    for line in data.splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(record, dict):
+            continue
+        attachment = record.get("attachment")
+        if not isinstance(attachment, dict):
+            continue
+        kind = attachment.get("type")
+        if kind == "mcp_instructions_delta":
+            _apply_claude_mcp_name_delta(statuses, attachment.get("removedNames"), "inactive")
+            _apply_claude_mcp_name_delta(statuses, attachment.get("addedNames"), "active")
+        elif kind == "deferred_tools_delta":
+            _apply_claude_mcp_tool_delta(statuses, attachment.get("removedNames"), "inactive")
+            _apply_claude_mcp_tool_delta(statuses, attachment.get("addedNames"), "active")
+            _apply_claude_mcp_tool_delta(statuses, attachment.get("readdedNames"), "active")
+    return statuses
+
+
+def _apply_claude_mcp_name_delta(statuses: dict[str, str], names: object, status: str) -> None:
+    if not isinstance(names, list):
+        return
+    for name in names:
+        if isinstance(name, str) and name:
+            statuses[name] = status
+
+
+def _apply_claude_mcp_tool_delta(statuses: dict[str, str], names: object, status: str) -> None:
+    if not isinstance(names, list):
+        return
+    for name in names:
+        server = _claude_mcp_server_name_from_tool(name)
+        if server:
+            statuses[server] = status
+
+
+def _claude_mcp_server_name_from_tool(name: object) -> str | None:
+    if not isinstance(name, str):
+        return None
+    match = re.fullmatch(r"mcp__(?P<server>.+?)__[^_].*", name)
+    if match is None:
+        return None
+    server = match.group("server")
+    return server or None
 
 
 def _opencode_model(configs: list[dict[str, object]]) -> str | None:

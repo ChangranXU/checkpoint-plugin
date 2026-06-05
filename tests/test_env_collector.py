@@ -216,7 +216,8 @@ def test_collect_claude_structured_env_status(tmp_path, monkeypatch):
     "%s": {
       "mcpServers": {"project_server": {"command": "local"}},
       "enabledMcpjsonServers": ["enabled_project"],
-      "disabledMcpjsonServers": ["disabled_project"]
+      "disabledMcpjsonServers": ["disabled_project"],
+      "disabledMcpServers": ["context7"]
     }
   }
 }
@@ -229,7 +230,7 @@ def test_collect_claude_structured_env_status(tmp_path, monkeypatch):
     env = collect_environment(cwd, claude_layout(), store)
 
     assert env.mcp_servers == {
-        "context7": "active",
+        "context7": "inactive",
         "disabled_project": "inactive",
         "enabled_project": "active",
         "project_server": "active",
