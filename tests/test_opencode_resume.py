@@ -476,6 +476,50 @@ def test_opencode_runtime_config_carries_mcp_overlay_without_secrets(tmp_path):
     assert "OPENCODE_CONFIG_CONTENT" not in runtime_env
 
 
+def test_opencode_runtime_config_rewrites_path_values(tmp_path, monkeypatch):
+    from checkpoint_plugin.resume import _environment_for_runtime, _materialize_runtime_config, _runtime_path_map
+    from checkpoint_plugin.env.providers import opencode_layout
+    from checkpoint_plugin.types import EnvironmentState
+
+    home = tmp_path / "home"
+    source_home = home / ".config" / "opencode"
+    source_cwd = tmp_path / "work"
+    target_cwd = tmp_path / "work-copy"
+    source_home.mkdir(parents=True)
+    source_cwd.mkdir()
+    target_cwd.mkdir()
+    monkeypatch.setenv("TEST_HOME", str(home))
+
+    source_provider = opencode_layout()
+    root = tmp_path / "env-state" / "ses_resumed"
+    runtime_home = root / "opencode"
+    path_map = _runtime_path_map(source_provider, root, runtime_home)
+    target_env = EnvironmentState(
+        provider="opencode",
+        extra={
+            "cwd": str(source_cwd),
+            "provider_home": str(source_home),
+            "opencode_config_content": json.dumps(
+                {
+                    "plugin": [str(source_home / "plugin" / "checkpoint.ts")],
+                    "instructions": str(source_cwd / "AGENTS.md"),
+                    "skills": {"paths": [str(source_home / "skills")]},
+                }
+            ),
+        },
+    )
+
+    runtime_env = _environment_for_runtime(target_env, path_map, target_cwd)
+    _materialize_runtime_config("opencode", runtime_home, runtime_env)
+
+    config = json.loads((runtime_home / "opencode.json").read_text(encoding="utf-8"))
+    assert str(source_home / "plugin" / "checkpoint.ts") not in json.dumps(config)
+    assert str(source_cwd / "AGENTS.md") not in json.dumps(config)
+    assert config["plugin"] == [str(runtime_home / "plugin" / "checkpoint.ts")]
+    assert config["instructions"] == str(target_cwd / "AGENTS.md")
+    assert config["skills"]["paths"] == [str(runtime_home / "skills")]
+
+
 def test_opencode_runtime_config_skips_redacted_only_config(tmp_path):
     from checkpoint_plugin.resume import _materialize_runtime_config
     from checkpoint_plugin.types import EnvironmentState

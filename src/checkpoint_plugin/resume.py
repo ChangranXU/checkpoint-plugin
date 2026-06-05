@@ -31,7 +31,7 @@ from .fs.ignore import IgnoreMatcher
 from .fs.restorer import diff_filesystems, render_fs_diff, restore_cwd
 from .fs.snapshot import filesystem_from_blob, snapshot_cwd
 from .integrations._trajectory_slicer import claude_key, codex_key, jsonl_count_records, recover_trailing_tail
-from .path_utils import mirror_path, path_within
+from .path_utils import mirror_path, path_within, rewrite_path_references_text
 from .paths import backups_dir, ensure_home, load_config, session_dir
 from .store import CheckpointStore, canonical_json
 from .types import CheckpointManifest, ResumePlan, ResumeReport, TrajectoryReference
@@ -437,7 +437,12 @@ def _prepare_resume_runtime(
 ) -> ResumeRuntime:
     root = home / "env-state" / new_session_id
     runtime_home = root / source_provider.name
-    path_map = _runtime_path_map(source_provider, root, runtime_home)
+    path_map = _runtime_path_map(
+        source_provider,
+        root,
+        runtime_home,
+        captured_provider_home=_captured_provider_home(target_env),
+    )
     runtime_provider = _provider_layout_with_path_map(source_provider, path_map)
     runtime_provider.home.mkdir(parents=True, exist_ok=True)
     _copy_runtime_seed_files(source_provider, runtime_provider, path_map)
@@ -446,8 +451,16 @@ def _prepare_resume_runtime(
     return ResumeRuntime(root=root, provider=runtime_provider, env=env, path_map=path_map)
 
 
-def _runtime_path_map(source_provider: ProviderLayout, root: Path, runtime_home: Path) -> dict[str, str]:
+def _runtime_path_map(
+    source_provider: ProviderLayout,
+    root: Path,
+    runtime_home: Path,
+    *,
+    captured_provider_home: Path | None = None,
+) -> dict[str, str]:
     path_map = {str(source_provider.home): str(runtime_home)}
+    if captured_provider_home is not None and captured_provider_home.is_absolute():
+        path_map[str(captured_provider_home)] = str(runtime_home)
     external_root = root / "external"
     for path in _provider_layout_paths(source_provider):
         if path is None or not path.is_absolute():
@@ -456,6 +469,16 @@ def _runtime_path_map(source_provider: ProviderLayout, root: Path, runtime_home:
             continue
         path_map[str(path.parent)] = str(external_root / mirror_path(path.parent))
     return _validated_path_map(path_map, root)
+
+
+def _captured_provider_home(env: object) -> Path | None:
+    extra = getattr(env, "extra", None)
+    if not isinstance(extra, dict):
+        return None
+    provider_home = _string_value(extra.get("provider_home"))
+    if not provider_home:
+        return None
+    return Path(provider_home).expanduser()
 
 
 def _validated_path_map(path_map: dict[str, str], root: Path) -> dict[str, str]:
@@ -548,10 +571,15 @@ def _environment_for_runtime(env: object, path_map: dict[str, str], target_cwd: 
     else:
         extra["provider_home"] = provider_home
     extra["cwd"] = str(target_cwd)
+    extra["runtime_path_map"] = runtime_map
 
     runtime_env = extra.get("opencode_runtime_env")
     if isinstance(runtime_env, dict):
         extra["opencode_runtime_env"] = _rewrite_opencode_runtime_env(runtime_env, runtime_map)
+
+    config_content = extra.get("opencode_config_content")
+    if isinstance(config_content, str) and config_content:
+        extra["opencode_config_content"] = rewrite_path_references_text(config_content, runtime_map)
 
     config_roots = extra.get("opencode_config_skill_roots")
     if isinstance(config_roots, list):

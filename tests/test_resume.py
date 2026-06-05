@@ -662,6 +662,145 @@ def test_resume_reports_only_environment_files_that_changed(tmp_path, monkeypatc
     assert (codex_home / "config.toml").read_text(encoding="utf-8") == "model = 'new'\napi_key = 'secret-value'\n"
 
 
+def test_resume_rewrites_codex_config_paths_to_runtime_home(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    plugin_home = home / ".checkpoint-plugin"
+    codex_home = home / ".codex"
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
+    monkeypatch.setenv("TEST_HOME", str(home))
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setenv("CHECKPOINT_PROVIDER", "codex")
+
+    source_skill = codex_home / "skills" / "doc" / "SKILL.md"
+    source_skill.parent.mkdir(parents=True)
+    source_skill.write_text("doc skill", encoding="utf-8")
+    (codex_home / "hooks.json").write_text("{}", encoding="utf-8")
+    (codex_home / "config.toml").write_text(
+        f"""
+[mcp_servers.node_repl.env]
+CODEX_HOME = "{codex_home}"
+NODE_REPL_TRUSTED_CODE_PATHS = "{codex_home}"
+
+[marketplaces.local]
+source = "{codex_home}/.tmp/bundled-marketplaces/local"
+
+[hooks.state."{codex_home}/hooks.json:stop:0:0"]
+trusted_hash = "sha256:old"
+
+[[skills.config]]
+path = "{source_skill}"
+enabled = false
+""",
+        encoding="utf-8",
+    )
+    (cwd / "file.txt").write_text("v1", encoding="utf-8")
+
+    coordinator = CheckpointCoordinator(session_id="s1", cwd=cwd)
+    coordinator.on_session_start()
+    coordinator.on_turn_end(TurnRecord(user_message="checkpoint"))
+
+    report = ResumeOrchestrator(cwd=cwd).execute(
+        ResumeOrchestrator(cwd=cwd).plan("s1", 0),
+        lambda _text: True,
+    )
+
+    assert report.env_state_dir is not None
+    runtime_codex_home = Path(report.env_state_dir) / "codex"
+    runtime_config = (runtime_codex_home / "config.toml").read_text(encoding="utf-8")
+    assert str(codex_home) not in runtime_config
+    assert f'CODEX_HOME = "{runtime_codex_home}"' in runtime_config
+    assert f'path = "{runtime_codex_home}/skills/doc/SKILL.md"' in runtime_config
+    assert f'[hooks.state."{runtime_codex_home}/hooks.json:stop:0:0"]' in runtime_config
+
+
+def test_resume_restores_codex_plugin_cache_skills(tmp_path, monkeypatch):
+    plugin_home = tmp_path / "plugin"
+    home = tmp_path / "home"
+    codex_home = home / ".codex"
+    cwd = tmp_path / "work"
+    plugin_skill = (
+        codex_home
+        / "plugins"
+        / "cache"
+        / "openai-bundled"
+        / "browser"
+        / "26.1.0"
+        / "skills"
+        / "control-browser"
+        / "SKILL.md"
+    )
+    cwd.mkdir()
+    plugin_skill.parent.mkdir(parents=True)
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
+    monkeypatch.setenv("TEST_HOME", str(home))
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setenv("CHECKPOINT_PROVIDER", "codex")
+
+    plugin_skill.write_text("browser skill", encoding="utf-8")
+    (codex_home / "config.toml").parent.mkdir(parents=True, exist_ok=True)
+    (codex_home / "config.toml").write_text("[plugins]\n", encoding="utf-8")
+    (cwd / "file.txt").write_text("v1", encoding="utf-8")
+
+    coordinator = CheckpointCoordinator(session_id="s1", cwd=cwd)
+    coordinator.on_session_start()
+    coordinator.on_turn_end(TurnRecord(user_message="checkpoint"))
+
+    report = ResumeOrchestrator(cwd=cwd).execute(
+        ResumeOrchestrator(cwd=cwd).plan("s1", 0),
+        lambda _text: True,
+    )
+
+    assert report.env_state_dir is not None
+    restored = (
+        Path(report.env_state_dir)
+        / "codex"
+        / "plugins"
+        / "cache"
+        / "openai-bundled"
+        / "browser"
+        / "26.1.0"
+        / "skills"
+        / "control-browser"
+        / "SKILL.md"
+    )
+    assert restored.read_text(encoding="utf-8") == "browser skill"
+
+
+def test_resume_rewrites_claude_settings_paths_to_runtime_home(tmp_path, monkeypatch):
+    plugin_home = tmp_path / "plugin"
+    home = tmp_path / "home"
+    claude_home = home / ".claude"
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
+    monkeypatch.setenv("TEST_HOME", str(home))
+    monkeypatch.setenv("CHECKPOINT_PROVIDER", "claude")
+
+    (claude_home / "settings.json").parent.mkdir(parents=True)
+    (claude_home / "settings.json").write_text(
+        json.dumps({"hooks": {"Stop": [{"command": f"{claude_home}/bin/hook"}]}}),
+        encoding="utf-8",
+    )
+    (cwd / "file.txt").write_text("v1", encoding="utf-8")
+
+    coordinator = CheckpointCoordinator(session_id="s1", cwd=cwd)
+    coordinator.on_session_start()
+    coordinator.on_turn_end(TurnRecord(user_message="checkpoint"))
+
+    report = ResumeOrchestrator(cwd=cwd).execute(
+        ResumeOrchestrator(cwd=cwd).plan("s1", 0),
+        lambda _text: True,
+    )
+
+    assert report.env_state_dir is not None
+    runtime_claude_home = Path(report.env_state_dir) / "claude"
+    runtime_settings = (runtime_claude_home / "settings.json").read_text(encoding="utf-8")
+    assert str(claude_home) not in runtime_settings
+    assert str(runtime_claude_home / "bin" / "hook") in runtime_settings
+
+
 def test_path_map_rejects_destinations_outside_runtime_root(tmp_path):
     from checkpoint_plugin.resume import _validated_path_map
 
@@ -669,6 +808,31 @@ def test_path_map_rejects_destinations_outside_runtime_root(tmp_path):
     path_map = _validated_path_map({"/source": str(tmp_path / "outside")}, root)
 
     assert path_map == {}
+
+
+def test_runtime_path_map_includes_captured_provider_home(tmp_path):
+    from checkpoint_plugin.env.providers import ProviderLayout
+    from checkpoint_plugin.resume import _runtime_path_map
+
+    root = tmp_path / "runtime"
+    runtime_home = root / "codex"
+    live_home = tmp_path / "live" / ".codex"
+    captured_home = tmp_path / "captured" / ".codex"
+    provider = ProviderLayout(
+        name="codex",
+        home=live_home,
+        memory_dir=live_home / "memories",
+        mcp_config=live_home / "config.toml",
+        mcp_config_files=[live_home / "config.toml"],
+        settings_files=[live_home / "config.toml"],
+        skills_dirs={"codex-user": live_home / "skills"},
+        project_files=[],
+    )
+
+    path_map = _runtime_path_map(provider, root, runtime_home, captured_provider_home=captured_home)
+
+    assert path_map[str(live_home)] == str(runtime_home)
+    assert path_map[str(captured_home)] == str(runtime_home)
 
 
 def test_secret_runtime_copy_ignores_symlink_source(tmp_path):

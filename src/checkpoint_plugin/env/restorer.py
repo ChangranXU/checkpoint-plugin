@@ -9,7 +9,7 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from checkpoint_plugin.path_utils import PathRootKind, mirror_path, path_matches_root
+from checkpoint_plugin.path_utils import PathRootKind, mirror_path, path_matches_root, rewrite_path_references_bytes
 from checkpoint_plugin.store import CheckpointStore
 from checkpoint_plugin.types import EnvironmentState, RestoreReport
 
@@ -41,12 +41,13 @@ def restore_environment(
     changed: list[str] = []
     backed_up: list[str] = []
     allowed_roots = _allowed_restore_roots(provider, target)
+    path_map = _restore_path_map(target)
 
     changed.extend(_restore_tree(target.memory_files, provider.memory_dir, store, backup_dir / "memory", backed_up))
     changed.extend(
         _restore_named_skill_trees(
             target.skills,
-            _skill_restore_roots(provider, Path(target.extra.get("cwd") or "."), target.extra),
+            _skill_restore_roots(provider, Path(target.extra.get("cwd") or "."), target.extra, target.skills),
             store,
             backup_dir / "skills",
             backed_up,
@@ -61,6 +62,7 @@ def restore_environment(
                 backup_dir / "mcp",
                 backed_up,
                 preserve_redacted_values=preserve_redacted_values,
+                path_map=path_map,
             )
         )
     changed.extend(
@@ -74,6 +76,7 @@ def restore_environment(
             provider_name=provider.name,
             ignore_plugin_hooks=ignore_plugin_hooks,
             preserve_redacted_values=preserve_redacted_values,
+            path_map=path_map,
         )
     )
     changed.extend(
@@ -86,6 +89,7 @@ def restore_environment(
             provider_name=provider.name,
             ignore_plugin_hooks=ignore_plugin_hooks,
             preserve_redacted_values=preserve_redacted_values,
+            path_map=path_map,
         )
     )
 
@@ -125,7 +129,12 @@ def _split_skill_root(key: str, roots: dict[str, Path]) -> tuple[str, str] | Non
     return None
 
 
-def _skill_restore_roots(provider: ProviderLayout, cwd: Path, extra: dict[str, object] | None = None) -> dict[str, Path]:
+def _skill_restore_roots(
+    provider: ProviderLayout,
+    cwd: Path,
+    extra: dict[str, object] | None = None,
+    skills: dict[str, str] | None = None,
+) -> dict[str, Path]:
     roots = dict(provider.skills_dirs)
     roots.update(_plugin_skill_roots(provider))
     try:
@@ -154,6 +163,22 @@ def _skill_restore_roots(provider: ProviderLayout, cwd: Path, extra: dict[str, o
                 if isinstance(root, str) and root:
                     path = Path(root).expanduser()
                     roots[f"opencode-config-skills:{path}"] = path
+    if provider.name == "codex" and skills:
+        roots.update(_codex_plugin_skill_restore_roots(provider, skills))
+    return roots
+
+
+def _codex_plugin_skill_restore_roots(provider: ProviderLayout, skills: dict[str, str]) -> dict[str, Path]:
+    roots: dict[str, Path] = {}
+    for key in skills:
+        root_name, separator, _rel = key.partition("/")
+        if not separator or not root_name.startswith("plugin:"):
+            continue
+        parts = root_name.split(":")
+        if len(parts) != 4 or not all(parts[1:]):
+            continue
+        _prefix, marketplace, plugin, version = parts
+        roots[root_name] = provider.home / "plugins" / "cache" / marketplace / plugin / version / "skills"
     return roots
 
 
@@ -176,6 +201,17 @@ def _allowed_restore_roots(provider: ProviderLayout, target: EnvironmentState) -
     if isinstance(config_roots, list):
         roots.extend(RestoreRoot(Path(root).expanduser()) for root in config_roots if isinstance(root, str) and root)
     return roots
+
+
+def _restore_path_map(target: EnvironmentState) -> dict[str, str]:
+    raw = target.extra.get("runtime_path_map")
+    if not isinstance(raw, dict):
+        return {}
+    result: dict[str, str] = {}
+    for source, dest in raw.items():
+        if isinstance(source, str) and isinstance(dest, str) and source and dest:
+            result[source] = dest
+    return result
 
 
 def _restore_tree(
@@ -222,6 +258,7 @@ def _restore_settings(
     provider_name: str,
     ignore_plugin_hooks: bool,
     preserve_redacted_values: bool,
+    path_map: dict[str, str],
 ) -> list[str]:
     by_name = _settings_restore_paths(settings_files)
     by_basename = _unique_basenames(settings_files)
@@ -249,6 +286,7 @@ def _restore_settings(
                 backed_up,
                 preserve_plugin_hooks=preserve_plugin_hooks,
                 preserve_redacted_values=preserve_redacted_values,
+                path_map=path_map,
             )
             if restored is not None:
                 changed.append(str(restored))
@@ -291,6 +329,7 @@ def _restore_optional_file(
     backed_up: list[str],
     *,
     preserve_redacted_values: bool = False,
+    path_map: dict[str, str] | None = None,
 ) -> list[str]:
     if sha is None:
         if path.exists():
@@ -305,6 +344,7 @@ def _restore_optional_file(
         backup_dir,
         backed_up,
         preserve_redacted_values=preserve_redacted_values,
+        path_map=path_map,
     )
     return [str(restored)] if restored is not None else []
 
@@ -319,6 +359,7 @@ def _restore_project_context(
     provider_name: str,
     ignore_plugin_hooks: bool,
     preserve_redacted_values: bool,
+    path_map: dict[str, str],
 ) -> list[str]:
     changed: list[str] = []
     for key, sha in project_context.items():
@@ -336,6 +377,7 @@ def _restore_project_context(
             backed_up,
             preserve_plugin_hooks=preserve_plugin_hooks,
             preserve_redacted_values=preserve_redacted_values,
+            path_map=path_map,
         )
         if restored is not None:
             changed.append(str(restored))
@@ -361,6 +403,7 @@ def _restore_blob_to(
     *,
     preserve_plugin_hooks: bool = False,
     preserve_redacted_values: bool = False,
+    path_map: dict[str, str] | None = None,
 ) -> Path | None:
     wanted = store.load_blob(sha)
     current = path.read_bytes() if path.exists() and path.is_file() else None
@@ -368,6 +411,8 @@ def _restore_blob_to(
         wanted = _preserve_redacted_values(current, wanted)
     if preserve_plugin_hooks:
         wanted = merge_plugin_hooks(current or b"", wanted)
+    if path_map:
+        wanted = rewrite_path_references_bytes(wanted, path_map)
     if current == wanted:
         return None
     if path.exists():
