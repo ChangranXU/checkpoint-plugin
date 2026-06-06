@@ -164,23 +164,9 @@ Other plugin state:
 
 By default, `checkpoint list` hides empty or incomplete sessions. `--all` shows them, including subagent shells marked `[no capture]` when no sidechain transcript was available.
 
-**Subagent capture incomplete?**
-
-A subagent's closing record sometimes flushes just after the plugin reads its transcript. The plugin handles this two ways: it waits briefly at capture time (up to 1.0s), and — if the record still lands late — it recovers the trailing bytes automatically the next time the checkpoint is read (`show`, `diff`, or `resume`). So a late flush is no longer lost.
-
-To disable the capture-time wait (the read-time recovery still backstops it):
-
-```bash
-export CHECKPOINT_SIDECHAIN_SETTLE_TIMEOUT=0
-```
-
 **Cannot resume a subagent?**
 
 Subagent checkpoints are captured for audit/history, but they are not faithful standalone entry points. `checkpoint resume` refuses standalone subagent resumes and prints the parent session/turn to resume instead.
-
-**Fork resume failures?**
-
-Fork sessions preserve their fork-point trajectory at capture time via `fork_point_trajectory_ref` blobs. If the parent transcript is rewritten after forking (e.g., due to edit-send rollback), the plugin automatically recovers from the stored blob. If you encounter trajectory errors, verify the checkpoint was captured with the current version (checkpoints created before commit 56351f8 may lack this recovery feature).
 
 ## Development
 
