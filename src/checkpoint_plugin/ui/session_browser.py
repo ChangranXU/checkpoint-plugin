@@ -580,7 +580,6 @@ def _load_nodes(root: Path, show_all: bool = False) -> dict[str, SessionNode]:
         if not child.is_dir():
             continue
         store = CheckpointStore(child)
-        reanchor_last_turn_to_eof(store)
         metadata = _read_metadata(child)
         manifests = store.list_manifests()
 

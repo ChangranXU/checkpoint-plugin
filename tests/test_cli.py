@@ -249,6 +249,28 @@ def _write_session(home, session_id, metadata, turns):
     return session
 
 
+def test_session_browser_collects_metadata_without_reanchoring_latest_turn(tmp_path, monkeypatch):
+    home = tmp_path / "plugin"
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(home))
+    session = _write_session(
+        home,
+        "lazy",
+        {"provider": "codex", "source": "startup", "start_ts": "2026-01-01T00:00:00Z"},
+        [("2026-01-01T00:01:00Z", "latest turn")],
+    )
+    transcript = session / "lazy.jsonl"
+    original_end = CheckpointStore(session).read_manifest(0).trajectory_ref.end_offset
+    transcript.write_text(
+        transcript.read_text(encoding="utf-8") + json.dumps({"turn": 0, "tail": True}) + "\n",
+        encoding="utf-8",
+    )
+
+    providers = collect_provider_trees(home / "sessions")
+
+    assert providers["codex"][0].session_id == "lazy"
+    assert CheckpointStore(session).read_manifest(0).trajectory_ref.end_offset == original_end
+
+
 def test_session_browser_groups_by_provider_and_nests_lineage(tmp_path, monkeypatch):
     home = tmp_path / "plugin"
     monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(home))
