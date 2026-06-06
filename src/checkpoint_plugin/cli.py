@@ -10,6 +10,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from ._utils import read_metadata_json
 from .coordinator import CheckpointCoordinator, TurnRecord, reanchor_last_turn_to_eof, resolve_session_title
 from .env.collector import environment_from_blob
 from .fs.snapshot import filesystem_from_blob
@@ -383,14 +384,7 @@ def _rolled_back_count(manifest: Any) -> int:
 
 
 def _read_session_metadata(session_dir: Path) -> dict[str, Any]:
-    path = session_dir / "metadata.json"
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return data if isinstance(data, dict) else {}
+    return read_metadata_json(session_dir / "metadata.json")
 
 
 def _display_metadata_value(value: Any) -> str:

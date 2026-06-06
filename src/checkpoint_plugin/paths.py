@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from checkpoint_plugin._utils import expand_and_resolve
+
 DEFAULT_CONFIG: dict[str, Any] = {
     "enabled": True,
     "save_frequency": "every_turn",
@@ -26,10 +28,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
 
 def plugin_home(explicit: Path | None = None) -> Path:
     if explicit is not None:
-        return Path(explicit).expanduser().resolve()
+        return expand_and_resolve(explicit)
     env_value = os.environ.get("CHECKPOINT_PLUGIN_HOME")
     if env_value:
-        return Path(env_value).expanduser().resolve()
+        return expand_and_resolve(env_value)
     return Path.home() / ".checkpoint-plugin"
 
 

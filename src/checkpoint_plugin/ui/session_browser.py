@@ -18,6 +18,7 @@ from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.styles import Style
 
+from checkpoint_plugin._utils import non_empty_str
 from checkpoint_plugin.coordinator import reanchor_last_turn_to_eof, resolve_session_title
 from checkpoint_plugin.paths import sessions_dir
 from checkpoint_plugin.resume import ResumeOrchestrator, _parent_turn_for_subagent
@@ -48,7 +49,7 @@ class SessionNode:
 
     @property
     def provider(self) -> str:
-        return _text(self.metadata.get("provider")) or _manifest_provider(self.manifests) or "generic"
+        return non_empty_str(self.metadata.get("provider")) or _manifest_provider(self.manifests) or "generic"
 
     @property
     def created_ts(self) -> str:
@@ -60,15 +61,15 @@ class SessionNode:
 
     @property
     def title(self) -> str:
-        return _text(self.metadata.get("session_title")) or _text(resolve_session_title(self.metadata)) or "-"
+        return non_empty_str(self.metadata.get("session_title")) or non_empty_str(resolve_session_title(self.metadata)) or "-"
 
     @property
     def source(self) -> str:
-        return _text(self.metadata.get("source")) or "startup"
+        return non_empty_str(self.metadata.get("source")) or "startup"
 
     @property
     def cwd(self) -> str | None:
-        return _text(self.metadata.get("cwd"))
+        return non_empty_str(self.metadata.get("cwd"))
 
     @property
     def lineage(self) -> dict[str, Any]:
@@ -612,9 +613,9 @@ def _link_nodes(nodes: dict[str, SessionNode], root: Path) -> None:
     path_index = _transcript_path_index(nodes)
     for node in nodes.values():
         lineage = node.lineage
-        parent_session = _text(lineage.get("parent_session_id"))
+        parent_session = non_empty_str(lineage.get("parent_session_id"))
         if parent_session and parent_session in nodes:
-            turn = _safe_parent_turn(root, parent_session, _text(lineage.get("agent_id")), node.metadata)
+            turn = _safe_parent_turn(root, parent_session, non_empty_str(lineage.get("agent_id")), node.metadata)
             node.subagent_parent = (parent_session, turn)
             nodes[parent_session].subagent_children.setdefault(turn, []).append(node)
             continue
@@ -633,8 +634,8 @@ def _fork_parent(
     nodes: dict[str, SessionNode],
     path_index: dict[str, str],
 ) -> tuple[str, int | None] | None:
-    parent_session = _text(node.metadata.get("forked_from_id"))
-    transcript = _text(node.metadata.get("forked_from_transcript"))
+    parent_session = non_empty_str(node.metadata.get("forked_from_id"))
+    transcript = non_empty_str(node.metadata.get("forked_from_transcript"))
     if (not parent_session or parent_session not in nodes) and transcript:
         parent_session = path_index.get(str(Path(transcript).expanduser()))
     if not parent_session or parent_session not in nodes or parent_session == node.session_id:
@@ -645,7 +646,7 @@ def _fork_parent(
 
 def _fork_parent_turn(parent: SessionNode, metadata: dict[str, Any]) -> int | None:
     offset = _int_or_none(metadata.get("forked_at_offset"))
-    transcript = _text(metadata.get("forked_from_transcript"))
+    transcript = non_empty_str(metadata.get("forked_from_transcript"))
     if offset is not None and transcript:
         parent_path = str(Path(transcript).expanduser())
         candidates = []
@@ -925,7 +926,7 @@ def _detail_fragments(row: TreeRow | None, state: dict[str, Any]) -> list[tuple[
         fragments.append(("", "\n"))
         fragments.append(("class:fork", f"🔀 Fork from {node.fork_parent[0][:12]}… turn {_turn_text(node.fork_parent[1])}\n"))
     if node.subagent_parent:
-        agent = _text(node.lineage.get("agent_id")) or "-"
+        agent = non_empty_str(node.lineage.get("agent_id")) or "-"
         fragments.append(("", "\n"))
         fragments.append(("class:subagent", f"⚡ Subagent: {agent}, parent {node.subagent_parent[0][:12]}… turn {_turn_text(node.subagent_parent[1])}\n"))
 
@@ -1274,12 +1275,6 @@ def _count_turns(node: SessionNode) -> int:
 
 def _session_sort_key(node: SessionNode) -> tuple[str, str]:
     return (node.created_ts, node.session_id)
-
-
-def _text(value: Any) -> str | None:
-    if isinstance(value, str) and value:
-        return value
-    return None
 
 
 def _int_or_none(value: Any) -> int | None:

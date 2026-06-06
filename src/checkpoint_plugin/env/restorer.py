@@ -5,10 +5,10 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
+from checkpoint_plugin._utils import backup_file
 from checkpoint_plugin.path_utils import PathRootKind, mirror_path, path_matches_root, rewrite_path_references_bytes
 from checkpoint_plugin.store import CheckpointStore
 from checkpoint_plugin.types import EnvironmentState, RestoreReport
@@ -276,7 +276,7 @@ def _restore_tree(
     }
     for rel, path in existing.items():
         if rel not in target:
-            _backup(path, backup_dir / rel, backed_up)
+            backup_file(path, backup_dir / rel, backed_up)
             path.unlink()
             changed.append(str(path))
     for rel, sha in target.items():
@@ -285,7 +285,7 @@ def _restore_tree(
         wanted = store.load_blob(sha)
         if current != wanted:
             if path.exists():
-                _backup(path, backup_dir / rel, backed_up)
+                backup_file(path, backup_dir / rel, backed_up)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(wanted)
             changed.append(str(path))
@@ -312,7 +312,7 @@ def _restore_settings(
         if not _setting_is_targeted(settings, key, path) and path.exists():
             if ignore_plugin_hooks and is_hook_config_basename(path.name, provider_name) and _is_plugin_hooks_only(path):
                 continue
-            _backup(path, backup_dir / _setting_backup_rel(path), backed_up)
+            backup_file(path, backup_dir / _setting_backup_rel(path), backed_up)
             path.unlink()
             changed.append(str(path))
     for name, sha in settings.items():
@@ -378,7 +378,7 @@ def _restore_optional_file(
 ) -> list[str]:
     if sha is None:
         if path.exists():
-            _backup(path, backup_dir / path.name, backed_up)
+            backup_file(path, backup_dir / path.name, backed_up)
             path.unlink()
             return [str(path)]
         return []
@@ -462,7 +462,7 @@ def _restore_blob_to(
         return None
     if path.exists():
         backup_path = backup_path_or_dir if backup_path_or_dir.suffix else backup_path_or_dir / path.name
-        _backup(path, backup_path, backed_up)
+        backup_file(path, backup_path, backed_up)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(wanted)
     return path
@@ -487,10 +487,6 @@ def _is_plugin_hooks_only(path: Path) -> bool:
     return hooks in (None, {}, [])
 
 
-def _backup(path: Path, backup_path: Path, backed_up: list[str]) -> None:
-    backup_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(path, backup_path)
-    backed_up.append(str(backup_path))
 
 
 _REDACTED = "***redacted***"

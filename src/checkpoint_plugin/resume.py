@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Iterable
 
+from ._utils import read_metadata_json
 from .env.collector import claude_mcp_statuses_from_trajectory, collect_environment, environment_from_blob
 from .env.differ import diff_environments, render_diff
 from .env.providers import (
@@ -305,14 +306,7 @@ def _refuse_subagent_resume(store: CheckpointStore, home: Path) -> None:
 
 
 def _read_session_metadata(store: CheckpointStore) -> dict[str, object]:
-    metadata_path = store.session_dir / "metadata.json"
-    if not metadata_path.exists():
-        return {}
-    try:
-        data = json.loads(metadata_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return data if isinstance(data, dict) else {}
+    return read_metadata_json(store.session_dir / "metadata.json")
 
 
 def _parent_turn_for_subagent(

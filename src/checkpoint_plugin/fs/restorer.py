@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from checkpoint_plugin._utils import backup_file
 from checkpoint_plugin.store import CheckpointStore
 from checkpoint_plugin.types import FilesystemSnapshot, RestoreReport
 
@@ -63,7 +63,7 @@ def restore_cwd(
     for rel in diff.deleted:
         path = target / rel
         if path.exists() and not ignore.matches(path):
-            _backup(path, backup_dir / rel, backed_up)
+            backup_file(path, backup_dir / rel, backed_up)
             path.unlink()
             _prune_empty_parents(path.parent, target)
             changed.append(str(path))
@@ -73,7 +73,7 @@ def restore_cwd(
         if ignore.matches(path):
             continue
         if path.exists():
-            _backup(path, backup_dir / rel, backed_up)
+            backup_file(path, backup_dir / rel, backed_up)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(store.load_blob(snapshot.files[rel]))
         changed.append(str(path))
@@ -89,10 +89,6 @@ def _current_files(target: Path, store: CheckpointStore, ignore: IgnoreMatcher) 
     return FilesystemSnapshot(cwd=str(target), files=files, git=None)
 
 
-def _backup(path: Path, backup_path: Path, backed_up: list[str]) -> None:
-    backup_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(path, backup_path)
-    backed_up.append(str(backup_path))
 
 
 def _prune_empty_parents(path: Path, stop: Path) -> None:

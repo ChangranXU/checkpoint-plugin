@@ -374,31 +374,25 @@ def detect_provider(cwd: Path) -> ProviderLayout:
     if env_provider:
         return layout_for_provider(env_provider)
 
-    # Check for OpenCode-specific environment variables
-    if os.environ.get("OPENCODE_PROVIDER"):
-        return opencode_layout()
-    if any(
-        os.environ.get(var)
-        for var in ("OPENCODE_CONFIG_DIR", "OPENCODE_DB", "OPENCODE_WORKSPACE_ID", "OPENCODE_CLIENT")
-    ):
-        return opencode_layout()
+    _PROVIDER_ENV_MARKERS = [
+        (["OPENCODE_PROVIDER", "OPENCODE_CONFIG_DIR", "OPENCODE_DB", "OPENCODE_WORKSPACE_ID", "OPENCODE_CLIENT"], opencode_layout),
+        (["CLAUDE_SESSION_ID", "CLAUDE_PROJECT_DIR"], claude_layout),
+        (["CODEX_HOME", "CODEX_SESSION_ID"], codex_layout),
+    ]
 
-    if os.environ.get("CLAUDE_SESSION_ID") or os.environ.get("CLAUDE_PROJECT_DIR"):
-        return claude_layout()
-    if os.environ.get("CODEX_HOME") or os.environ.get("CODEX_SESSION_ID"):
-        return codex_layout()
+    for env_vars, layout_fn in _PROVIDER_ENV_MARKERS:
+        if any(os.environ.get(var) for var in env_vars):
+            return layout_fn()
 
     cwd = cwd.resolve()
-    # Check for OpenCode project markers
-    if any(
-        (path / ".opencode").exists()
-        or (path / "opencode.json").exists()
-        or (path / "opencode.jsonc").exists()
-        for path in (cwd, *cwd.parents)
-    ):
-        return opencode_layout()
-    if any((path / "CLAUDE.md").exists() or (path / ".claude").exists() for path in (cwd, *cwd.parents)):
-        return claude_layout()
-    if any((path / "AGENTS.md").exists() or (path / ".codex").exists() for path in (cwd, *cwd.parents)):
-        return codex_layout()
+    _PROVIDER_FILE_MARKERS = [
+        ([".opencode", "opencode.json", "opencode.jsonc"], opencode_layout),
+        (["CLAUDE.md", ".claude"], claude_layout),
+        (["AGENTS.md", ".codex"], codex_layout),
+    ]
+
+    for markers, layout_fn in _PROVIDER_FILE_MARKERS:
+        if any((path / marker).exists() for path in (cwd, *cwd.parents) for marker in markers):
+            return layout_fn()
+
     return generic_layout()
