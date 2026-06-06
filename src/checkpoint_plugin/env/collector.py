@@ -332,18 +332,16 @@ def _codex_implicit_marketplace_roots(codex_home: Path) -> dict[str, Path]:
     tmp = codex_home / ".tmp"
     if not tmp.exists() or not tmp.is_dir():
         return roots
-    for manifest in sorted(tmp.glob("*/.agents/plugins/marketplace.json")):
-        root = manifest.parent.parent.parent
-        data = _load_json(manifest)
-        name = data.get("name")
-        if isinstance(name, str) and name and root.is_dir():
-            roots[name] = root
-    for manifest in sorted((tmp / "bundled-marketplaces").glob("*/.agents/plugins/marketplace.json")):
-        root = manifest.parent.parent.parent
-        data = _load_json(manifest)
-        name = data.get("name")
-        if isinstance(name, str) and name and root.is_dir():
-            roots.setdefault(name, root)
+    for base, use_setdefault in [(tmp, False), (tmp / "bundled-marketplaces", True)]:
+        for manifest in sorted(base.glob("*/.agents/plugins/marketplace.json")):
+            root = manifest.parent.parent.parent
+            data = _load_json(manifest)
+            name = data.get("name")
+            if isinstance(name, str) and name and root.is_dir():
+                if use_setdefault:
+                    roots.setdefault(name, root)
+                else:
+                    roots[name] = root
     return roots
 
 
@@ -392,9 +390,7 @@ def _is_plugin_metadata_path(rel: str, *, installed_plugins: set[str] | None = N
         return True
     if "assets" in parts:
         return True
-    if name in {".app.json", ".mcp.json", "marketplace.json"}:
-        return True
-    return len(parts) >= 3 and parts[-3:] == (".agents", "plugins", "marketplace.json")
+    return name in {".app.json", ".mcp.json", "marketplace.json"}
 
 
 def _is_installed_plugin_cache_path(parts: tuple[str, ...], installed_plugins: set[str]) -> bool:
