@@ -2030,11 +2030,17 @@ def _reconstruct_opencode_messages(
         if assistant_text:
             asst_id = f"msg_resume_{base_timestamp}{msg_counter:012x}"
             msg_counter += 1
+            if user_text:
+                parent_id = last_user_id
+            elif messages:
+                parent_id = messages[-1]["info"]["id"]
+            else:
+                parent_id = None
             asst_msg = {
                 "info": {
                     "id": asst_id,
                     "sessionID": session_id,
-                    "parentID": last_user_id if user_text else messages[-1]["info"]["id"] if messages else None,
+                    "parentID": parent_id,
                     "role": "assistant",
                     "mode": "build",
                     "agent": "build",

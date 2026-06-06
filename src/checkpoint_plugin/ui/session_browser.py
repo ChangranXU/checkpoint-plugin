@@ -18,15 +18,14 @@ from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.styles import Style
 
-from checkpoint_plugin.coordinator import reanchor_last_turn_to_eof
+from checkpoint_plugin.coordinator import reanchor_last_turn_to_eof, resolve_session_title
 from checkpoint_plugin.paths import sessions_dir
 from checkpoint_plugin.resume import ResumeOrchestrator, _parent_turn_for_subagent
-from checkpoint_plugin.coordinator import resolve_session_title
 from checkpoint_plugin.store import CheckpointStore
 from checkpoint_plugin.types import CheckpointManifest
+from checkpoint_plugin.ui._help import render_help_text as _render_help_text
 from checkpoint_plugin.ui._helpers import format_timestamp, truncate_with_ellipsis
 from checkpoint_plugin.ui._rendering import render_tree_row
-from checkpoint_plugin.ui._help import render_help_text as _render_help_text
 
 
 @dataclass(frozen=True)
@@ -138,9 +137,16 @@ def render_session_tree(providers: dict[str, list[SessionNode]]) -> str:
             rows = _rows_for_flat_group(group_nodes)
             for row in rows:
                 prefix = "  " * row.depth
-                marker = "▶" if row.kind == "session" else "├" if row.kind == "link" else "─"
-                lines.append(f"    {prefix}{marker} {row.label}")
+                lines.append(f"    {prefix}{_text_tree_marker(row)} {row.label}")
     return "\n".join(lines)
+
+
+def _text_tree_marker(row: TreeRow) -> str:
+    if row.kind == "session":
+        return "▶"
+    if row.kind == "link":
+        return "├"
+    return "─"
 
 
 def _show_tui(providers: dict[str, list[SessionNode]]) -> BrowserAction | None:
@@ -899,7 +905,6 @@ def _detail_fragments(row: TreeRow | None, state: dict[str, Any]) -> list[tuple[
     node = row.node
     fragments: list[tuple[str, str]] = [("class:detail.label", "\n" + "━" * 40 + "\n")]
 
-    # Session info with icons for better visual recognition
     fragments.append(("class:detail.label", "📋 Session: "))
     fragments.append(("class:detail.value", f"{node.session_id[:16]}…\n"))
 
@@ -910,13 +915,12 @@ def _detail_fragments(row: TreeRow | None, state: dict[str, Any]) -> list[tuple[
     fragments.append(("class:detail.value", node.source))
     fragments.append(("class:dim", "  ┃  "))
     fragments.append(("class:detail.label", "⏰ Created: "))
-    fragments.append(("class:detail.value", _format_timestamp(node.created_ts) + "\n"))
+    fragments.append(("class:detail.value", format_timestamp(node.created_ts) + "\n"))
 
     fragments.append(("class:detail.label", "💬 Title: "))
     fragments.append(("class:detail.value", node.title + "\n"))
     fragments.extend(_selected_command_fragments(row))
 
-    # Lineage info with better visual markers
     if node.fork_parent:
         fragments.append(("", "\n"))
         fragments.append(("class:fork", f"🔀 Fork from {node.fork_parent[0][:12]}… turn {_turn_text(node.fork_parent[1])}\n"))
@@ -925,12 +929,11 @@ def _detail_fragments(row: TreeRow | None, state: dict[str, Any]) -> list[tuple[
         fragments.append(("", "\n"))
         fragments.append(("class:subagent", f"⚡ Subagent: {agent}, parent {node.subagent_parent[0][:12]}… turn {_turn_text(node.subagent_parent[1])}\n"))
 
-    # Turn info with separator
     if row.manifest is not None:
         manifest = row.manifest
         fragments.append(("class:dim", "\n" + "─" * 40 + "\n"))
         fragments.append(("class:detail.label", f"🔄 Turn {manifest.turn_id}"))
-        fragments.append(("class:dim", f"  ┃  {_format_timestamp(manifest.created_ts)}"))
+        fragments.append(("class:dim", f"  ┃  {format_timestamp(manifest.created_ts)}"))
         fragments.append(("class:dim", f"  ┃  prev: {_turn_text(manifest.parent_turn_id)}\n"))
 
         can_resume = _can_resume_row(row)
@@ -986,11 +989,6 @@ def _row_fragments(row: TreeRow, is_selected: bool, all_rows: list[TreeRow]) -> 
     return render_tree_row(row, is_selected, all_rows)
 
 
-def _format_timestamp(ts: str | None) -> str:
-    """Format timestamp using helper function."""
-    return format_timestamp(ts)
-
-
 def _status_fragments(state: dict[str, Any]) -> list[tuple[str, str]]:
     """Generate status bar fragments with contextual styling."""
     mode = state.get("mode", "browse")
@@ -998,8 +996,7 @@ def _status_fragments(state: dict[str, Any]) -> list[tuple[str, str]]:
 
     if mode == "command":
         return [("class:status.command", f" COMMAND: {status_text} ")]
-    else:
-        return [("class:status", f" {status_text} ")]
+    return [("class:status", f" {status_text} ")]
 
 
 def _help_fragments() -> list[tuple[str, str]]:
@@ -1044,7 +1041,7 @@ def _session_label(node: SessionNode) -> str:
         f"[{node.source}]",
         f"{len(node.manifests)}T",
     ]
-    ts = _format_timestamp(node.created_ts)
+    ts = format_timestamp(node.created_ts)
     if ts != "-":
         parts.append(ts)
     if node.title and node.title != "-":
@@ -1057,7 +1054,7 @@ def _session_label(node: SessionNode) -> str:
 def _turn_label(manifest: CheckpointManifest) -> str:
     preview = manifest.user_message_preview.replace("\n", " ") or "-"
     preview = truncate_with_ellipsis(preview, 60)
-    ts = _format_timestamp(manifest.created_ts)
+    ts = format_timestamp(manifest.created_ts)
     return f"T{manifest.turn_id:04d} │ {ts} │ {preview}"
 
 

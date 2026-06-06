@@ -12,24 +12,20 @@ def render_tree_row(row: TreeRow, is_selected: bool, all_rows: list[TreeRow]) ->
     """Render a tree row with box-drawing characters and proper styling."""
     fragments: list[tuple[str, str]] = []
 
-    # Build tree structure prefix
     prefix = _build_tree_prefix(row, all_rows)
     if prefix:
         fragments.append(("class:tree.branch", prefix))
 
-    # Row marker and expansion indicator
     if row.kind == "group":
         marker = "▼ " if row.expanded else "▶ "
         fragments.append(("class:group", marker))
     elif row.kind == "session":
-        # Check if expanded by looking for immediate children
-        fragments.append(_session_marker_fragment(row, is_selected))
+        fragments.append(_session_marker_fragment(row))
     elif row.kind == "link":
         fragments.append(("class:link", "→ "))
     else:
         fragments.append(("class:tree.branch", "  "))
 
-    # Main content with appropriate styling
     base_style = _row_style(row, is_selected)
     fragments.append((base_style, row.label))
 
@@ -44,7 +40,6 @@ def _build_tree_prefix(row: TreeRow, all_rows: list[TreeRow]) -> str:
     parts = []
     current_depth = row.depth
 
-    # Find which depths have more siblings below
     row_index = all_rows.index(row)
     has_sibling = [False] * current_depth
 
@@ -56,16 +51,13 @@ def _build_tree_prefix(row: TreeRow, all_rows: list[TreeRow]) -> str:
             has_sibling[current_depth - 1] = True
             break
 
-    # Build prefix for each depth level with better spacing
     for d in range(current_depth):
         if d < current_depth - 1:
-            # Intermediate levels
             if _has_ancestor_sibling(row, all_rows, d + 1):
                 parts.append("│  ")
             else:
                 parts.append("   ")
         else:
-            # Final level
             if has_sibling[d]:
                 parts.append("├─ ")
             else:
@@ -88,25 +80,22 @@ def _has_ancestor_sibling(row: TreeRow, all_rows: list[TreeRow], depth: int) -> 
     return False
 
 
-def _session_marker_fragment(row: TreeRow, is_selected: bool) -> tuple[str, str]:
+def _session_marker_fragment(row: TreeRow) -> tuple[str, str]:
     """Get the marker fragment for a session row (expanded/collapsed indicator)."""
     if not row.has_children:
         marker = "  "
     else:
         marker = "▼ " if row.expanded else "▶ "
-    style = "class:session" if not is_selected else "class:session"
-    return (style, marker)
+    return ("class:session", marker)
 
 
 def _row_style(row: TreeRow, is_selected: bool) -> str:
     """Determine the style for a row based on its properties."""
     base_style = row.style
 
-    # Add reverse for selection
     if is_selected:
         base_style = "reverse " + base_style
 
-    # Add specific styling based on row kind
     if row.kind == "session":
         if row.node.source == "startup":
             base_style = base_style.replace("class:session", "class:session.startup")
