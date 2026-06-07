@@ -662,3 +662,129 @@ def test_tui_places_same_turn_subagent_before_fork_link(tmp_path, monkeypatch):
     subagent_index = labels.index("subagent spawned here")
     fork_index = labels.index("forked/resumed here")
     assert turn_index < subagent_index < fork_index
+
+
+def test_cross_cwd_resume_creates_phantom_ancestry(tmp_path, monkeypatch):
+    """A resume of a startup into a different cwd appears as a standalone in the new group."""
+    home = tmp_path / "plugin"
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(home))
+    _write_session(
+        home,
+        "parent",
+        {
+            "provider": "codex",
+            "source": "startup",
+            "start_ts": "2026-01-01T00:00:00Z",
+            "session_title": "Parent work",
+            "cwd": "/projects/original",
+        },
+        [
+            ("2026-01-01T00:01:00Z", "hello"),
+            ("2026-01-01T00:02:00Z", "do work"),
+        ],
+    )
+    _write_session(
+        home,
+        "resumed",
+        {
+            "provider": "codex",
+            "source": "resume",
+            "start_ts": "2026-01-01T00:05:00Z",
+            "session_title": "Resumed work",
+            "cwd": "/projects/copy",
+            "resumed_from_session_id": "parent",
+            "resumed_from_turn_id": 0,
+            "forked_from_id": "parent",
+        },
+        [("2026-01-01T00:05:30Z", "resumed prompt")],
+    )
+
+    providers = collect_provider_trees(home / "sessions")
+    rendered = render_session_tree(providers)
+
+    # The parent stays in its own group
+    assert "[original]" in rendered
+    # The resumed session is in the copy group — no phantom needed (direct parent only)
+    assert "[copy]" in rendered
+
+    # Verify the tree structure: parent in original group has no fork children
+    codex_nodes = providers["codex"]
+    original_nodes = [n for n in codex_nodes if n.cwd == "/projects/original"]
+    assert len(original_nodes) == 1
+    assert original_nodes[0].session_id == "parent"
+    assert not original_nodes[0].fork_children
+
+    # The copy group has the resumed session as a top-level node (no phantom needed)
+    copy_nodes = [n for n in codex_nodes if n.cwd == "/projects/copy"]
+    assert len(copy_nodes) == 1
+    assert copy_nodes[0].session_id == "resumed"
+    assert copy_nodes[0].phantom_ref is None
+
+
+def test_cross_cwd_recursive_fork_resume_builds_full_chain(tmp_path, monkeypatch):
+    """Resume of a fork into a different cwd shows grandparent phantom chain (direct parent skipped)."""
+    home = tmp_path / "plugin"
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(home))
+    parent = _write_session(
+        home,
+        "root",
+        {
+            "provider": "codex",
+            "source": "startup",
+            "start_ts": "2026-01-01T00:00:00Z",
+            "session_title": "Root",
+            "cwd": "/projects/original",
+        },
+        [
+            ("2026-01-01T00:01:00Z", "start"),
+            ("2026-01-01T00:02:00Z", "branch point"),
+        ],
+    )
+    parent_transcript = str(parent / "root.jsonl")
+    _write_session(
+        home,
+        "fork1",
+        {
+            "provider": "codex",
+            "source": "fork",
+            "start_ts": "2026-01-01T00:03:00Z",
+            "session_title": "Fork 1",
+            "cwd": "/projects/original",
+            "forked_from_id": "root",
+            "forked_from_transcript": parent_transcript,
+            "forked_at_offset": 12,
+        },
+        [("2026-01-01T00:03:30Z", "fork prompt")],
+    )
+    _write_session(
+        home,
+        "resumed-fork",
+        {
+            "provider": "codex",
+            "source": "resume",
+            "start_ts": "2026-01-01T00:10:00Z",
+            "session_title": "Resumed fork",
+            "cwd": "/projects/copy",
+            "resumed_from_session_id": "fork1",
+            "resumed_from_turn_id": 0,
+            "forked_from_id": "root",
+        },
+        [("2026-01-01T00:10:30Z", "resumed fork prompt")],
+    )
+
+    providers = collect_provider_trees(home / "sessions")
+    rendered = render_session_tree(providers)
+
+    # The copy group has: root phantom -> resumed-fork (fork1 skipped as direct parent)
+    copy_nodes = [n for n in providers["codex"] if n.cwd == "/projects/copy"]
+    assert len(copy_nodes) == 1
+    phantom_root = copy_nodes[0]
+    assert phantom_root.phantom_ref == "root"
+    # Root phantom has the real resumed-fork as child (fork1 not phantomed)
+    all_children = [c for children in phantom_root.fork_children.values() for c in children]
+    assert len(all_children) == 1
+    assert all_children[0].session_id == "resumed-fork"
+    assert all_children[0].phantom_ref is None
+    # The resumed-fork is nested under the fork point where fork1 was in root
+    assert "forked/resumed here" in rendered
+    assert "(ref)" in rendered

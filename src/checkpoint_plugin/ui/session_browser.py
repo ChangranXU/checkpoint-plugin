@@ -46,6 +46,7 @@ class SessionNode:
     subagent_parent: tuple[str, int | None] | None = None
     fork_children: dict[int | None, list["SessionNode"]] = field(default_factory=dict)
     subagent_children: dict[int | None, list["SessionNode"]] = field(default_factory=dict)
+    phantom_ref: str | None = None
 
     @property
     def provider(self) -> str:
@@ -130,11 +131,13 @@ def collect_provider_trees(root: Path | None = None, show_all: bool = False) -> 
 def render_session_tree(providers: dict[str, list[SessionNode]]) -> str:
     lines: list[str] = []
     for provider, nodes in providers.items():
-        total_turns = sum(_count_turns(node) for node in nodes)
-        lines.append(f"{provider} ({len(nodes)} sessions, {total_turns} turns)")
+        real_roots = [n for n in nodes if not n.phantom_ref]
+        total_turns = sum(_count_turns(node, skip_phantoms=True) for node in nodes)
+        lines.append(f"{provider} ({len(real_roots)} sessions, {total_turns} turns)")
         groups = _group_by_project(nodes)
         for _, group_label, group_nodes in groups:
-            lines.append(f"  [{group_label}] ({len(group_nodes)} sessions)")
+            real_in_group = [n for n in _walk_sessions(group_nodes) if not n.phantom_ref]
+            lines.append(f"  [{group_label}] ({len(real_in_group)} sessions)")
             rows = _rows_for_flat_group(group_nodes)
             for row in rows:
                 prefix = "  " * row.depth
@@ -230,8 +233,9 @@ def _show_tui(providers: dict[str, list[SessionNode]]) -> BrowserAction | None:
     def move_provider(delta: int, event) -> None:  # noqa: ANN001
         state["provider"] = (int(state["provider"]) + delta) % len(provider_names)
         state["tree_scroll"] = 0
-        node_count = len(providers[current_provider()])
-        turn_count = sum(_count_turns(node) for node in providers[current_provider()])
+        real_roots = [n for n in providers[current_provider()] if not n.phantom_ref]
+        node_count = len(real_roots)
+        turn_count = sum(_count_turns(node, skip_phantoms=True) for node in providers[current_provider()])
         set_status(f"Provider: {current_provider()} ({node_count} sessions, {turn_count} turns)", event)
 
     def move_selection(delta: int, event) -> None:  # noqa: ANN001
@@ -292,7 +296,8 @@ def _show_tui(providers: dict[str, list[SessionNode]]) -> BrowserAction | None:
             return None
         if row.manifest is None:
             return None
-        return BrowserAction(command, row.node.session_id, row.manifest.turn_id)
+        session_id = row.node.phantom_ref or row.node.session_id
+        return BrowserAction(command, session_id, row.manifest.turn_id)
 
     @bindings.add("right", filter=browse_mode)
     @bindings.add("l", filter=browse_mode)
@@ -610,6 +615,7 @@ def _is_empty_node(manifests: list[CheckpointManifest], metadata: dict[str, Any]
 
 def _link_nodes(nodes: dict[str, SessionNode], root: Path) -> None:
     path_index = _transcript_path_index(nodes)
+    cross_cwd: list[tuple[SessionNode, SessionNode, int | None]] = []
     for node in nodes.values():
         lineage = node.lineage
         parent_session = non_empty_str(lineage.get("parent_session_id"))
@@ -620,9 +626,15 @@ def _link_nodes(nodes: dict[str, SessionNode], root: Path) -> None:
             continue
         parent = _fork_parent(node, nodes, path_index)
         if parent is not None:
-            parent_session, turn = parent
-            node.fork_parent = parent
-            nodes[parent_session].fork_children.setdefault(turn, []).append(node)
+            parent_session_id, turn = parent
+            parent_node = nodes[parent_session_id]
+            if node.cwd and parent_node.cwd and node.cwd != parent_node.cwd:
+                cross_cwd.append((node, parent_node, turn))
+            else:
+                node.fork_parent = parent
+                parent_node.fork_children.setdefault(turn, []).append(node)
+    for child, parent_node, fork_turn in cross_cwd:
+        _build_phantom_ancestry(child, parent_node, fork_turn, nodes)
     for node in nodes.values():
         for children in [*node.fork_children.values(), *node.subagent_children.values()]:
             children.sort(key=_session_sort_key, reverse=True)
@@ -633,6 +645,14 @@ def _fork_parent(
     nodes: dict[str, SessionNode],
     path_index: dict[str, str],
 ) -> tuple[str, int | None] | None:
+    # For resumed sessions, prefer resumed_from_session_id (direct source) over
+    # inherited forked_from_id (grandparent). The resumed_from_turn_id gives
+    # the exact fork point without needing byte-offset resolution.
+    resumed_from = non_empty_str(node.metadata.get("resumed_from_session_id"))
+    if resumed_from and resumed_from in nodes and resumed_from != node.session_id:
+        turn_id = node.metadata.get("resumed_from_turn_id")
+        turn = turn_id if isinstance(turn_id, int) else None
+        return resumed_from, turn
     parent_session = non_empty_str(node.metadata.get("forked_from_id"))
     transcript = non_empty_str(node.metadata.get("forked_from_transcript"))
     if (not parent_session or parent_session not in nodes) and transcript:
@@ -663,6 +683,92 @@ def _fork_parent_turn(parent: SessionNode, metadata: dict[str, Any]) -> int | No
     if parent.manifests:
         return parent.manifests[-1].turn_id
     return None
+
+
+def _build_phantom_ancestry(
+    child: SessionNode,
+    parent_node: SessionNode,
+    fork_turn: int | None,
+    nodes: dict[str, SessionNode],
+) -> None:
+    """Create phantom copies of the ancestor chain in the child's cwd group.
+
+    When a session is resumed into a different cwd, we can't nest it under the
+    original parent (different project group). Instead, walk up the ancestor chain
+    and build read-only phantoms (manifests truncated to the fork point at each
+    level) so the tree shows full ancestry context in the child's cwd group.
+
+    The direct parent is NOT phantomed — the resumed session already contains
+    those same turns. Only grandparent and higher get phantoms.
+    """
+    target_cwd = child.cwd
+    ancestors: list[tuple[SessionNode, int | None]] = []
+    current_parent = parent_node
+    current_turn = fork_turn
+    visited: set[str] = {child.session_id}
+    while current_parent is not None and current_parent.session_id not in visited:
+        visited.add(current_parent.session_id)
+        # If the ancestor is itself a phantom, resolve to the real node
+        real_id = current_parent.phantom_ref
+        if real_id and real_id in nodes:
+            current_parent = nodes[real_id]
+            if current_parent.session_id in visited:
+                break
+            visited.add(current_parent.session_id)
+        ancestors.append((current_parent, current_turn))
+        if current_parent.fork_parent:
+            grandparent_id, grandparent_turn = current_parent.fork_parent
+            if grandparent_id in nodes:
+                current_parent = nodes[grandparent_id]
+                current_turn = grandparent_turn
+            else:
+                break
+        else:
+            break
+    # Skip the direct parent (ancestors[0]) — the child already has its turns.
+    # Only create phantoms for grandparent and above.
+    if len(ancestors) <= 1:
+        # No grandparent — child stays as a top-level node in its cwd group
+        return
+    grandparent_ancestors = ancestors[1:]
+    # The child attaches at the fork_turn where the direct parent was in the grandparent
+    child_attach_turn = ancestors[0][1]
+    prev_phantom: SessionNode | None = None
+    prev_turn: int | None = None
+    for ancestor, turn_at in reversed(grandparent_ancestors):
+        real_ref = ancestor.phantom_ref or ancestor.session_id
+        phantom_id = f"__phantom__{real_ref}__{child.session_id}"
+        if phantom_id in nodes:
+            prev_phantom = nodes[phantom_id]
+            prev_turn = turn_at
+            continue
+        if turn_at is not None:
+            truncated = [m for m in ancestor.manifests if m.turn_id <= turn_at]
+        else:
+            truncated = list(ancestor.manifests)
+        phantom_metadata = {
+            "session_id": phantom_id,
+            "provider": ancestor.metadata.get("provider"),
+            "cwd": target_cwd,
+            "source": ancestor.source,
+            "start_ts": ancestor.metadata.get("start_ts"),
+            "session_title": ancestor.metadata.get("session_title"),
+        }
+        phantom = SessionNode(
+            session_id=phantom_id,
+            metadata=phantom_metadata,
+            manifests=truncated,
+            phantom_ref=real_ref,
+        )
+        nodes[phantom_id] = phantom
+        if prev_phantom is not None:
+            prev_phantom.fork_children.setdefault(prev_turn, []).append(phantom)
+            phantom.fork_parent = (prev_phantom.session_id, prev_turn)
+        prev_phantom = phantom
+        prev_turn = turn_at
+    if prev_phantom is not None:
+        prev_phantom.fork_children.setdefault(child_attach_turn, []).append(child)
+        child.fork_parent = (prev_phantom.session_id, child_attach_turn)
 
 
 def _safe_parent_turn(root: Path, parent_session_id: str, agent_id: str | None, metadata: dict[str, Any]) -> int | None:
@@ -789,8 +895,9 @@ def _header_fragments(
     fragments: list[tuple[str, str]] = []
     selected = int(state["provider"])
     for index, provider in enumerate(provider_names):
-        node_count = len(providers[provider])
-        turn_count = sum(_count_turns(node) for node in providers[provider])
+        real_roots = [n for n in providers[provider] if not n.phantom_ref]
+        node_count = len(real_roots)
+        turn_count = sum(_count_turns(node, skip_phantoms=True) for node in providers[provider])
         style = "class:tab.selected" if index == selected else "class:tab"
         fragments.append((style, f" {provider} "))
         fragments.append(("class:dim", f"({node_count}/{turn_count}) "))
@@ -906,7 +1013,10 @@ def _detail_fragments(row: TreeRow | None, state: dict[str, Any]) -> list[tuple[
     fragments: list[tuple[str, str]] = [("class:detail.label", "\n" + "━" * 40 + "\n")]
 
     fragments.append(("class:detail.label", "📋 Session: "))
-    fragments.append(("class:detail.value", f"{node.session_id[:16]}…\n"))
+    display_id = node.phantom_ref or node.session_id
+    fragments.append(("class:detail.value", f"{display_id[:16]}…\n"))
+    if node.phantom_ref:
+        fragments.append(("class:dim", "   (reference-only copy from original session)\n"))
 
     fragments.append(("class:detail.label", "🔌 Provider: "))
     fragments.append(("class:detail.value", node.provider))
@@ -922,8 +1032,12 @@ def _detail_fragments(row: TreeRow | None, state: dict[str, Any]) -> list[tuple[
     fragments.extend(_selected_command_fragments(row))
 
     if node.fork_parent:
+        parent_id = node.fork_parent[0]
+        if parent_id.startswith("__phantom__"):
+            parts = parent_id.split("__")
+            parent_id = parts[2] if len(parts) > 2 else parent_id
         fragments.append(("", "\n"))
-        fragments.append(("class:fork", f"🔀 Fork from {node.fork_parent[0][:12]}… turn {_turn_text(node.fork_parent[1])}\n"))
+        fragments.append(("class:fork", f"🔀 Fork from {parent_id[:12]}… turn {_turn_text(node.fork_parent[1])}\n"))
     if node.subagent_parent:
         agent = non_empty_str(node.lineage.get("agent_id")) or "-"
         fragments.append(("", "\n"))
@@ -1036,8 +1150,9 @@ def _help_fragments() -> list[tuple[str, str]]:
 
 
 def _session_label(node: SessionNode) -> str:
+    display_id = node.phantom_ref[:12] if node.phantom_ref else node.session_id[:12]
     parts = [
-        f"{node.session_id[:12]}…",
+        f"{display_id}…",
         f"[{node.source}]",
         f"{len(node.manifests)}T",
     ]
@@ -1046,6 +1161,8 @@ def _session_label(node: SessionNode) -> str:
         parts.append(ts)
     if node.title and node.title != "-":
         parts.append(truncate_with_ellipsis(node.title, 40))
+    if node.phantom_ref:
+        parts.append("(ref)")
     if node.marker:
         parts.append(f"⚠ {node.marker}")
     return " │ ".join(parts)
@@ -1080,12 +1197,15 @@ def _command_action(command: str, row: TreeRow | None) -> BrowserAction | None:
             return None
         if name == "resume" and not _can_resume_row(row):
             return None
-        return BrowserAction(name, row.node.session_id, row.manifest.turn_id)
+        session_id = row.node.phantom_ref or row.node.session_id
+        return BrowserAction(name, session_id, row.manifest.turn_id)
     return None
 
 
 def _can_resume_row(row: TreeRow) -> bool:
     if row.kind != "turn" or row.manifest is None:
+        return False
+    if row.node.phantom_ref:
         return False
     if row.node.subagent_parent is not None or row.node.source == "subagent":
         return False
@@ -1099,6 +1219,8 @@ def _resume_unavailable_reason(row: TreeRow) -> str | None:
         return None
     if row.manifest is None:
         return "select a checkpoint turn"
+    if row.node.phantom_ref:
+        return "resume unavailable: reference-only (use original session)"
     if row.node.subagent_parent is not None or row.node.source == "subagent":
         return "resume unavailable: subagent"
     if row.node.marker:
@@ -1266,9 +1388,10 @@ def _manifest_provider(manifests: list[CheckpointManifest]) -> str | None:
     return None
 
 
-def _count_turns(node: SessionNode) -> int:
-    return len(node.manifests) + sum(_count_turns(child) for group in node.fork_children.values() for child in group) + sum(
-        _count_turns(child) for group in node.subagent_children.values() for child in group
+def _count_turns(node: SessionNode, skip_phantoms: bool = False) -> int:
+    own = 0 if (skip_phantoms and node.phantom_ref) else len(node.manifests)
+    return own + sum(_count_turns(child, skip_phantoms) for group in node.fork_children.values() for child in group) + sum(
+        _count_turns(child, skip_phantoms) for group in node.subagent_children.values() for child in group
     )
 
 
