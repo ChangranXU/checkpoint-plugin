@@ -449,6 +449,12 @@ def test_session_browser_resume_outputs_cli_command_hint_only():
     assert ("class:output.command", "checkpoint resume parent 3\n") in fragments
 
 
+def test_session_browser_detail_values_are_not_white():
+    style_rules = dict(session_browser._browser_style().style_rules)
+
+    assert style_rules["detail.value"] == "#875fd7"
+
+
 def test_output_fragments_show_inline_command_result():
     fragments = _output_fragments(
         {

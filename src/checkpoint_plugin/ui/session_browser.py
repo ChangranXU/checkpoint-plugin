@@ -525,7 +525,12 @@ def _show_tui(providers: dict[str, list[SessionNode]]) -> BrowserAction | None:
         set_status("No next session", event)
 
     root = HSplit([header, body, detail, help_panel, output, status, command])
-    style = Style.from_dict(
+    style = _browser_style()
+    return Application(layout=Layout(root, focused_element=body), key_bindings=bindings, style=style, full_screen=True).run()
+
+
+def _browser_style() -> Style:
+    return Style.from_dict(
         {
             # Tabs - more distinct active state
             "tab": "#888888",
@@ -566,7 +571,7 @@ def _show_tui(providers: dict[str, list[SessionNode]]) -> BrowserAction | None:
             "help.text": "#bcbcbc",
             # Detail panel
             "detail.label": "#00afff bold",
-            "detail.value": "#ffffff",
+            "detail.value": "#875fd7",
             "action.enabled": "#00ff87 bold",
             "action.disabled": "#767676",
             # Badges - more distinct
@@ -574,7 +579,6 @@ def _show_tui(providers: dict[str, list[SessionNode]]) -> BrowserAction | None:
             "badge.blocked": "bg:#af0000 #ffffff bold",
         }
     )
-    return Application(layout=Layout(root, focused_element=body), key_bindings=bindings, style=style, full_screen=True).run()
 
 
 def _load_nodes(root: Path, show_all: bool = False) -> dict[str, SessionNode]:
