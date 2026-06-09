@@ -7,7 +7,7 @@ import shutil
 from pathlib import Path
 
 from ._utils import extract_sha_refs, is_sha_ref
-from .paths import sessions_dir
+from .paths import blobs_dir, sessions_dir
 from .store import CheckpointStore
 
 
@@ -95,6 +95,43 @@ def _reachable_blob_refs(store: CheckpointStore) -> set[str]:
     return refs
 
 
+def _reachable_blob_refs_for_sessions(root: Path) -> set[str] | None:
+    refs: set[str] = set()
+    if not root.exists():
+        return refs
+    for session in sorted(root.iterdir()):
+        if not session.is_dir():
+            continue
+        try:
+            refs.update(_reachable_blob_refs(CheckpointStore(session)))
+        except Exception:
+            return None
+    return refs
+
+
+def _prune_global_blob_refs(plugin_home: Path | None, candidates: set[str]) -> int:
+    if not candidates:
+        return 0
+    global_blobs = blobs_dir(plugin_home)
+    if not global_blobs.exists():
+        return 0
+    reachable = _reachable_blob_refs_for_sessions(sessions_dir(plugin_home))
+    if reachable is None:
+        return 0
+    removed = 0
+    for sha in sorted(candidates - reachable):
+        if not is_sha_ref(sha):
+            continue
+        path = global_blobs / sha[:2] / sha
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            continue
+        removed += 1
+        _prune_empty_blob_parents(path.parent, global_blobs, remove_stop=False)
+    return removed
+
+
 def _read_json(path: Path) -> object:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -117,42 +154,6 @@ def _prune_empty_blob_parents(path: Path, stop: Path, *, remove_stop: bool = Tru
         pass
 
 
-def _prune_unreferenced_global_blobs(
-    store: CheckpointStore,
-    candidate_refs: set[str],
-    plugin_home: Path | None,
-) -> None:
-    if not candidate_refs:
-        return
-    remaining_refs = _remaining_reachable_refs(plugin_home)
-    if remaining_refs is None:
-        return
-    for sha in candidate_refs - remaining_refs:
-        if not is_sha_ref(sha):
-            continue
-        path = store.blob_path(sha)
-        try:
-            path.unlink()
-        except FileNotFoundError:
-            continue
-        _prune_empty_blob_parents(path.parent, store.blobs_dir, remove_stop=False)
-
-
-def _remaining_reachable_refs(plugin_home: Path | None) -> set[str] | None:
-    root = sessions_dir(plugin_home)
-    if not root.exists():
-        return set()
-    refs: set[str] = set()
-    for session in sorted(root.iterdir()):
-        if not session.is_dir():
-            continue
-        try:
-            refs.update(_reachable_blob_refs(CheckpointStore(session)))
-        except Exception:
-            return None
-    return refs
-
-
 def clean_empty_sessions(plugin_home: Path | None = None, dry_run: bool = False) -> dict[str, list[str]]:
     """Remove sessions with no captured turns or only metadata shells.
 
@@ -160,6 +161,7 @@ def clean_empty_sessions(plugin_home: Path | None = None, dry_run: bool = False)
     """
     result = {"removed": [], "kept": [], "errors": []}
     root = sessions_dir(plugin_home)
+    deleted_refs: set[str] = set()
 
     if not root.exists():
         return result
@@ -216,9 +218,8 @@ def clean_empty_sessions(plugin_home: Path | None = None, dry_run: bool = False)
                 if dry_run:
                     result["removed"].append(f"{session_id} [{reason}] (dry-run)")
                 else:
-                    candidate_refs = _reachable_blob_refs(store)
+                    deleted_refs.update(_reachable_blob_refs(store))
                     shutil.rmtree(session_dir)
-                    _prune_unreferenced_global_blobs(store, candidate_refs, plugin_home)
                     result["removed"].append(f"{session_id} [{reason}]")
             else:
                 result["kept"].append(session_id)
@@ -226,4 +227,5 @@ def clean_empty_sessions(plugin_home: Path | None = None, dry_run: bool = False)
         except Exception as e:
             result["errors"].append(f"{session_id}: {e}")
 
+    _prune_global_blob_refs(plugin_home, deleted_refs)
     return result

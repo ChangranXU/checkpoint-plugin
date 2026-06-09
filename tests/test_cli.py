@@ -219,7 +219,9 @@ def test_clean_empty_prunes_only_unreferenced_global_blobs(tmp_path, monkeypatch
     assert not empty_store.session_dir.exists()
     assert kept_store.session_dir.exists()
     assert not empty_store.blob_path(unique_ref).exists()
+    assert not empty_store.blob_path(empty_fs).exists()
     assert kept_store.blob_path(shared_ref).read_bytes() == b"shared"
+    assert kept_store.blob_path(kept_fs).exists()
 
 
 def test_clean_empty_ignores_malformed_blob_refs_when_pruning(tmp_path, monkeypatch, capsys):
