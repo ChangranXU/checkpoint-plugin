@@ -166,6 +166,62 @@ def test_clean_blobs_reports_missing_reachable_refs(tmp_path, monkeypatch, capsy
     assert "Would compact 0 legacy blob(s); promoted 0; missing 3" in capsys.readouterr().out
 
 
+def test_clean_empty_prunes_only_unreferenced_global_blobs(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "plugin"
+    empty_store = CheckpointStore(home / "sessions" / "empty")
+    kept_store = CheckpointStore(home / "sessions" / "kept")
+    shared_ref = empty_store.store_blob(b"shared")
+    unique_ref = empty_store.store_blob(b"unique")
+    empty_env = empty_store.store_json_blob({"provider": "codex"})
+    empty_fs = empty_store.store_json_blob(
+        {
+            "cwd": str(tmp_path / "empty-work"),
+            "files": {"shared.txt": shared_ref, "unique.txt": unique_ref},
+            "git": None,
+        }
+    )
+    kept_env = kept_store.store_json_blob({"provider": "codex"})
+    kept_fs = kept_store.store_json_blob(
+        {
+            "cwd": str(tmp_path / "kept-work"),
+            "files": {"shared.txt": shared_ref},
+            "git": None,
+        }
+    )
+    empty_store.write_manifest(
+        CheckpointManifest(
+            turn_id=0,
+            session_id="empty",
+            created_ts="2026-06-09T00:00:00Z",
+            env_ref=empty_env,
+            fs_ref=empty_fs,
+            trajectory_ref=TrajectoryReference("codex", "", 0, 0, 0),
+        )
+    )
+    kept_store.write_manifest(
+        CheckpointManifest(
+            turn_id=0,
+            session_id="kept",
+            created_ts="2026-06-09T00:00:00Z",
+            env_ref=kept_env,
+            fs_ref=kept_fs,
+            trajectory_ref=TrajectoryReference("codex", "transcript.jsonl", 0, 1, 1),
+        )
+    )
+    (empty_store.session_dir / "metadata.json").write_text("{}", encoding="utf-8")
+    (kept_store.session_dir / "metadata.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(home))
+
+    assert main(["clean", "--empty"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Removed 1 empty session(s)" in output
+    assert not empty_store.session_dir.exists()
+    assert kept_store.session_dir.exists()
+    assert not empty_store.blob_path(unique_ref).exists()
+    assert kept_store.blob_path(shared_ref).read_bytes() == b"shared"
+
+
 def _seed_turn(coordinator, transcript, user_message, end_offset, *, boundary_mode="per_turn_key"):
     from checkpoint_plugin.coordinator import TurnRecord
     from checkpoint_plugin.types import TrajectoryReference

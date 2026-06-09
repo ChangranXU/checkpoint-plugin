@@ -64,7 +64,10 @@ def test_legacy_session_blob_fallback_and_promotion(tmp_path):
     assert store.load_blob(sha) == b"legacy"
     assert store.promote_legacy_blob(sha) is True
     assert store.blob_path(sha).read_bytes() == b"legacy"
-    assert store.legacy_blob_path(sha).read_bytes() == b"legacy"
+    assert not legacy_path.exists()
+    legacy_path.parent.mkdir(parents=True)
+    legacy_path.write_bytes(b"corrupt")
+    assert store.blob_path(sha).read_bytes() == b"legacy"
 
 
 def test_store_blob_falls_back_when_hardlink_is_unavailable(tmp_path, monkeypatch):
@@ -96,7 +99,7 @@ def test_store_blob_reraises_unexpected_link_errors(tmp_path, monkeypatch):
     assert not list(store.blob_path(sha).parent.glob("*.tmp"))
 
 
-def test_promote_legacy_blob_falls_back_when_hardlink_is_unavailable(tmp_path, monkeypatch):
+def test_promote_legacy_blob_does_not_depend_on_hardlinks(tmp_path, monkeypatch):
     store = CheckpointStore(tmp_path / "plugin" / "sessions" / "s1")
     sha = hashlib.sha256(b"legacy").hexdigest()
     legacy_path = store.legacy_blob_path(sha)
@@ -110,7 +113,7 @@ def test_promote_legacy_blob_falls_back_when_hardlink_is_unavailable(tmp_path, m
 
     assert store.promote_legacy_blob(sha) is True
     assert store.blob_path(sha).read_bytes() == b"legacy"
-    assert legacy_path.read_bytes() == b"legacy"
+    assert not legacy_path.exists()
 
 
 def test_promote_legacy_blob_rejects_hash_mismatch(tmp_path):

@@ -146,7 +146,7 @@ Checkpoints live in `~/.checkpoint-plugin/sessions/<session-id>/` with:
 - `resume-open.json` — present on resumed sessions; stores the validated launcher command/env
 - `.checkpoint.lock` — per-session write lock
 
-Content blobs are stored globally under `~/.checkpoint-plugin/blobs/`, keyed by SHA-256, and shared across sessions. They include environment JSON, filesystem JSON, file contents, Codex history, and fork-point trajectory data. Existing per-session `blobs/` directories are still readable for backward compatibility; run `checkpoint clean --blobs` to compact them into the global store.
+Content blobs are stored globally under `~/.checkpoint-plugin/blobs/`, keyed by SHA-256, and shared across sessions. They include environment JSON, filesystem JSON, file contents, Codex history, and fork-point trajectory data. Run `checkpoint clean --blobs` to compact existing per-session `blobs/` directories into the global store and remove promoted legacy files.
 
 Filesystem snapshots are JSON blobs: each snapshot records the original `cwd`, optional git state, and a map of relative file paths to content blob hashes. Fork/resume sessions may store `fork_point_trajectory_ref` blobs so inherited transcript prefixes survive parent transcript rewrites.
 

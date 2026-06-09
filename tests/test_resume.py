@@ -95,6 +95,7 @@ def test_resume_promotes_legacy_session_blobs_without_copying_blob_tree(tmp_path
 
     resumed_store = CheckpointStore(plugin_home / "sessions" / report.new_session_id)
     assert not resumed_store.legacy_blobs_dir.exists()
+    assert not source_store.legacy_blob_path(file_ref).exists()
     assert source_store.blob_path(file_ref).read_bytes() == b"legacy checkpoint"
     assert resumed_store.load_blob(file_ref) == b"legacy checkpoint"
     assert target_file.read_text(encoding="utf-8") == "legacy checkpoint"

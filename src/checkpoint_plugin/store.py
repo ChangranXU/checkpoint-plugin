@@ -77,29 +77,23 @@ class CheckpointStore:
 
     def promote_legacy_blob(self, sha: str) -> bool:
         path = self.blob_path(sha)
-        if path.exists():
-            return True
         legacy_path = self.legacy_blob_path(sha)
+        if path.exists():
+            _remove_blob_alias(legacy_path, self.legacy_blobs_dir)
+            return True
         if not legacy_path.exists():
             return False
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
         try:
             try:
-                os.link(legacy_path, tmp)
-                digest = _hash_file(tmp)
+                digest = _copy_file_with_hash(legacy_path, tmp)
             except FileNotFoundError:
                 return False
-            except OSError as exc:
-                if not _is_link_fallback_error(exc):
-                    raise
-                try:
-                    digest = _copy_file_with_hash(legacy_path, tmp)
-                except FileNotFoundError:
-                    return False
             if digest != sha:
-                return path.exists()
+                return False
             _publish_blob_tmp(tmp, path)
+            _remove_blob_alias(legacy_path, self.legacy_blobs_dir)
             return True
         finally:
             tmp.unlink(missing_ok=True)
@@ -278,6 +272,24 @@ def _copy_file_with_hash(source: Path, tmp: Path) -> str:
         dst.flush()
         os.fsync(dst.fileno())
     return digest.hexdigest()
+
+
+def _remove_blob_alias(path: Path, stop: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    parent = path.parent
+    while parent != stop and parent.exists():
+        try:
+            parent.rmdir()
+        except OSError:
+            return
+        parent = parent.parent
+    try:
+        stop.rmdir()
+    except OSError:
+        pass
 
 
 def _lock_file(handle: BinaryIO) -> None:
