@@ -222,6 +222,33 @@ def test_clean_empty_prunes_only_unreferenced_global_blobs(tmp_path, monkeypatch
     assert kept_store.blob_path(shared_ref).read_bytes() == b"shared"
 
 
+def test_clean_empty_ignores_malformed_blob_refs_when_pruning(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "plugin"
+    victim = tmp_path / "victim.txt"
+    victim.write_text("keep me\n", encoding="utf-8")
+    store = CheckpointStore(home / "sessions" / "bad")
+    malformed_ref = "../victim.txt"
+    store.write_manifest(
+        CheckpointManifest(
+            turn_id=0,
+            session_id="bad",
+            created_ts="2026-06-09T00:00:00Z",
+            env_ref=malformed_ref,
+            fs_ref=malformed_ref,
+            trajectory_ref=TrajectoryReference("codex", "", 0, 0, 0),
+        )
+    )
+    (store.session_dir / "metadata.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(home))
+
+    assert main(["clean", "--empty"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Removed 1 empty session(s)" in output
+    assert not store.session_dir.exists()
+    assert victim.read_text(encoding="utf-8") == "keep me\n"
+
+
 def _seed_turn(coordinator, transcript, user_message, end_offset, *, boundary_mode="per_turn_key"):
     from checkpoint_plugin.coordinator import TurnRecord
     from checkpoint_plugin.types import TrajectoryReference

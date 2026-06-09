@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import json
-import re
 import shutil
 from pathlib import Path
 
-from ._utils import extract_sha_refs
+from ._utils import extract_sha_refs, is_sha_ref
 from .paths import sessions_dir
 from .store import CheckpointStore
 
@@ -50,7 +49,7 @@ def compact_legacy_blobs(plugin_home: Path | None = None, dry_run: bool = False)
         legacy_files = sorted(path for path in store.legacy_blobs_dir.glob("*/*") if path.is_file())
         for legacy_path in legacy_files:
             sha = legacy_path.name
-            if not re.fullmatch(r"[0-9a-f]{64}", sha):
+            if not is_sha_ref(sha):
                 continue
             if not store.blob_path(sha).exists():
                 if dry_run:
@@ -84,9 +83,10 @@ def _missing_reachable_refs(store: CheckpointStore) -> int:
 def _reachable_blob_refs(store: CheckpointStore) -> set[str]:
     refs = extract_sha_refs(_read_json(store.session_dir / "metadata.json"))
     for manifest in store.list_manifests():
-        refs.add(manifest.env_ref)
-        refs.add(manifest.fs_ref)
         for root_ref in (manifest.env_ref, manifest.fs_ref):
+            if not is_sha_ref(root_ref):
+                continue
+            refs.add(root_ref)
             try:
                 data = store.load_json_blob(root_ref)
             except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError):
@@ -128,6 +128,8 @@ def _prune_unreferenced_global_blobs(
     if remaining_refs is None:
         return
     for sha in candidate_refs - remaining_refs:
+        if not is_sha_ref(sha):
+            continue
         path = store.blob_path(sha)
         try:
             path.unlink()
