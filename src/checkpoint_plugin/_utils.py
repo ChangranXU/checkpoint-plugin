@@ -55,3 +55,23 @@ def backup_file(path: Path, backup_path: Path, backed_up: list[str]) -> None:
     backup_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(path, backup_path)
     backed_up.append(str(backup_path))
+
+
+def extract_sha_refs(value: object) -> set[str]:
+    """Recursively extract SHA256 references from nested JSON structures.
+
+    Scans strings, dicts, and lists for 64-character hex strings matching
+    the SHA256 format [0-9a-f]{64}.
+    """
+    import re
+    refs: set[str] = set()
+    if isinstance(value, str):
+        if re.fullmatch(r"[0-9a-f]{64}", value):
+            refs.add(value)
+    elif isinstance(value, dict):
+        for item in value.values():
+            refs.update(extract_sha_refs(item))
+    elif isinstance(value, list):
+        for item in value:
+            refs.update(extract_sha_refs(item))
+    return refs

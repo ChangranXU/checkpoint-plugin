@@ -108,6 +108,64 @@ def test_clean_blobs_compacts_legacy_session_blobs(tmp_path, monkeypatch, capsys
     assert store.blob_path(sha).read_bytes() == b"legacy"
 
 
+def test_clean_blobs_keeps_legacy_blob_when_promotion_hash_mismatches(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "plugin"
+    store = CheckpointStore(home / "sessions" / "s1")
+    sha = hashlib.sha256(b"expected").hexdigest()
+    legacy_path = store.legacy_blob_path(sha)
+    legacy_path.parent.mkdir(parents=True)
+    legacy_path.write_bytes(b"wrong")
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(home))
+
+    assert main(["clean", "--blobs"]) == 0
+
+    assert "Compacted 0 legacy blob(s); promoted 0; missing 1" in capsys.readouterr().out
+    assert legacy_path.read_bytes() == b"wrong"
+    assert not store.blob_path(sha).exists()
+
+
+def test_clean_blobs_dry_run_reports_hash_mismatch_without_removal(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "plugin"
+    store = CheckpointStore(home / "sessions" / "s1")
+    sha = hashlib.sha256(b"expected").hexdigest()
+    legacy_path = store.legacy_blob_path(sha)
+    legacy_path.parent.mkdir(parents=True)
+    legacy_path.write_bytes(b"wrong")
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(home))
+
+    assert main(["clean", "--blobs", "--dry-run"]) == 0
+
+    assert "Would compact 0 legacy blob(s); promoted 0; missing 1" in capsys.readouterr().out
+    assert legacy_path.read_bytes() == b"wrong"
+    assert not store.blob_path(sha).exists()
+
+
+def test_clean_blobs_reports_missing_reachable_refs(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "plugin"
+    store = CheckpointStore(home / "sessions" / "s1")
+    env_ref = hashlib.sha256(b"missing-env").hexdigest()
+    fs_ref = hashlib.sha256(b"missing-fs").hexdigest()
+    fork_ref = hashlib.sha256(b"missing-fork").hexdigest()
+    store.write_manifest(
+        CheckpointManifest(
+            turn_id=1,
+            session_id="s1",
+            created_ts="2026-06-09T00:00:00Z",
+            env_ref=env_ref,
+            fs_ref=fs_ref,
+        )
+    )
+    (store.session_dir / "metadata.json").write_text(
+        json.dumps({"fork_point_trajectory_ref": fork_ref}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(home))
+
+    assert main(["clean", "--blobs", "--dry-run"]) == 0
+
+    assert "Would compact 0 legacy blob(s); promoted 0; missing 3" in capsys.readouterr().out
+
+
 def _seed_turn(coordinator, transcript, user_message, end_offset, *, boundary_mode="per_turn_key"):
     from checkpoint_plugin.coordinator import TurnRecord
     from checkpoint_plugin.types import TrajectoryReference

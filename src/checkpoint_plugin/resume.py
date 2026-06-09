@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Iterable
 
-from ._utils import read_metadata_json
+from ._utils import extract_sha_refs, read_metadata_json
 from .env.collector import claude_mcp_statuses_from_trajectory, collect_environment, environment_from_blob
 from .env.differ import diff_environments, render_diff
 from .env.providers import (
@@ -288,21 +288,7 @@ def _manifest_blob_refs(store: CheckpointStore, manifest: CheckpointManifest) ->
             data = store.load_json_blob(root_ref)
         except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError):
             continue
-        refs.update(_sha_values(data))
-    return refs
-
-
-def _sha_values(value: object) -> set[str]:
-    refs: set[str] = set()
-    if isinstance(value, str):
-        if re.fullmatch(r"[0-9a-f]{64}", value):
-            refs.add(value)
-    elif isinstance(value, dict):
-        for item in value.values():
-            refs.update(_sha_values(item))
-    elif isinstance(value, list):
-        for item in value:
-            refs.update(_sha_values(item))
+        refs.update(extract_sha_refs(data))
     return refs
 
 
