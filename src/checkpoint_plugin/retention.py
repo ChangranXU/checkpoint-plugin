@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from pathlib import Path
 
@@ -31,6 +32,90 @@ def clean_keep_last(keep_last: int, plugin_home: Path | None = None) -> int:
             + "}\n",
         )
     return removed
+
+
+def compact_legacy_blobs(plugin_home: Path | None = None, dry_run: bool = False) -> dict[str, int]:
+    """Move legacy per-session blobs into the global blob store."""
+    root = sessions_dir(plugin_home)
+    result = {"promoted": 0, "removed": 0, "missing": 0}
+    if not root.exists():
+        return result
+
+    for session in sorted(root.iterdir()):
+        if not session.is_dir():
+            continue
+        store = CheckpointStore(session)
+        refs = _reachable_blob_refs(store)
+        for sha in sorted(refs):
+            legacy_path = store.legacy_blob_path(sha)
+            if not legacy_path.exists():
+                if not store.blob_path(sha).exists():
+                    result["missing"] += 1
+                continue
+        legacy_files = [path for path in store.legacy_blobs_dir.glob("*/*") if path.is_file()]
+        for legacy_path in legacy_files:
+            sha = legacy_path.name
+            if not re.fullmatch(r"[0-9a-f]{64}", sha):
+                continue
+            if not store.blob_path(sha).exists():
+                if not dry_run:
+                    store.store_blob(legacy_path.read_bytes())
+                result["promoted"] += 1
+            if not dry_run:
+                legacy_path.unlink()
+                _prune_empty_blob_parents(legacy_path.parent, store.legacy_blobs_dir)
+            result["removed"] += 1
+    return result
+
+
+def _reachable_blob_refs(store: CheckpointStore) -> set[str]:
+    refs: set[str] = set()
+    metadata = _read_json(store.session_dir / "metadata.json")
+    refs.update(_sha_values(metadata))
+    for manifest in store.list_manifests():
+        refs.add(manifest.env_ref)
+        refs.add(manifest.fs_ref)
+        for root_ref in (manifest.env_ref, manifest.fs_ref):
+            try:
+                data = store.load_json_blob(root_ref)
+            except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            refs.update(_sha_values(data))
+    return refs
+
+
+def _read_json(path: Path) -> object:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _sha_values(value: object) -> set[str]:
+    refs: set[str] = set()
+    if isinstance(value, str):
+        if re.fullmatch(r"[0-9a-f]{64}", value):
+            refs.add(value)
+    elif isinstance(value, dict):
+        for item in value.values():
+            refs.update(_sha_values(item))
+    elif isinstance(value, list):
+        for item in value:
+            refs.update(_sha_values(item))
+    return refs
+
+
+def _prune_empty_blob_parents(path: Path, stop: Path) -> None:
+    while path != stop and path.exists():
+        try:
+            path.rmdir()
+        except OSError:
+            return
+        path = path.parent
+    try:
+        stop.rmdir()
+    except OSError:
+        pass
 
 
 def clean_empty_sessions(plugin_home: Path | None = None, dry_run: bool = False) -> dict[str, list[str]]:

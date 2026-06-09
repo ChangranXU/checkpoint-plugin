@@ -6,10 +6,12 @@ import hashlib
 import json
 import os
 import sys
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, BinaryIO, Iterator
 
+from .paths import blobs_dir, sessions_dir
 from .types import CheckpointManifest, TrajectoryReference
 
 
@@ -17,12 +19,20 @@ def canonical_json(data: Any) -> str:
     return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def _home_for_session(session_dir: Path) -> Path:
+    parent = session_dir.parent
+    if parent.name == sessions_dir(parent.parent).name:
+        return parent.parent
+    return parent
+
+
 class CheckpointStore:
     def __init__(self, session_dir: Path) -> None:
         self.session_dir = Path(session_dir).expanduser().resolve()
         self.manifest_dir = self.session_dir / "manifests"
         self.index_path = self.manifest_dir / "index.json"
-        self.blobs_dir = self.session_dir / "blobs"
+        self.legacy_blobs_dir = self.session_dir / "blobs"
+        self.blobs_dir = blobs_dir(_home_for_session(self.session_dir))
         self.trajectory_path = self.session_dir / "trajectory.jsonl"
         self.env_snapshot_dir = self.session_dir / "env-snapshots"
         self.lock_path = self.session_dir / ".checkpoint.lock"
@@ -44,28 +54,49 @@ class CheckpointStore:
     def blob_path(self, sha: str) -> Path:
         return self.blobs_dir / sha[:2] / sha
 
+    def legacy_blob_path(self, sha: str) -> Path:
+        return self.legacy_blobs_dir / sha[:2] / sha
+
     def store_blob(self, data: bytes) -> str:
         sha = hashlib.sha256(data).hexdigest()
         path = self.blob_path(sha)
         if path.exists():
             return sha
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
         with tmp.open("wb") as handle:
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(tmp, path)
+        try:
+            os.link(tmp, path)
+        except FileExistsError:
+            pass
+        finally:
+            tmp.unlink(missing_ok=True)
         return sha
+
+    def promote_legacy_blob(self, sha: str) -> bool:
+        path = self.blob_path(sha)
+        if path.exists():
+            return True
+        legacy_path = self.legacy_blob_path(sha)
+        if not legacy_path.exists():
+            return False
+        self.store_blob(legacy_path.read_bytes())
+        return True
 
     def store_json_blob(self, data: Any) -> str:
         return self.store_blob((canonical_json(data) + "\n").encode("utf-8"))
 
     def load_blob(self, sha: str) -> bytes:
         path = self.blob_path(sha)
-        if not path.exists():
-            raise FileNotFoundError(f"Missing checkpoint blob {sha}")
-        return path.read_bytes()
+        if path.exists():
+            return path.read_bytes()
+        legacy_path = self.legacy_blob_path(sha)
+        if legacy_path.exists():
+            return legacy_path.read_bytes()
+        raise FileNotFoundError(f"Missing checkpoint blob {sha}")
 
     def load_json_blob(self, sha: str) -> Any:
         return json.loads(self.load_blob(sha).decode("utf-8"))

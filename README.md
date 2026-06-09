@@ -95,6 +95,7 @@ checkpoint resume-open <new-session-id>
 checkpoint clean --empty                 # remove empty/incomplete sessions
 checkpoint clean --empty --dry-run       # preview what would be removed
 checkpoint clean --keep-last 100         # keep only last N turns per session
+checkpoint clean --blobs                 # compact legacy per-session blobs
 
 # Manual checkpoint (automatic via hooks in normal use)
 checkpoint save --session <session-id> --note "description"
@@ -141,15 +142,17 @@ Checkpoints live in `~/.checkpoint-plugin/sessions/<session-id>/` with:
 - `metadata.json` — session metadata (provider, source, parent lineage, timestamps)
 - `manifests/` — per-turn manifests plus `index.json`
 - `env-snapshots/` — human-readable grouped environment snapshots, regenerated from manifests
-- `blobs/` — content-addressed environment JSON, filesystem JSON, file contents, and fork-point trajectory data
 - `trajectory.jsonl` — legacy/manual trajectory storage and copied OpenCode resume timelines
 - `resume-open.json` — present on resumed sessions; stores the validated launcher command/env
 - `.checkpoint.lock` — per-session write lock
+
+Content blobs are stored globally under `~/.checkpoint-plugin/blobs/`, keyed by SHA-256, and shared across sessions. They include environment JSON, filesystem JSON, file contents, Codex history, and fork-point trajectory data. Existing per-session `blobs/` directories are still readable for backward compatibility; run `checkpoint clean --blobs` to compact them into the global store.
 
 Filesystem snapshots are JSON blobs: each snapshot records the original `cwd`, optional git state, and a map of relative file paths to content blob hashes. Fork/resume sessions may store `fork_point_trajectory_ref` blobs so inherited transcript prefixes survive parent transcript rewrites.
 
 Other plugin state:
 
+- `~/.checkpoint-plugin/blobs/` — global content-addressed checkpoint blob store
 - `~/.checkpoint-plugin/backups/` — per-resume backups of files that were changed or deleted
 - `~/.checkpoint-plugin/env-state/<new-session-id>/` — isolated provider home/config used by `resume-open`
 - `~/.checkpoint-plugin/config.json` — plugin config, created from defaults on first use

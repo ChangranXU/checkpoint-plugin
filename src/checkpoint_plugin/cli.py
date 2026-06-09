@@ -17,7 +17,7 @@ from .fs.snapshot import filesystem_from_blob
 from .integrations.hook_installer import install_hooks, uninstall_hooks
 from .paths import config_path, load_config, sessions_dir, write_config
 from .resume import ResumeOptions, ResumeOrchestrator, execute_resume_open, restore_opencode_metadata
-from .retention import clean_empty_sessions, clean_keep_last
+from .retention import clean_empty_sessions, clean_keep_last, compact_legacy_blobs
 from .store import CheckpointStore
 from .types import ResumePlan
 from .ui.diff_viewer import show_diff_viewer
@@ -75,6 +75,7 @@ def main(argv: list[str] | None = None) -> int:
     clean = sub.add_parser("clean", help="Apply retention or remove empty sessions")
     clean.add_argument("--keep-last", type=int, help="Keep only last N turns per session")
     clean.add_argument("--empty", action="store_true", help="Remove sessions with no captured turns")
+    clean.add_argument("--blobs", action="store_true", help="Compact legacy per-session blobs into global storage")
     clean.add_argument("--dry-run", action="store_true", help="Show what would be removed without removing")
 
     hooks = sub.add_parser("hooks", help="Install or uninstall agent lifecycle hooks")
@@ -179,12 +180,20 @@ def _dispatch(args: argparse.Namespace) -> int:
                 for error in result["errors"]:
                     print(f"  - {error}")
             return 0
+        elif args.blobs:
+            result = compact_legacy_blobs(dry_run=args.dry_run)
+            action = "Would compact" if args.dry_run else "Compacted"
+            print(
+                f"{action} {result['removed']} legacy blob(s); "
+                f"promoted {result['promoted']}; missing {result['missing']}"
+            )
+            return 0
         elif args.keep_last is not None:
             removed = clean_keep_last(args.keep_last)
             print(f"Removed {removed} old manifest(s)")
             return 0
         else:
-            print("Error: must specify --empty or --keep-last", file=sys.stderr)
+            print("Error: must specify --empty, --keep-last, or --blobs", file=sys.stderr)
             return 1
     if args.command == "hooks":
         return _cmd_hooks(args.action, args.provider)

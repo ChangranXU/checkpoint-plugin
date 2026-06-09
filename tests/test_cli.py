@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import hashlib
 
 from checkpoint_plugin.cli import (
     main,
@@ -85,6 +86,26 @@ def test_colorize_respects_no_color_env(monkeypatch):
     cmd = "checkpoint resume-open abc"
     assert _colorize(cmd, "bold green", stream=_Stream(tty=True)) == cmd
     assert _supports_color(_Stream(tty=True)) is False
+
+
+def test_clean_blobs_compacts_legacy_session_blobs(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "plugin"
+    store = CheckpointStore(home / "sessions" / "s1")
+    sha = hashlib.sha256(b"legacy").hexdigest()
+    legacy_path = store.legacy_blob_path(sha)
+    legacy_path.parent.mkdir(parents=True)
+    legacy_path.write_bytes(b"legacy")
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(home))
+
+    assert main(["clean", "--blobs", "--dry-run"]) == 0
+    assert "Would compact 1 legacy blob(s); promoted 1; missing 0" in capsys.readouterr().out
+    assert legacy_path.exists()
+    assert not store.blob_path(sha).exists()
+
+    assert main(["clean", "--blobs"]) == 0
+    assert "Compacted 1 legacy blob(s); promoted 1; missing 0" in capsys.readouterr().out
+    assert not legacy_path.exists()
+    assert store.blob_path(sha).read_bytes() == b"legacy"
 
 
 def _seed_turn(coordinator, transcript, user_message, end_offset, *, boundary_mode="per_turn_key"):
