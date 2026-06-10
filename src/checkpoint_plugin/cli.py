@@ -385,17 +385,10 @@ def _edit_send_replaced_turns(
     (the common case) or for non-codex sessions (claude edit-send has no marker).
     """
     replaced: dict[int, int] = {}
-    by_turn = {m.turn_id: m for m in manifests}
-    for manifest in manifests:
-        num_turns = _rolled_back_count(manifest)
-        if num_turns <= 0:
-            continue
-        # The K turns with ids strictly below this one, nearest first, are dead.
-        dead = sorted((tid for tid in by_turn if tid < manifest.turn_id), reverse=True)[
-            :num_turns
-        ]
-        for tid in dead:
-            replaced[tid] = manifest.turn_id
+    victims_by_turn, _carriers = _live_rollback_victims(manifests)
+    for replacing_turn_id, victims in victims_by_turn.items():
+        for tid in victims:
+            replaced[tid] = replacing_turn_id
     return replaced
 
 
@@ -407,24 +400,40 @@ def _turns_carrying_pre_fork_rollback(
     On a forked resume, codex replays a `thread_rolled_back num_turns=K` at the head of
     a captured turn whose K victims were edit-sent away BEFORE the fork — so they live
     in the uncaptured inherited prefix, not in any manifest row. `_edit_send_replaced_turns`
-    can only mark victims that exist as captured turns (ids below the marker turn); when
-    K exceeds that count, the surplus victims are invisible. We flag the carrier turn so
-    `list` can note the inherited relationship rather than silently dropping it.
+    can only mark victims that exist as still-live captured turns (ids below the marker
+    turn); when K exceeds that count, the surplus victims are invisible. We flag the
+    carrier turn so `list` can note the inherited relationship rather than silently
+    dropping it.
 
     Returns the set of carrier turn_ids whose rollback reaches into the inherited prefix.
     Empty for the common case (a fully-captured in-session edit-send, already covered by
     `replaced`).
     """
+    _victims_by_turn, carriers = _live_rollback_victims(manifests)
+    return carriers
+
+
+def _live_rollback_victims(
+    manifests: list[Any],
+) -> tuple[dict[int, list[int]], set[int]]:
+    victims_by_turn: dict[int, list[int]] = {}
     carriers: set[int] = set()
-    ids = sorted(m.turn_id for m in manifests)
-    for manifest in manifests:
+    live_turn_ids = {m.turn_id for m in manifests}
+    for manifest in sorted(manifests, key=lambda item: item.turn_id):
         num_turns = _rolled_back_count(manifest)
         if num_turns <= 0:
             continue
-        captured_below = sum(1 for tid in ids if tid < manifest.turn_id)
-        if num_turns > captured_below:
+        live_below = sorted(
+            (tid for tid in live_turn_ids if tid < manifest.turn_id), reverse=True
+        )
+        victims = live_below[:num_turns]
+        if num_turns > len(live_below):
             carriers.add(manifest.turn_id)
-    return carriers
+        if victims:
+            victims_by_turn[manifest.turn_id] = victims
+            for tid in victims:
+                live_turn_ids.discard(tid)
+    return victims_by_turn, carriers
 
 
 def _rolled_back_count(manifest: Any) -> int:

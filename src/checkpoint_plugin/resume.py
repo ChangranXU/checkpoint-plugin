@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shlex
@@ -853,11 +854,11 @@ def _validate_provider_runtime_args(
     index = 0
     while index < len(args):
         option = args[index]
-        if (
-            option in value_options
-            and index + 1 < len(args)
-            and not args[index + 1].startswith("-")
-        ):
+        assigned_option, assigned_separator, assigned_value = option.partition("=")
+        if assigned_separator and assigned_option in value_options and assigned_value:
+            index += 1
+            continue
+        if option in value_options and index + 1 < len(args) and args[index + 1]:
             index += 2
             continue
         if option in json_config_options and index + 1 < len(args):
@@ -2206,7 +2207,9 @@ def _int_or_now(value: object) -> int:
 def _int_or_default(value: object, default: int) -> int:
     if isinstance(value, bool):
         return default
-    if isinstance(value, (int, float)):
+    if isinstance(value, int):
+        return int(value)
+    if isinstance(value, float) and math.isfinite(value):
         return int(value)
     return default
 
@@ -3362,7 +3365,10 @@ def _provider_runtime_args(
     for field_name, option in policy.runtime_arg_fields:
         value = _string_attr(target_env, field_name)
         if value:
-            args.extend([option, value])
+            if value.startswith("-"):
+                args.append(f"{option}={value}")
+            else:
+                args.extend([option, value])
     for field_name, option, config_key in policy.runtime_json_config_arg_fields:
         value = _string_attr(target_env, field_name)
         if value:

@@ -363,6 +363,14 @@ def test_opencode_resume_preserves_session_info_fields(tmp_path):
     )
 
 
+def test_opencode_resume_defaults_non_finite_integer_fields():
+    from checkpoint_plugin.resume import _int_or_default
+
+    assert _int_or_default(float("inf"), 1234) == 1234
+    assert _int_or_default(float("-inf"), 1234) == 1234
+    assert _int_or_default(float("nan"), 1234) == 1234
+
+
 def test_opencode_resume_restores_session_messages_and_todos(tmp_path, monkeypatch):
     import sqlite3
     from checkpoint_plugin.resume import (

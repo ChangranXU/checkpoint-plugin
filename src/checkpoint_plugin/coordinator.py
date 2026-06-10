@@ -786,7 +786,7 @@ def _opencode_session_title(session_id: str) -> str | None:
         Path(
             os.environ.get("OPENCODE_DATA_DIR")
             or os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share"))
-        )
+        ).expanduser()
         / "opencode"
     )
     db_path = data_home / "opencode.db"

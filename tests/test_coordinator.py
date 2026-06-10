@@ -190,6 +190,36 @@ def test_opencode_session_title_is_read_from_sqlite(tmp_path, monkeypatch):
     assert metadata["session_title"] == "Greeting"
 
 
+def test_opencode_session_title_expands_data_dir_tilde(tmp_path, monkeypatch):
+    import sqlite3
+    from checkpoint_plugin.coordinator import resolve_session_title
+
+    home = tmp_path / "home"
+    data_dir = home / "my_data" / "opencode"
+    data_dir.mkdir(parents=True)
+    db_path = data_dir / "opencode.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE project (id TEXT PRIMARY KEY)")
+    conn.execute("INSERT INTO project VALUES ('proj1')")
+    conn.execute(
+        "CREATE TABLE session ("
+        "id TEXT PRIMARY KEY, project_id TEXT NOT NULL, slug TEXT NOT NULL, "
+        "directory TEXT NOT NULL, title TEXT NOT NULL, version TEXT NOT NULL, "
+        "time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, "
+        "FOREIGN KEY (project_id) REFERENCES project(id))"
+    )
+    conn.execute(
+        "INSERT INTO session VALUES ('ses_tilde', 'proj1', 'slug', '/tmp', 'Tilde Title', '1.0', 1000, 2000)"
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("OPENCODE_DATA_DIR", "~/my_data")
+
+    metadata = {"provider": "opencode", "session_id": "ses_tilde"}
+    assert resolve_session_title(metadata) == "Tilde Title"
+
+
 def test_resolve_session_title_codex_lazy(tmp_path, monkeypatch):
     """resolve_session_title picks up a codex title written after session_start."""
     from checkpoint_plugin.coordinator import resolve_session_title

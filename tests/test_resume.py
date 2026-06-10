@@ -1350,6 +1350,49 @@ def test_resume_open_rejects_tampered_descriptor_command(tmp_path):
         execute_resume_open(session_id, plugin_home, execvpe=lambda *_args: None)
 
 
+def test_resume_open_accepts_self_written_dash_prefixed_runtime_value(tmp_path):
+    from checkpoint_plugin.resume import _resume_open_spec, load_resume_open_spec
+    from checkpoint_plugin.types import EnvironmentState
+
+    session_id = "019e91aa-5d69-7180-8729-1a9a31c7e182"
+    plugin_home = tmp_path / "plugin"
+    cwd = tmp_path / "work"
+    provider_home = tmp_path / "env-state" / session_id / "codex"
+    session_path = plugin_home / "sessions" / session_id
+    cwd.mkdir(parents=True)
+    provider_home.mkdir(parents=True)
+    session_path.mkdir(parents=True)
+    spec = _resume_open_spec(
+        "codex",
+        session_id,
+        cwd,
+        tmp_path / "codex.jsonl",
+        EnvironmentState(provider="codex", model="-claude-opus"),
+        {"CODEX_HOME": str(provider_home)},
+    )
+    assert spec is not None
+    (session_path / "resume-open.json").write_text(
+        json.dumps(
+            {
+                "provider": spec.provider,
+                "session_id": spec.session_id,
+                "cwd": str(spec.cwd),
+                "env_state_dir": str(provider_home.parent),
+                "provider_home": str(provider_home),
+                "env": spec.env,
+                "preflight": spec.preflight,
+                "command": spec.command,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    loaded = load_resume_open_spec(session_id, plugin_home)
+
+    assert loaded.command == spec.command
+
+
 def test_resume_open_rejects_env_path_hijack(tmp_path):
     import pytest
 
