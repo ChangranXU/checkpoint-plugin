@@ -858,7 +858,11 @@ def _validate_provider_runtime_args(
         if assigned_separator and assigned_option in value_options:
             index += 1
             continue
-        if option in value_options and index + 1 < len(args):
+        if (
+            option in value_options
+            and index + 1 < len(args)
+            and not args[index + 1].startswith("-")
+        ):
             index += 2
             continue
         if option in json_config_options and index + 1 < len(args):

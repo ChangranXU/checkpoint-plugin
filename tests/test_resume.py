@@ -1405,6 +1405,20 @@ def test_resume_open_accepts_empty_runtime_value(tmp_path):
     )
 
 
+def test_resume_open_rejects_option_like_separate_runtime_value(tmp_path):
+    import pytest
+
+    from checkpoint_plugin.env.providers import CODEX_RESUME_POLICY
+    from checkpoint_plugin.resume import _validate_provider_runtime_args
+
+    with pytest.raises(RuntimeError, match="command"):
+        _validate_provider_runtime_args(
+            ["--model", "--provider-flag"],
+            CODEX_RESUME_POLICY,
+            tmp_path / "resume-open.json",
+        )
+
+
 def test_resume_open_rejects_env_path_hijack(tmp_path):
     import pytest
 
