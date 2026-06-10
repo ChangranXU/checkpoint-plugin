@@ -55,8 +55,50 @@ def test_resume_diff_backup_and_restore(tmp_path, monkeypatch):
     assert not (cwd / "new.txt").exists()
     uuid.UUID(report.new_session_id)
     resumed_store = CheckpointStore(plugin_home / "sessions" / report.new_session_id)
-    assert resumed_store.read_manifest(0).session_id == report.new_session_id
+    resumed_manifest = resumed_store.read_manifest(0)
+    resumed_fs = resumed_store.load_json_blob(resumed_manifest.fs_ref)
+    file_ref = resumed_fs["files"]["file.txt"]
+    assert resumed_manifest.session_id == report.new_session_id
+    assert not resumed_store.legacy_blobs_dir.exists()
+    assert resumed_store.load_blob(file_ref) == b"v1"
     assert (plugin_home / "backups").exists()
+
+
+def test_resume_promotes_legacy_session_blobs_without_copying_blob_tree(tmp_path, monkeypatch):
+    plugin_home = tmp_path / "plugin"
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    target_file = cwd / "file.txt"
+    target_file.write_text("legacy checkpoint", encoding="utf-8")
+    _isolate_provider_env(monkeypatch)
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
+
+    coordinator = CheckpointCoordinator(session_id="s1", cwd=cwd)
+    coordinator.on_session_start()
+    coordinator.on_turn_end(TurnRecord(user_message="checkpoint"))
+
+    source_store = CheckpointStore(plugin_home / "sessions" / "s1")
+    manifest = source_store.read_manifest(0)
+    fs_snapshot = source_store.load_json_blob(manifest.fs_ref)
+    file_ref = fs_snapshot["files"]["file.txt"]
+    for blob in list(source_store.blobs_dir.glob("*/*")):
+        if blob.is_file():
+            legacy_path = source_store.legacy_blob_path(blob.name)
+            legacy_path.parent.mkdir(parents=True, exist_ok=True)
+            legacy_path.write_bytes(blob.read_bytes())
+            blob.unlink()
+    assert not source_store.blob_path(file_ref).exists()
+    assert source_store.legacy_blob_path(file_ref).exists()
+
+    target_file.write_text("current", encoding="utf-8")
+    report = ResumeOrchestrator(cwd=cwd).execute(ResumeOrchestrator(cwd=cwd).plan("s1", 0), lambda _text: True)
+
+    resumed_store = CheckpointStore(plugin_home / "sessions" / report.new_session_id)
+    assert not resumed_store.legacy_blobs_dir.exists()
+    assert not source_store.legacy_blob_path(file_ref).exists()
+    assert source_store.blob_path(file_ref).read_bytes() == b"legacy checkpoint"
+    assert resumed_store.load_blob(file_ref) == b"legacy checkpoint"
+    assert target_file.read_text(encoding="utf-8") == "legacy checkpoint"
 
 
 def test_resume_copies_trajectory_through_target_turn(tmp_path, monkeypatch):

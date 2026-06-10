@@ -6,7 +6,8 @@ import json
 import shutil
 from pathlib import Path
 
-from .paths import sessions_dir
+from ._utils import extract_sha_refs, is_sha_ref
+from .paths import blobs_dir, sessions_dir
 from .store import CheckpointStore
 
 
@@ -33,6 +34,126 @@ def clean_keep_last(keep_last: int, plugin_home: Path | None = None) -> int:
     return removed
 
 
+def compact_legacy_blobs(plugin_home: Path | None = None, dry_run: bool = False) -> dict[str, int]:
+    """Move legacy per-session blobs into the global blob store."""
+    root = sessions_dir(plugin_home)
+    result = {"promoted": 0, "removed": 0, "missing": 0}
+    if not root.exists():
+        return result
+
+    for session in sorted(root.iterdir()):
+        if not session.is_dir():
+            continue
+        store = CheckpointStore(session)
+        result["missing"] += _missing_reachable_refs(store)
+        legacy_files = sorted(path for path in store.legacy_blobs_dir.glob("*/*") if path.is_file())
+        for legacy_path in legacy_files:
+            sha = legacy_path.name
+            if not is_sha_ref(sha):
+                continue
+            if not store.blob_path(sha).exists():
+                if dry_run:
+                    if not store.legacy_blob_matches(sha):
+                        result["missing"] += 1
+                        continue
+                else:
+                    if not store.promote_legacy_blob(sha):
+                        result["missing"] += 1
+                        continue
+                result["promoted"] += 1
+            if not dry_run:
+                if not store.blob_path(sha).exists():
+                    result["missing"] += 1
+                    continue
+                if legacy_path.exists():
+                    legacy_path.unlink()
+                _prune_empty_blob_parents(legacy_path.parent, store.legacy_blobs_dir)
+            result["removed"] += 1
+    return result
+
+
+def _missing_reachable_refs(store: CheckpointStore) -> int:
+    missing = 0
+    for sha in _reachable_blob_refs(store):
+        if not store.blob_path(sha).exists() and not store.legacy_blob_path(sha).exists():
+            missing += 1
+    return missing
+
+
+def _reachable_blob_refs(store: CheckpointStore) -> set[str]:
+    refs = extract_sha_refs(_read_json(store.session_dir / "metadata.json"))
+    for manifest in store.list_manifests():
+        for root_ref in (manifest.env_ref, manifest.fs_ref):
+            if not is_sha_ref(root_ref):
+                continue
+            refs.add(root_ref)
+            try:
+                data = store.load_json_blob(root_ref)
+            except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            refs.update(extract_sha_refs(data))
+    return refs
+
+
+def _reachable_blob_refs_for_sessions(root: Path) -> set[str] | None:
+    refs: set[str] = set()
+    if not root.exists():
+        return refs
+    for session in sorted(root.iterdir()):
+        if not session.is_dir():
+            continue
+        try:
+            refs.update(_reachable_blob_refs(CheckpointStore(session)))
+        except Exception:
+            return None
+    return refs
+
+
+def _prune_global_blob_refs(plugin_home: Path | None, candidates: set[str]) -> int:
+    if not candidates:
+        return 0
+    global_blobs = blobs_dir(plugin_home)
+    if not global_blobs.exists():
+        return 0
+    reachable = _reachable_blob_refs_for_sessions(sessions_dir(plugin_home))
+    if reachable is None:
+        return 0
+    removed = 0
+    for sha in sorted(candidates - reachable):
+        if not is_sha_ref(sha):
+            continue
+        path = global_blobs / sha[:2] / sha
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            continue
+        removed += 1
+        _prune_empty_blob_parents(path.parent, global_blobs, remove_stop=False)
+    return removed
+
+
+def _read_json(path: Path) -> object:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _prune_empty_blob_parents(path: Path, stop: Path, *, remove_stop: bool = True) -> None:
+    while path != stop and path.exists():
+        try:
+            path.rmdir()
+        except OSError:
+            return
+        path = path.parent
+    if not remove_stop:
+        return
+    try:
+        stop.rmdir()
+    except OSError:
+        pass
+
+
 def clean_empty_sessions(plugin_home: Path | None = None, dry_run: bool = False) -> dict[str, list[str]]:
     """Remove sessions with no captured turns or only metadata shells.
 
@@ -40,6 +161,7 @@ def clean_empty_sessions(plugin_home: Path | None = None, dry_run: bool = False)
     """
     result = {"removed": [], "kept": [], "errors": []}
     root = sessions_dir(plugin_home)
+    deleted_refs: set[str] = set()
 
     if not root.exists():
         return result
@@ -96,6 +218,7 @@ def clean_empty_sessions(plugin_home: Path | None = None, dry_run: bool = False)
                 if dry_run:
                     result["removed"].append(f"{session_id} [{reason}] (dry-run)")
                 else:
+                    deleted_refs.update(_reachable_blob_refs(store))
                     shutil.rmtree(session_dir)
                     result["removed"].append(f"{session_id} [{reason}]")
             else:
@@ -104,4 +227,5 @@ def clean_empty_sessions(plugin_home: Path | None = None, dry_run: bool = False)
         except Exception as e:
             result["errors"].append(f"{session_id}: {e}")
 
+    _prune_global_blob_refs(plugin_home, deleted_refs)
     return result

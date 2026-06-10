@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Iterable
 
-from ._utils import read_metadata_json
+from ._utils import extract_sha_refs, is_sha_ref, read_metadata_json
 from .env.collector import claude_mcp_statuses_from_trajectory, collect_environment, environment_from_blob
 from .env.differ import diff_environments, render_diff
 from .env.providers import (
@@ -240,8 +240,6 @@ class ResumeOrchestrator:
         _write_resumed_metadata(store, target_store, plan, new_session_id, provider_session_path, cwd, runtime)
         if resume_open is not None:
             _write_resume_open_spec(target_store, resume_open, runtime)
-        if store.blobs_dir.exists():
-            shutil.copytree(store.blobs_dir, target_store.blobs_dir, dirs_exist_ok=True)
         # P4-3/P6-2: realign spans to the REWRITTEN provider file so resumed
         # manifests' byte offsets match the file their trajectory_ref points at
         # (otherwise a resume-of-a-resume reads stale raw-concat offsets and drops
@@ -266,11 +264,34 @@ class ResumeOrchestrator:
         )
         for manifest in store.list_manifests():
             if manifest.turn_id <= plan.turn_id:
+                _promote_manifest_blobs(store, manifest)
                 target_store.write_manifest(
                     _resumed_manifest(manifest, new_session_id, manifest_session_path, realigned, target_store, cwd)
                 )
         if trajectory.data:
             target_store._atomic_write(target_store.trajectory_path, trajectory.data)
+
+
+def _promote_manifest_blobs(store: CheckpointStore, manifest: CheckpointManifest) -> None:
+    for sha in _manifest_blob_refs(store, manifest):
+        store.promote_legacy_blob(sha)
+
+
+def _manifest_blob_refs(store: CheckpointStore, manifest: CheckpointManifest) -> set[str]:
+    refs = {ref for ref in (manifest.env_ref, manifest.fs_ref) if is_sha_ref(ref)}
+    metadata = _read_session_metadata(store)
+    fork_point_ref = metadata.get("fork_point_trajectory_ref")
+    if is_sha_ref(fork_point_ref):
+        refs.add(fork_point_ref)
+    for root_ref in (manifest.env_ref, manifest.fs_ref):
+        if not is_sha_ref(root_ref):
+            continue
+        try:
+            data = store.load_json_blob(root_ref)
+        except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        refs.update(extract_sha_refs(data))
+    return refs
 
 
 def _stamp() -> str:

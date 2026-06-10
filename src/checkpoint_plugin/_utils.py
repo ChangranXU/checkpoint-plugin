@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from pathlib import Path
 from typing import Any
+
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
 
 def expand_and_resolve(path: Path | str) -> Path:
@@ -55,3 +58,27 @@ def backup_file(path: Path, backup_path: Path, backed_up: list[str]) -> None:
     backup_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(path, backup_path)
     backed_up.append(str(backup_path))
+
+
+def is_sha_ref(value: object) -> bool:
+    """Return True when value is a canonical SHA256 blob reference."""
+    return isinstance(value, str) and _SHA256_RE.fullmatch(value) is not None
+
+
+def extract_sha_refs(value: object) -> set[str]:
+    """Recursively extract SHA256 references from nested JSON structures.
+
+    Scans strings, dicts, and lists for 64-character hex strings matching
+    the SHA256 format [0-9a-f]{64}.
+    """
+    refs: set[str] = set()
+    if isinstance(value, str):
+        if is_sha_ref(value):
+            refs.add(value)
+    elif isinstance(value, dict):
+        for item in value.values():
+            refs.update(extract_sha_refs(item))
+    elif isinstance(value, list):
+        for item in value:
+            refs.update(extract_sha_refs(item))
+    return refs

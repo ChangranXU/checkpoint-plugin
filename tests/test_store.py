@@ -1,4 +1,8 @@
+import errno
 import json
+import hashlib
+
+import pytest
 
 from checkpoint_plugin.store import CheckpointStore
 from checkpoint_plugin.types import CheckpointManifest, TrajectoryReference
@@ -34,6 +38,94 @@ def test_blob_dedup_and_manifest_roundtrip(tmp_path):
 
     assert store.read_manifest(3) == manifest
     assert store.list_turn_ids() == [3]
+
+
+def test_blobs_are_global_across_sessions(tmp_path):
+    first_store = CheckpointStore(tmp_path / "plugin" / "sessions" / "s1")
+    second_store = CheckpointStore(tmp_path / "plugin" / "sessions" / "s2")
+
+    sha = first_store.store_blob(b"shared")
+    assert second_store.store_blob(b"shared") == sha
+
+    assert first_store.blob_path(sha) == second_store.blob_path(sha)
+    assert first_store.blob_path(sha).is_file()
+    assert not first_store.legacy_blob_path(sha).exists()
+    assert not second_store.legacy_blob_path(sha).exists()
+    assert second_store.load_blob(sha) == b"shared"
+
+
+def test_legacy_session_blob_fallback_and_promotion(tmp_path):
+    store = CheckpointStore(tmp_path / "plugin" / "sessions" / "s1")
+    sha = hashlib.sha256(b"legacy").hexdigest()
+    legacy_path = store.legacy_blob_path(sha)
+    legacy_path.parent.mkdir(parents=True)
+    legacy_path.write_bytes(b"legacy")
+
+    assert store.load_blob(sha) == b"legacy"
+    assert store.promote_legacy_blob(sha) is True
+    assert store.blob_path(sha).read_bytes() == b"legacy"
+    assert not legacy_path.exists()
+    legacy_path.parent.mkdir(parents=True)
+    legacy_path.write_bytes(b"corrupt")
+    assert store.blob_path(sha).read_bytes() == b"legacy"
+
+
+def test_store_blob_falls_back_when_hardlink_is_unavailable(tmp_path, monkeypatch):
+    store = CheckpointStore(tmp_path / "plugin" / "sessions" / "s1")
+
+    def fail_link(_source, _target):
+        raise OSError(errno.EXDEV, "cross-device link")
+
+    monkeypatch.setattr("checkpoint_plugin.store.os.link", fail_link)
+
+    sha = store.store_blob(b"fallback")
+
+    assert store.blob_path(sha).read_bytes() == b"fallback"
+
+
+def test_store_blob_reraises_unexpected_link_errors(tmp_path, monkeypatch):
+    store = CheckpointStore(tmp_path / "plugin" / "sessions" / "s1")
+
+    def fail_link(_source, _target):
+        raise OSError(errno.EIO, "io error")
+
+    monkeypatch.setattr("checkpoint_plugin.store.os.link", fail_link)
+
+    with pytest.raises(OSError):
+        store.store_blob(b"broken")
+
+    sha = hashlib.sha256(b"broken").hexdigest()
+    assert not store.blob_path(sha).exists()
+    assert not list(store.blob_path(sha).parent.glob("*.tmp"))
+
+
+def test_promote_legacy_blob_does_not_depend_on_hardlinks(tmp_path, monkeypatch):
+    store = CheckpointStore(tmp_path / "plugin" / "sessions" / "s1")
+    sha = hashlib.sha256(b"legacy").hexdigest()
+    legacy_path = store.legacy_blob_path(sha)
+    legacy_path.parent.mkdir(parents=True)
+    legacy_path.write_bytes(b"legacy")
+
+    def fail_link(_source, _target):
+        raise OSError(errno.EXDEV, "cross-device link")
+
+    monkeypatch.setattr("checkpoint_plugin.store.os.link", fail_link)
+
+    assert store.promote_legacy_blob(sha) is True
+    assert store.blob_path(sha).read_bytes() == b"legacy"
+    assert not legacy_path.exists()
+
+
+def test_promote_legacy_blob_rejects_hash_mismatch(tmp_path):
+    store = CheckpointStore(tmp_path / "plugin" / "sessions" / "s1")
+    sha = hashlib.sha256(b"expected").hexdigest()
+    legacy_path = store.legacy_blob_path(sha)
+    legacy_path.parent.mkdir(parents=True)
+    legacy_path.write_bytes(b"wrong")
+
+    assert store.promote_legacy_blob(sha) is False
+    assert not store.blob_path(sha).exists()
+    assert legacy_path.read_bytes() == b"wrong"
 
 
 def test_append_trajectory_returns_start_and_end_offsets(tmp_path):

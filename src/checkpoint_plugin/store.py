@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
 import sys
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, BinaryIO, Iterator
 
+from .paths import blobs_dir, sessions_dir
 from .types import CheckpointManifest, TrajectoryReference
 
 
@@ -17,12 +20,20 @@ def canonical_json(data: Any) -> str:
     return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def _home_for_session(session_dir: Path) -> Path:
+    parent = session_dir.parent
+    if parent.name == sessions_dir(parent.parent).name:
+        return parent.parent
+    return parent
+
+
 class CheckpointStore:
     def __init__(self, session_dir: Path) -> None:
         self.session_dir = Path(session_dir).expanduser().resolve()
         self.manifest_dir = self.session_dir / "manifests"
         self.index_path = self.manifest_dir / "index.json"
-        self.blobs_dir = self.session_dir / "blobs"
+        self.legacy_blobs_dir = self.session_dir / "blobs"
+        self.blobs_dir = blobs_dir(_home_for_session(self.session_dir))
         self.trajectory_path = self.session_dir / "trajectory.jsonl"
         self.env_snapshot_dir = self.session_dir / "env-snapshots"
         self.lock_path = self.session_dir / ".checkpoint.lock"
@@ -44,28 +55,66 @@ class CheckpointStore:
     def blob_path(self, sha: str) -> Path:
         return self.blobs_dir / sha[:2] / sha
 
+    def legacy_blob_path(self, sha: str) -> Path:
+        return self.legacy_blobs_dir / sha[:2] / sha
+
     def store_blob(self, data: bytes) -> str:
         sha = hashlib.sha256(data).hexdigest()
         path = self.blob_path(sha)
         if path.exists():
             return sha
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
         with tmp.open("wb") as handle:
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(tmp, path)
+        try:
+            _publish_blob_tmp(tmp, path)
+        finally:
+            tmp.unlink(missing_ok=True)
         return sha
+
+    def promote_legacy_blob(self, sha: str) -> bool:
+        path = self.blob_path(sha)
+        legacy_path = self.legacy_blob_path(sha)
+        if path.exists():
+            _remove_blob_alias(legacy_path, self.legacy_blobs_dir)
+            return True
+        if not legacy_path.exists():
+            return False
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+        try:
+            try:
+                digest = _copy_file_with_hash(legacy_path, tmp)
+            except FileNotFoundError:
+                return False
+            if digest != sha:
+                return False
+            _publish_blob_tmp(tmp, path)
+            _remove_blob_alias(legacy_path, self.legacy_blobs_dir)
+            return True
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    def legacy_blob_matches(self, sha: str) -> bool:
+        try:
+            return _hash_file(self.legacy_blob_path(sha)) == sha
+        except FileNotFoundError:
+            return False
 
     def store_json_blob(self, data: Any) -> str:
         return self.store_blob((canonical_json(data) + "\n").encode("utf-8"))
 
     def load_blob(self, sha: str) -> bytes:
         path = self.blob_path(sha)
-        if not path.exists():
-            raise FileNotFoundError(f"Missing checkpoint blob {sha}")
-        return path.read_bytes()
+        if path.exists():
+            return path.read_bytes()
+        legacy_path = self.legacy_blob_path(sha)
+        if legacy_path.exists():
+            return legacy_path.read_bytes()
+        raise FileNotFoundError(f"Missing checkpoint blob {sha}")
 
     def load_json_blob(self, sha: str) -> Any:
         return json.loads(self.load_blob(sha).decode("utf-8"))
@@ -177,6 +226,70 @@ class CheckpointStore:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp, path)
+
+
+_LINK_FALLBACK_ERRNOS = {
+    value
+    for value in (
+        errno.EXDEV,
+        errno.EPERM,
+        getattr(errno, "EOPNOTSUPP", None),
+        getattr(errno, "ENOTSUP", None),
+    )
+    if value is not None
+}
+
+
+def _is_link_fallback_error(exc: OSError) -> bool:
+    return exc.errno in _LINK_FALLBACK_ERRNOS
+
+
+def _publish_blob_tmp(tmp: Path, path: Path) -> None:
+    try:
+        os.link(tmp, path)
+    except FileExistsError:
+        return
+    except OSError as exc:
+        if not _is_link_fallback_error(exc):
+            raise
+        os.replace(tmp, path)
+
+
+def _hash_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _copy_file_with_hash(source: Path, tmp: Path) -> str:
+    digest = hashlib.sha256()
+    with source.open("rb") as src, tmp.open("xb") as dst:
+        for chunk in iter(lambda: src.read(1024 * 1024), b""):
+            digest.update(chunk)
+            dst.write(chunk)
+        dst.flush()
+        os.fsync(dst.fileno())
+    return digest.hexdigest()
+
+
+def _remove_blob_alias(path: Path, stop: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    parent = path.parent
+    while parent != stop and parent.exists():
+        try:
+            parent.rmdir()
+        except OSError:
+            return
+        parent = parent.parent
+    try:
+        stop.rmdir()
+    except OSError:
+        pass
 
 
 def _lock_file(handle: BinaryIO) -> None:

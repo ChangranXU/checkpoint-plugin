@@ -628,7 +628,7 @@ def _link_nodes(nodes: dict[str, SessionNode], root: Path) -> None:
             node.subagent_parent = (parent_session, turn)
             nodes[parent_session].subagent_children.setdefault(turn, []).append(node)
             continue
-        parent = _fork_parent(node, nodes, path_index)
+        parent = _fork_parent(node, nodes, path_index, root)
         if parent is not None:
             parent_session_id, turn = parent
             parent_node = nodes[parent_session_id]
@@ -648,6 +648,7 @@ def _fork_parent(
     node: SessionNode,
     nodes: dict[str, SessionNode],
     path_index: dict[str, str],
+    root: Path,
 ) -> tuple[str, int | None] | None:
     # For resumed sessions, prefer resumed_from_session_id (direct source) over
     # inherited forked_from_id (grandparent). The resumed_from_turn_id gives
@@ -663,13 +664,26 @@ def _fork_parent(
         parent_session = path_index.get(str(Path(transcript).expanduser()))
     if not parent_session or parent_session not in nodes or parent_session == node.session_id:
         return None
-    turn = _fork_parent_turn(nodes[parent_session], node.metadata)
+    turn = _fork_parent_turn(nodes[parent_session], node, root)
     return parent_session, turn
 
 
-def _fork_parent_turn(parent: SessionNode, metadata: dict[str, Any]) -> int | None:
+def _fork_parent_turn(parent: SessionNode, node: SessionNode, root: Path) -> int | None:
+    metadata = node.metadata
     offset = _int_or_none(metadata.get("forked_at_offset"))
     transcript = non_empty_str(metadata.get("forked_from_transcript"))
+    aligned: int | None = None
+    if parent.provider == "codex" and node.source == "fork":
+        # A codex structural fork's forked_at_offset is measured in the fork's
+        # OWN rollout (the inlined-prefix anchor, P6-10), so comparing it against
+        # parent manifest offsets always lands on the parent's last turn. The
+        # prefix also replays the user message of any in-flight turn the fork
+        # rolled back (turn_aborted + thread_rolled_back), so record counts
+        # overshoot too. Translate the anchor into parent coordinates by aligning
+        # the fork-point trajectory against the parent's records.
+        aligned = _codex_fork_parent_offset(node, transcript, root)
+        if aligned is not None:
+            offset = aligned
     if offset is not None and transcript:
         parent_path = str(Path(transcript).expanduser())
         candidates = []
@@ -684,9 +698,74 @@ def _fork_parent_turn(parent: SessionNode, metadata: dict[str, Any]) -> int | No
                 candidates.append(manifest.turn_id)
         if candidates:
             return max(candidates)
+        if aligned is not None:
+            # Fork branched before the parent's first captured turn completed.
+            return None
     if parent.manifests:
         return parent.manifests[-1].turn_id
     return None
+
+
+def _codex_fork_parent_offset(node: SessionNode, transcript: str | None, root: Path) -> int | None:
+    """Parent-file byte offset of a codex fork's branch point.
+
+    Walks the parent transcript and the fork-point trajectory blob in lockstep,
+    comparing records with timestamps stripped (a fork re-stamps replayed
+    records); fork-only head records (the fork's own session_meta) are skipped
+    until the parent's first record matches. Returns the parent offset just past
+    the last matching record — the fork seam — or None when the blob or parent
+    file is unavailable.
+    """
+    ref = non_empty_str(node.metadata.get("fork_point_trajectory_ref"))
+    if not ref or not transcript:
+        return None
+    try:
+        blob = CheckpointStore(root / node.session_id).load_blob(ref)
+    except OSError:
+        return None
+    blob_records: list[dict[str, Any]] = []
+    for line in blob.splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict):
+            record.pop("timestamp", None)
+            blob_records.append(record)
+    if not blob_records:
+        return None
+    matched_end: int | None = None
+    index = 0
+    offset = 0
+    try:
+        with Path(transcript).expanduser().open("rb") as handle:
+            for line in handle:
+                length = len(line)
+                if not line.strip():
+                    offset += length
+                    continue
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    break
+                if not isinstance(record, dict):
+                    break
+                record.pop("timestamp", None)
+                if matched_end is None:
+                    while index < len(blob_records) and blob_records[index] != record:
+                        index += 1
+                    if index >= len(blob_records):
+                        return None
+                elif index >= len(blob_records) or blob_records[index] != record:
+                    break
+                matched_end = offset + length
+                index += 1
+                offset += length
+    except OSError:
+        return None
+    return matched_end
 
 
 def _build_phantom_ancestry(
@@ -735,8 +814,6 @@ def _build_phantom_ancestry(
         # No grandparent — child stays as a top-level node in its cwd group
         return
     grandparent_ancestors = ancestors[1:]
-    # The child attaches at the fork_turn where the direct parent was in the grandparent
-    child_attach_turn = ancestors[0][1]
     prev_phantom: SessionNode | None = None
     prev_turn: int | None = None
     for ancestor, turn_at in reversed(grandparent_ancestors):
@@ -771,8 +848,13 @@ def _build_phantom_ancestry(
         prev_phantom = phantom
         prev_turn = turn_at
     if prev_phantom is not None:
-        prev_phantom.fork_children.setdefault(child_attach_turn, []).append(child)
-        child.fork_parent = (prev_phantom.session_id, child_attach_turn)
+        # The child carries the direct parent's turns, so it attaches in the
+        # grandparent phantom at the turn where the DIRECT PARENT branched from
+        # the grandparent (prev_turn = ancestors[1][1]) — not at the turn inside
+        # the direct parent that the child resumed from (ancestors[0][1]), which
+        # is in a different session's coordinates and may not exist here.
+        prev_phantom.fork_children.setdefault(prev_turn, []).append(child)
+        child.fork_parent = (prev_phantom.session_id, prev_turn)
 
 
 def _safe_parent_turn(root: Path, parent_session_id: str, agent_id: str | None, metadata: dict[str, Any]) -> int | None:

@@ -39,6 +39,10 @@ def sessions_dir(home: Path | None = None) -> Path:
     return plugin_home(home) / "sessions"
 
 
+def blobs_dir(home: Path | None = None) -> Path:
+    return plugin_home(home) / "blobs"
+
+
 def session_dir(session_id: str, home: Path | None = None) -> Path:
     return sessions_dir(home) / session_id
 
@@ -54,6 +58,7 @@ def config_path(home: Path | None = None) -> Path:
 def ensure_home(home: Path | None = None) -> Path:
     root = plugin_home(home)
     (root / "sessions").mkdir(parents=True, exist_ok=True)
+    (root / "blobs").mkdir(parents=True, exist_ok=True)
     (root / "backups").mkdir(parents=True, exist_ok=True)
     path = root / "config.json"
     if not path.exists():

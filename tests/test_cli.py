@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import hashlib
 
 from checkpoint_plugin.cli import (
     main,
@@ -85,6 +86,169 @@ def test_colorize_respects_no_color_env(monkeypatch):
     cmd = "checkpoint resume-open abc"
     assert _colorize(cmd, "bold green", stream=_Stream(tty=True)) == cmd
     assert _supports_color(_Stream(tty=True)) is False
+
+
+def test_clean_blobs_compacts_legacy_session_blobs(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "plugin"
+    store = CheckpointStore(home / "sessions" / "s1")
+    sha = hashlib.sha256(b"legacy").hexdigest()
+    legacy_path = store.legacy_blob_path(sha)
+    legacy_path.parent.mkdir(parents=True)
+    legacy_path.write_bytes(b"legacy")
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(home))
+
+    assert main(["clean", "--blobs", "--dry-run"]) == 0
+    assert "Would compact 1 legacy blob(s); promoted 1; missing 0" in capsys.readouterr().out
+    assert legacy_path.exists()
+    assert not store.blob_path(sha).exists()
+
+    assert main(["clean", "--blobs"]) == 0
+    assert "Compacted 1 legacy blob(s); promoted 1; missing 0" in capsys.readouterr().out
+    assert not legacy_path.exists()
+    assert store.blob_path(sha).read_bytes() == b"legacy"
+
+
+def test_clean_blobs_keeps_legacy_blob_when_promotion_hash_mismatches(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "plugin"
+    store = CheckpointStore(home / "sessions" / "s1")
+    sha = hashlib.sha256(b"expected").hexdigest()
+    legacy_path = store.legacy_blob_path(sha)
+    legacy_path.parent.mkdir(parents=True)
+    legacy_path.write_bytes(b"wrong")
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(home))
+
+    assert main(["clean", "--blobs"]) == 0
+
+    assert "Compacted 0 legacy blob(s); promoted 0; missing 1" in capsys.readouterr().out
+    assert legacy_path.read_bytes() == b"wrong"
+    assert not store.blob_path(sha).exists()
+
+
+def test_clean_blobs_dry_run_reports_hash_mismatch_without_removal(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "plugin"
+    store = CheckpointStore(home / "sessions" / "s1")
+    sha = hashlib.sha256(b"expected").hexdigest()
+    legacy_path = store.legacy_blob_path(sha)
+    legacy_path.parent.mkdir(parents=True)
+    legacy_path.write_bytes(b"wrong")
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(home))
+
+    assert main(["clean", "--blobs", "--dry-run"]) == 0
+
+    assert "Would compact 0 legacy blob(s); promoted 0; missing 1" in capsys.readouterr().out
+    assert legacy_path.read_bytes() == b"wrong"
+    assert not store.blob_path(sha).exists()
+
+
+def test_clean_blobs_reports_missing_reachable_refs(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "plugin"
+    store = CheckpointStore(home / "sessions" / "s1")
+    env_ref = hashlib.sha256(b"missing-env").hexdigest()
+    fs_ref = hashlib.sha256(b"missing-fs").hexdigest()
+    fork_ref = hashlib.sha256(b"missing-fork").hexdigest()
+    store.write_manifest(
+        CheckpointManifest(
+            turn_id=1,
+            session_id="s1",
+            created_ts="2026-06-09T00:00:00Z",
+            env_ref=env_ref,
+            fs_ref=fs_ref,
+        )
+    )
+    (store.session_dir / "metadata.json").write_text(
+        json.dumps({"fork_point_trajectory_ref": fork_ref}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(home))
+
+    assert main(["clean", "--blobs", "--dry-run"]) == 0
+
+    assert "Would compact 0 legacy blob(s); promoted 0; missing 3" in capsys.readouterr().out
+
+
+def test_clean_empty_prunes_only_unreferenced_global_blobs(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "plugin"
+    empty_store = CheckpointStore(home / "sessions" / "empty")
+    kept_store = CheckpointStore(home / "sessions" / "kept")
+    shared_ref = empty_store.store_blob(b"shared")
+    unique_ref = empty_store.store_blob(b"unique")
+    empty_env = empty_store.store_json_blob({"provider": "codex"})
+    empty_fs = empty_store.store_json_blob(
+        {
+            "cwd": str(tmp_path / "empty-work"),
+            "files": {"shared.txt": shared_ref, "unique.txt": unique_ref},
+            "git": None,
+        }
+    )
+    kept_env = kept_store.store_json_blob({"provider": "codex"})
+    kept_fs = kept_store.store_json_blob(
+        {
+            "cwd": str(tmp_path / "kept-work"),
+            "files": {"shared.txt": shared_ref},
+            "git": None,
+        }
+    )
+    empty_store.write_manifest(
+        CheckpointManifest(
+            turn_id=0,
+            session_id="empty",
+            created_ts="2026-06-09T00:00:00Z",
+            env_ref=empty_env,
+            fs_ref=empty_fs,
+            trajectory_ref=TrajectoryReference("codex", "", 0, 0, 0),
+        )
+    )
+    kept_store.write_manifest(
+        CheckpointManifest(
+            turn_id=0,
+            session_id="kept",
+            created_ts="2026-06-09T00:00:00Z",
+            env_ref=kept_env,
+            fs_ref=kept_fs,
+            trajectory_ref=TrajectoryReference("codex", "transcript.jsonl", 0, 1, 1),
+        )
+    )
+    (empty_store.session_dir / "metadata.json").write_text("{}", encoding="utf-8")
+    (kept_store.session_dir / "metadata.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(home))
+
+    assert main(["clean", "--empty"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Removed 1 empty session(s)" in output
+    assert not empty_store.session_dir.exists()
+    assert kept_store.session_dir.exists()
+    assert not empty_store.blob_path(unique_ref).exists()
+    assert not empty_store.blob_path(empty_fs).exists()
+    assert kept_store.blob_path(shared_ref).read_bytes() == b"shared"
+    assert kept_store.blob_path(kept_fs).exists()
+
+
+def test_clean_empty_ignores_malformed_blob_refs_when_pruning(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "plugin"
+    victim = tmp_path / "victim.txt"
+    victim.write_text("keep me\n", encoding="utf-8")
+    store = CheckpointStore(home / "sessions" / "bad")
+    malformed_ref = "../victim.txt"
+    store.write_manifest(
+        CheckpointManifest(
+            turn_id=0,
+            session_id="bad",
+            created_ts="2026-06-09T00:00:00Z",
+            env_ref=malformed_ref,
+            fs_ref=malformed_ref,
+            trajectory_ref=TrajectoryReference("codex", "", 0, 0, 0),
+        )
+    )
+    (store.session_dir / "metadata.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(home))
+
+    assert main(["clean", "--empty"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Removed 1 empty session(s)" in output
+    assert not store.session_dir.exists()
+    assert victim.read_text(encoding="utf-8") == "keep me\n"
 
 
 def _seed_turn(coordinator, transcript, user_message, end_offset, *, boundary_mode="per_turn_key"):
@@ -794,3 +958,134 @@ def test_cross_cwd_recursive_fork_resume_builds_full_chain(tmp_path, monkeypatch
     # The resumed-fork is nested under the fork point where fork1 was in root
     assert "forked/resumed here" in rendered
     assert "(ref)" in rendered
+
+
+def test_codex_fork_attaches_at_true_turn_despite_inlined_prefix_anchor(tmp_path, monkeypatch):
+    """A codex fork's forked_at_offset is in the fork's OWN file and may replay
+    rolled-back turns; the attach turn must come from aligning the fork-point
+    trajectory against the parent, not from comparing raw byte offsets."""
+    home = tmp_path / "plugin"
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(home))
+    parent = _write_session(
+        home,
+        "parent",
+        {
+            "provider": "codex",
+            "source": "startup",
+            "start_ts": "2026-01-01T00:00:00Z",
+            "session_title": "Parent",
+            "cwd": "/projects/original",
+        },
+        [
+            ("2026-01-01T00:01:00Z", "hi"),
+            ("2026-01-01T00:02:00Z", "long second turn"),
+        ],
+    )
+    parent_transcript = str(parent / "parent.jsonl")
+    # Fork-point trajectory: fork's own session_meta, the parent's turn-0 record
+    # (with a re-stamped timestamp), then a replayed-but-rolled-back user message
+    # from the parent's in-flight turn 1.
+    blob = (
+        json.dumps({"type": "session_meta", "payload": {"forked_from_id": "parent"}}) + "\n"
+        + json.dumps({"timestamp": "2026-01-01T00:03:00Z", "turn": 0}) + "\n"
+        + json.dumps({"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "long second turn"}]}}) + "\n"
+        + json.dumps({"type": "event_msg", "payload": {"type": "thread_rolled_back", "num_turns": 1}}) + "\n"
+    ).encode("utf-8")
+    fork_session = _write_session(
+        home,
+        "fork",
+        {
+            "provider": "codex",
+            "source": "fork",
+            "start_ts": "2026-01-01T00:03:00Z",
+            "session_title": "Fork",
+            "cwd": "/projects/original",
+            "forked_from_id": "parent",
+            "forked_from_transcript": parent_transcript,
+            # Inlined-prefix anchor: fork-file coordinates, larger than the whole
+            # parent file, so a parent-coordinate comparison lands on turn 1.
+            "forked_at_offset": len(blob),
+        },
+        [("2026-01-01T00:03:30Z", "this is fork")],
+    )
+    sha = CheckpointStore(fork_session).store_blob(blob)
+    metadata = json.loads((fork_session / "metadata.json").read_text(encoding="utf-8"))
+    metadata["fork_point_trajectory_ref"] = sha
+    (fork_session / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+
+    providers = collect_provider_trees(home / "sessions")
+    parent_node = next(n for n in providers["codex"] if n.session_id == "parent")
+    assert set(parent_node.fork_children) == {0}
+    assert [c.session_id for c in parent_node.fork_children[0]] == ["fork"]
+
+
+def test_cross_cwd_resume_of_fork_attaches_at_grandparent_fork_turn(tmp_path, monkeypatch):
+    """The child carries the direct parent's turns, so it must attach in the
+    grandparent phantom at the parent's fork point — not at resumed_from_turn_id,
+    which is in the direct parent's coordinates."""
+    home = tmp_path / "plugin"
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(home))
+    parent = _write_session(
+        home,
+        "root",
+        {
+            "provider": "codex",
+            "source": "startup",
+            "start_ts": "2026-01-01T00:00:00Z",
+            "session_title": "Root",
+            "cwd": "/projects/original",
+        },
+        [
+            ("2026-01-01T00:01:00Z", "hi"),
+            ("2026-01-01T00:02:00Z", "second turn"),
+        ],
+    )
+    parent_transcript = str(parent / "root.jsonl")
+    _write_session(
+        home,
+        "fork1",
+        {
+            "provider": "codex",
+            "source": "fork",
+            "start_ts": "2026-01-01T00:03:00Z",
+            "session_title": "Fork 1",
+            "cwd": "/projects/original",
+            "forked_from_id": "root",
+            "forked_from_transcript": parent_transcript,
+            "forked_at_offset": 12,  # parent coordinates: end of root turn 0
+        },
+        [
+            ("2026-01-01T00:03:30Z", "fork turn 0"),
+            ("2026-01-01T00:04:00Z", "fork turn 1"),
+        ],
+    )
+    _write_session(
+        home,
+        "resumed-fork",
+        {
+            "provider": "codex",
+            "source": "resume",
+            "start_ts": "2026-01-01T00:10:00Z",
+            "session_title": "Resumed fork",
+            "cwd": "/projects/copy",
+            "resumed_from_session_id": "fork1",
+            "resumed_from_turn_id": 1,
+            "forked_from_id": "root",
+        },
+        [
+            ("2026-01-01T00:10:30Z", "fork turn 0"),
+            ("2026-01-01T00:11:00Z", "fork turn 1"),
+        ],
+    )
+
+    providers = collect_provider_trees(home / "sessions")
+    copy_nodes = [n for n in providers["codex"] if n.cwd == "/projects/copy"]
+    assert len(copy_nodes) == 1
+    phantom_root = copy_nodes[0]
+    assert phantom_root.phantom_ref == "root"
+    # Phantom truncated to the fork point: only root turn 0 survives.
+    assert [m.turn_id for m in phantom_root.manifests] == [0]
+    # Child attaches at root turn 0 (fork1's branch point), NOT turn 1
+    # (resumed_from_turn_id, a fork1-coordinate value).
+    assert set(phantom_root.fork_children) == {0}
+    assert [c.session_id for c in phantom_root.fork_children[0]] == ["resumed-fork"]
