@@ -61,7 +61,10 @@ def jsonl_ref_for_turn(
     if not lines:
         return None
 
-    keyed = [(start, end, key_extractor(record) if isinstance(record, dict) else None) for start, end, record in lines]
+    keyed = [
+        (start, end, key_extractor(record) if isinstance(record, dict) else None)
+        for start, end, record in lines
+    ]
 
     if turn_id is not None:
         match = _slice_for_turn_id(keyed, turn_id, len(data), claim_leading_keyless)
@@ -126,7 +129,9 @@ def jsonl_after_leading_metas(
             start = line_end
             continue
         break
-    return _build_ref(provider, path, data, start, len(data), boundary_mode="session_boundary")
+    return _build_ref(
+        provider, path, data, start, len(data), boundary_mode="session_boundary"
+    )
 
 
 def recover_trailing_tail(ref: TrajectoryReference) -> bytes:
@@ -296,7 +301,9 @@ def _slice_for_turn_id(
     return keyed_start, end_offset
 
 
-def _last_keyed_end_before(keyed: list[tuple[int, int, Any]], offset: int) -> int | None:
+def _last_keyed_end_before(
+    keyed: list[tuple[int, int, Any]], offset: int
+) -> int | None:
     """End byte of the last keyed record strictly before `offset`.
 
     None means no keyed record precedes `offset` (the turn is the first one, so
@@ -317,7 +324,11 @@ def _next_distinct_key_offset(
     turn_id: Any,
 ) -> int | None:
     for line_start, _, key in keyed:
-        if line_start > start_offset and key is not None and not _keys_match(key, turn_id):
+        if (
+            line_start > start_offset
+            and key is not None
+            and not _keys_match(key, turn_id)
+        ):
             return line_start
     return None
 
@@ -358,4 +369,6 @@ def _no_prior_keys_before(keyed: list[tuple[int, int, Any]], offset: int) -> boo
 
 
 def _keys_match(left: Any, right: Any) -> bool:
-    return left == right or (left is not None and right is not None and str(left) == str(right))
+    return left == right or (
+        left is not None and right is not None and str(left) == str(right)
+    )

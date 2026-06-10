@@ -5,10 +5,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from checkpoint_plugin.ui.session_browser import SessionNode, TreeRow
+    from checkpoint_plugin.ui.session_browser import TreeRow
 
 
-def render_tree_row(row: TreeRow, is_selected: bool, all_rows: list[TreeRow]) -> list[tuple[str, str]]:
+def render_tree_row(
+    row: TreeRow, is_selected: bool, all_rows: list[TreeRow]
+) -> list[tuple[str, str]]:
     """Render a tree row with box-drawing characters and proper styling."""
     fragments: list[tuple[str, str]] = []
 

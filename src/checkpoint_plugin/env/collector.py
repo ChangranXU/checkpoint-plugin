@@ -65,7 +65,9 @@ def _is_secret_path(path: Path) -> bool:
 
 def _is_secret_key(key: str) -> bool:
     lowered = key.lower()
-    return any(fnmatch.fnmatch(lowered, pattern) for pattern in _SECRET_VALUE_KEY_PATTERNS)
+    return any(
+        fnmatch.fnmatch(lowered, pattern) for pattern in _SECRET_VALUE_KEY_PATTERNS
+    )
 
 
 def _redact_secret_values(data: bytes) -> bytes:
@@ -105,26 +107,53 @@ def collect_environment(
     skills = _collect_named_trees(skill_roots, store, follow_symlink_dirs=True)
     plugin_file_roots = _plugin_file_roots(provider, cwd)
     plugin_status = _collect_plugin_status(provider, cwd, session_env)
-    opencode_configs = _opencode_configs(provider, cwd, session_env) if provider.name == "opencode" else []
+    opencode_configs = (
+        _opencode_configs(provider, cwd, session_env)
+        if provider.name == "opencode"
+        else []
+    )
     return EnvironmentState(
         provider=provider.name,
-        model=_first_env("ANTHROPIC_MODEL", "CLAUDE_MODEL", "OPENAI_MODEL", "CODEX_MODEL", "OPENCODE_MODEL")
+        model=_first_env(
+            "ANTHROPIC_MODEL",
+            "CLAUDE_MODEL",
+            "OPENAI_MODEL",
+            "CODEX_MODEL",
+            "OPENCODE_MODEL",
+        )
         or session_env.get("model")
         or _opencode_model(opencode_configs),
-        permission_mode=_first_env("CLAUDE_PERMISSION_MODE", "CODEX_PERMISSION_MODE", "CODEX_SANDBOX_MODE", "OPENCODE_PERMISSION_MODE")
+        permission_mode=_first_env(
+            "CLAUDE_PERMISSION_MODE",
+            "CODEX_PERMISSION_MODE",
+            "CODEX_SANDBOX_MODE",
+            "OPENCODE_PERMISSION_MODE",
+        )
         or session_env.get("permission_mode"),
-        mode=_first_env("CLAUDE_MODE", "CODEX_MODE", "OPENCODE_MODE") or session_env.get("mode"),
-        effort=_first_env("CLAUDE_EFFORT", "OPENCODE_EFFORT") or session_env.get("effort") or _codex_effort(provider, cwd),
-        agent_type=_first_env("CLAUDE_AGENT_TYPE", "CODEX_AGENT_TYPE", "OPENCODE_AGENT_TYPE") or session_env.get("agent_type"),
+        mode=_first_env("CLAUDE_MODE", "CODEX_MODE", "OPENCODE_MODE")
+        or session_env.get("mode"),
+        effort=_first_env("CLAUDE_EFFORT", "OPENCODE_EFFORT")
+        or session_env.get("effort")
+        or _codex_effort(provider, cwd),
+        agent_type=_first_env(
+            "CLAUDE_AGENT_TYPE", "CODEX_AGENT_TYPE", "OPENCODE_AGENT_TYPE"
+        )
+        or session_env.get("agent_type"),
         memory_files=_collect_tree(provider.memory_dir, store),
         mcp_config=_store_file(provider.mcp_config, store),
         mcp_configs=_collect_named_files(_mcp_config_files(provider, cwd), store),
         mcp_servers=_collect_mcp_servers(provider, cwd, session_env, trajectory_ref),
         skills=skills,
         skill_status=_collect_skill_status(provider, cwd, skills),
-        plugin_files=_collect_plugin_files(plugin_file_roots, store, installed_plugins=set(plugin_status)),
+        plugin_files=_collect_plugin_files(
+            plugin_file_roots, store, installed_plugins=set(plugin_status)
+        ),
         plugin_status=plugin_status,
-        settings=_collect_settings(provider.settings_files, store, force_absolute=_force_absolute_settings(provider)),
+        settings=_collect_settings(
+            provider.settings_files,
+            store,
+            force_absolute=_force_absolute_settings(provider),
+        ),
         project_context=_collect_project_context(cwd, provider.project_files, store),
         extra={
             "provider_home": str(provider.home),
@@ -174,7 +203,12 @@ def _collect_mcp_servers(
                 }
             )
         for config in _mcp_json_configs(provider, cwd):
-            servers.update({str(name): _status_from_config(value) for name, value in _json_mcp_servers(config).items()})
+            servers.update(
+                {
+                    str(name): _status_from_config(value)
+                    for name, value in _json_mcp_servers(config).items()
+                }
+            )
         return servers
     if provider.name == "claude":
         config = _load_json(provider.home.parent / ".claude.json")
@@ -196,13 +230,20 @@ def _collect_mcp_servers(
         for config in _opencode_configs(provider, cwd, session_env):
             value = config.get("mcp")
             if isinstance(value, dict):
-                servers.update({str(name): _status_from_config(server_config) for name, server_config in value.items()})
+                servers.update(
+                    {
+                        str(name): _status_from_config(server_config)
+                        for name, server_config in value.items()
+                    }
+                )
         servers.update(_opencode_runtime_mcp_servers(session_env or {}))
         return dict(sorted(servers.items()))
     return {}
 
 
-def _collect_skill_status(provider: ProviderLayout, cwd: Path, skills: dict[str, str]) -> dict[str, str]:
+def _collect_skill_status(
+    provider: ProviderLayout, cwd: Path, skills: dict[str, str]
+) -> dict[str, str]:
     status = {name: "present" for name in _skill_names_from_files(skills)}
     if provider.name == "codex":
         for config in _codex_configs(provider, cwd):
@@ -231,29 +272,49 @@ def _skill_names_from_files(skills: dict[str, str]) -> set[str]:
     return names
 
 
-def _skill_roots(provider: ProviderLayout, cwd: Path, session_env: dict[str, str] | None = None) -> dict[str, Path]:
+def _skill_roots(
+    provider: ProviderLayout, cwd: Path, session_env: dict[str, str] | None = None
+) -> dict[str, Path]:
     roots = dict(provider.skills_dirs)
     roots.update(_plugin_skill_roots(provider))
     if provider.name == "opencode":
         roots = _filter_opencode_skill_roots(roots, session_env)
     if provider.name == "claude":
         for project_root in _ancestor_chain(_nearest_project_root(cwd), cwd):
-            roots[f"project:{project_root}:.claude/skills"] = project_root / ".claude" / "skills"
+            roots[f"project:{project_root}:.claude/skills"] = (
+                project_root / ".claude" / "skills"
+            )
     if provider.name == "codex":
         for project_root in _ancestor_chain(_nearest_project_root(cwd), cwd):
-            roots[f"project:{project_root}:.codex/skills"] = project_root / ".codex" / "skills"
-            roots[f"project:{project_root}:.agents/skills"] = project_root / ".agents" / "skills"
+            roots[f"project:{project_root}:.codex/skills"] = (
+                project_root / ".codex" / "skills"
+            )
+            roots[f"project:{project_root}:.agents/skills"] = (
+                project_root / ".agents" / "skills"
+            )
     if provider.name == "opencode":
         for project_root in _ancestor_chain(_nearest_project_root(cwd), cwd):
-            roots[f"project:{project_root}:.opencode/skills"] = project_root / ".opencode" / "skills"
-            roots[f"project:{project_root}:.opencode/skill"] = project_root / ".opencode" / "skill"
-            if not _opencode_flag_enabled("OPENCODE_DISABLE_EXTERNAL_SKILLS", session_env):
-                roots[f"project:{project_root}:.agents/skills"] = project_root / ".agents" / "skills"
-                if not _opencode_flag_enabled("OPENCODE_DISABLE_CLAUDE_CODE", session_env) and not _opencode_flag_enabled(
+            roots[f"project:{project_root}:.opencode/skills"] = (
+                project_root / ".opencode" / "skills"
+            )
+            roots[f"project:{project_root}:.opencode/skill"] = (
+                project_root / ".opencode" / "skill"
+            )
+            if not _opencode_flag_enabled(
+                "OPENCODE_DISABLE_EXTERNAL_SKILLS", session_env
+            ):
+                roots[f"project:{project_root}:.agents/skills"] = (
+                    project_root / ".agents" / "skills"
+                )
+                if not _opencode_flag_enabled(
+                    "OPENCODE_DISABLE_CLAUDE_CODE", session_env
+                ) and not _opencode_flag_enabled(
                     "OPENCODE_DISABLE_CLAUDE_CODE_SKILLS",
                     session_env,
                 ):
-                    roots[f"project:{project_root}:.claude/skills"] = project_root / ".claude" / "skills"
+                    roots[f"project:{project_root}:.claude/skills"] = (
+                        project_root / ".claude" / "skills"
+                    )
         for root in _opencode_config_skill_roots(provider, cwd, session_env or {}):
             roots[f"opencode-config-skills:{root}"] = root
     return roots
@@ -264,12 +325,16 @@ def _filter_opencode_skill_roots(
     session_env: dict[str, str] | None,
 ) -> dict[str, Path]:
     if not _opencode_flag_enabled("OPENCODE_DISABLE_EXTERNAL_SKILLS", session_env):
-        if not _opencode_flag_enabled("OPENCODE_DISABLE_CLAUDE_CODE", session_env) and not _opencode_flag_enabled(
+        if not _opencode_flag_enabled(
+            "OPENCODE_DISABLE_CLAUDE_CODE", session_env
+        ) and not _opencode_flag_enabled(
             "OPENCODE_DISABLE_CLAUDE_CODE_SKILLS",
             session_env,
         ):
             return roots
-        return {name: root for name, root in roots.items() if not name.startswith("claude-")}
+        return {
+            name: root for name, root in roots.items() if not name.startswith("claude-")
+        }
     return {
         name: root
         for name, root in roots.items()
@@ -356,7 +421,9 @@ def _collect_plugin_files(
         for rel, sha in _collect_plugin_file_tree(
             root,
             store,
-            installed_plugins=installed_plugins if name == "codex-plugin-cache" else None,
+            installed_plugins=installed_plugins
+            if name == "codex-plugin-cache"
+            else None,
         ).items():
             result[f"{name}/{rel}"] = sha
     return result
@@ -381,10 +448,14 @@ def _collect_plugin_file_tree(
     return result
 
 
-def _is_plugin_metadata_path(rel: str, *, installed_plugins: set[str] | None = None) -> bool:
+def _is_plugin_metadata_path(
+    rel: str, *, installed_plugins: set[str] | None = None
+) -> bool:
     parts = PurePosixPath(rel).parts
     name = parts[-1] if parts else ""
-    if installed_plugins is not None and _is_installed_plugin_cache_path(parts, installed_plugins):
+    if installed_plugins is not None and _is_installed_plugin_cache_path(
+        parts, installed_plugins
+    ):
         return True
     if ".codex-plugin" in parts:
         return True
@@ -393,7 +464,9 @@ def _is_plugin_metadata_path(rel: str, *, installed_plugins: set[str] | None = N
     return name in {".app.json", ".mcp.json", "marketplace.json"}
 
 
-def _is_installed_plugin_cache_path(parts: tuple[str, ...], installed_plugins: set[str]) -> bool:
+def _is_installed_plugin_cache_path(
+    parts: tuple[str, ...], installed_plugins: set[str]
+) -> bool:
     if len(parts) < 4:
         return False
     marketplace, plugin, version = parts[:3]
@@ -402,10 +475,14 @@ def _is_installed_plugin_cache_path(parts: tuple[str, ...], installed_plugins: s
     return f"{plugin}@{marketplace}" in installed_plugins
 
 
-def _codex_plugin_file_roots_extra(provider: ProviderLayout, roots: dict[str, Path]) -> dict[str, object]:
+def _codex_plugin_file_roots_extra(
+    provider: ProviderLayout, roots: dict[str, Path]
+) -> dict[str, object]:
     if provider.name != "codex" or not roots:
         return {}
-    return {"plugin_file_roots": {name: str(path) for name, path in sorted(roots.items())}}
+    return {
+        "plugin_file_roots": {name: str(path) for name, path in sorted(roots.items())}
+    }
 
 
 def _mcp_config_files(provider: ProviderLayout, cwd: Path) -> dict[str, Path]:
@@ -414,12 +491,22 @@ def _mcp_config_files(provider: ProviderLayout, cwd: Path) -> dict[str, Path]:
         path = project_root / ".mcp.json"
         files[f"project:{project_root}:.mcp.json"] = path
         if provider.name == "codex":
-            files[f"project:{project_root}:.codex/config.toml"] = project_root / ".codex" / "config.toml"
+            files[f"project:{project_root}:.codex/config.toml"] = (
+                project_root / ".codex" / "config.toml"
+            )
         if provider.name == "opencode":
-            files[f"project:{project_root}:opencode.json"] = project_root / "opencode.json"
-            files[f"project:{project_root}:opencode.jsonc"] = project_root / "opencode.jsonc"
-            files[f"project:{project_root}:.opencode/opencode.json"] = project_root / ".opencode" / "opencode.json"
-            files[f"project:{project_root}:.opencode/opencode.jsonc"] = project_root / ".opencode" / "opencode.jsonc"
+            files[f"project:{project_root}:opencode.json"] = (
+                project_root / "opencode.json"
+            )
+            files[f"project:{project_root}:opencode.jsonc"] = (
+                project_root / "opencode.jsonc"
+            )
+            files[f"project:{project_root}:.opencode/opencode.json"] = (
+                project_root / ".opencode" / "opencode.json"
+            )
+            files[f"project:{project_root}:.opencode/opencode.jsonc"] = (
+                project_root / ".opencode" / "opencode.jsonc"
+            )
     return files
 
 
@@ -438,15 +525,21 @@ def _opencode_configs(
     if provider.name != "opencode":
         return []
     runtime_env = _opencode_runtime_env_from_session(session_env or {})
-    config_dir = os.environ.get("OPENCODE_CONFIG_DIR") or runtime_env.get("OPENCODE_CONFIG_DIR")
+    config_dir = os.environ.get("OPENCODE_CONFIG_DIR") or runtime_env.get(
+        "OPENCODE_CONFIG_DIR"
+    )
     config_home = Path(config_dir).expanduser() if config_dir else provider.home
-    global_config_home = _opencode_default_config_home() if config_dir else provider.home
+    global_config_home = (
+        _opencode_default_config_home() if config_dir else provider.home
+    )
     configs = [
         _load_json(global_config_home / "config.json"),
         _load_json(global_config_home / "opencode.json"),
         _load_json(global_config_home / "opencode.jsonc"),
     ]
-    custom_config = os.environ.get("OPENCODE_CONFIG") or runtime_env.get("OPENCODE_CONFIG")
+    custom_config = os.environ.get("OPENCODE_CONFIG") or runtime_env.get(
+        "OPENCODE_CONFIG"
+    )
     if custom_config:
         configs.append(_load_json(Path(custom_config).expanduser()))
     if not _opencode_flag_enabled("OPENCODE_DISABLE_PROJECT_CONFIG", session_env):
@@ -455,13 +548,20 @@ def _opencode_configs(
             configs.extend(_opencode_config_files(project_root))
         for project_root in reversed(chain):
             configs.extend(_opencode_config_files(project_root / ".opencode"))
-    configs.extend(_opencode_config_files(Path(os.environ.get("TEST_HOME", str(Path.home()))).expanduser() / ".opencode"))
+    configs.extend(
+        _opencode_config_files(
+            Path(os.environ.get("TEST_HOME", str(Path.home()))).expanduser()
+            / ".opencode"
+        )
+    )
     if config_dir:
         configs.extend(_opencode_config_files(config_home))
     config_content = _opencode_config_content(session_env or {})
     if config_content:
         configs.append(_load_json_text(config_content))
-    permission = os.environ.get("OPENCODE_PERMISSION") or (session_env or {}).get("opencode_permission")
+    permission = os.environ.get("OPENCODE_PERMISSION") or (session_env or {}).get(
+        "opencode_permission"
+    )
     if permission:
         try:
             parsed_permission = json.loads(permission)
@@ -477,15 +577,23 @@ def _opencode_configs(
 
 def _opencode_default_config_home() -> Path:
     home = Path(os.environ.get("TEST_HOME", str(Path.home()))).expanduser()
-    return Path(os.environ.get("XDG_CONFIG_HOME", str(home / ".config"))).expanduser() / "opencode"
+    return (
+        Path(os.environ.get("XDG_CONFIG_HOME", str(home / ".config"))).expanduser()
+        / "opencode"
+    )
 
 
 def _opencode_config_files(directory: Path) -> list[dict[str, object]]:
-    return [_load_json(directory / "opencode.json"), _load_json(directory / "opencode.jsonc")]
+    return [
+        _load_json(directory / "opencode.json"),
+        _load_json(directory / "opencode.jsonc"),
+    ]
 
 
 def _opencode_resolved_config(session_env: dict[str, str]) -> dict[str, object]:
-    raw = os.environ.get("OPENCODE_RESOLVED_CONFIG") or session_env.get("resolved_config")
+    raw = os.environ.get("OPENCODE_RESOLVED_CONFIG") or session_env.get(
+        "resolved_config"
+    )
     if not raw:
         return {}
     try:
@@ -501,10 +609,15 @@ def _opencode_config_content(session_env: dict[str, str]) -> str | None:
     resolved = _opencode_resolved_config(session_env)
     if resolved:
         try:
-            return json.dumps(_opencode_config_with_mcp_status(resolved, session_env), separators=(",", ":"))
+            return json.dumps(
+                _opencode_config_with_mcp_status(resolved, session_env),
+                separators=(",", ":"),
+            )
         except (TypeError, ValueError):
             pass
-    raw = os.environ.get("OPENCODE_CONFIG_CONTENT") or session_env.get("opencode_config_content")
+    raw = os.environ.get("OPENCODE_CONFIG_CONTENT") or session_env.get(
+        "opencode_config_content"
+    )
     if not raw:
         return None
     try:
@@ -514,12 +627,16 @@ def _opencode_config_content(session_env: dict[str, str]) -> str | None:
     if not isinstance(data, dict):
         return raw
     try:
-        return json.dumps(_opencode_config_with_mcp_status(data, session_env), separators=(",", ":"))
+        return json.dumps(
+            _opencode_config_with_mcp_status(data, session_env), separators=(",", ":")
+        )
     except (TypeError, ValueError):
         return raw
 
 
-def _opencode_config_with_mcp_status(config: dict[str, object], session_env: dict[str, str]) -> dict[str, object]:
+def _opencode_config_with_mcp_status(
+    config: dict[str, object], session_env: dict[str, str]
+) -> dict[str, object]:
     statuses = _opencode_runtime_mcp_servers(session_env)
     if not statuses:
         return config
@@ -542,7 +659,9 @@ def _opencode_config_with_mcp_status(config: dict[str, object], session_env: dic
     return result
 
 
-def _opencode_config_skill_roots(provider: ProviderLayout, cwd: Path, session_env: dict[str, str]) -> list[Path]:
+def _opencode_config_skill_roots(
+    provider: ProviderLayout, cwd: Path, session_env: dict[str, str]
+) -> list[Path]:
     roots: list[Path] = []
     for config in _opencode_configs(provider, cwd, session_env):
         skills = config.get("skills")
@@ -606,7 +725,9 @@ def _opencode_runtime_mcp_servers(session_env: dict[str, str]) -> dict[str, str]
     return statuses
 
 
-def _claude_mcp_statuses_from_trajectory_ref(ref: TrajectoryReference | None) -> dict[str, str]:
+def _claude_mcp_statuses_from_trajectory_ref(
+    ref: TrajectoryReference | None,
+) -> dict[str, str]:
     if ref is None or ref.provider != "claude" or not ref.transcript_path:
         return {}
     path = Path(ref.transcript_path).expanduser()
@@ -643,16 +764,28 @@ def claude_mcp_statuses_from_trajectory(data: bytes) -> dict[str, str]:
             continue
         kind = attachment.get("type")
         if kind == "mcp_instructions_delta":
-            _apply_claude_mcp_name_delta(statuses, attachment.get("removedNames"), "inactive")
-            _apply_claude_mcp_name_delta(statuses, attachment.get("addedNames"), "active")
+            _apply_claude_mcp_name_delta(
+                statuses, attachment.get("removedNames"), "inactive"
+            )
+            _apply_claude_mcp_name_delta(
+                statuses, attachment.get("addedNames"), "active"
+            )
         elif kind == "deferred_tools_delta":
-            _apply_claude_mcp_tool_delta(statuses, attachment.get("removedNames"), "inactive")
-            _apply_claude_mcp_tool_delta(statuses, attachment.get("addedNames"), "active")
-            _apply_claude_mcp_tool_delta(statuses, attachment.get("readdedNames"), "active")
+            _apply_claude_mcp_tool_delta(
+                statuses, attachment.get("removedNames"), "inactive"
+            )
+            _apply_claude_mcp_tool_delta(
+                statuses, attachment.get("addedNames"), "active"
+            )
+            _apply_claude_mcp_tool_delta(
+                statuses, attachment.get("readdedNames"), "active"
+            )
     return statuses
 
 
-def _apply_claude_mcp_name_delta(statuses: dict[str, str], names: object, status: str) -> None:
+def _apply_claude_mcp_name_delta(
+    statuses: dict[str, str], names: object, status: str
+) -> None:
     if not isinstance(names, list):
         return
     for name in names:
@@ -660,7 +793,9 @@ def _apply_claude_mcp_name_delta(statuses: dict[str, str], names: object, status
             statuses[name] = status
 
 
-def _apply_claude_mcp_tool_delta(statuses: dict[str, str], names: object, status: str) -> None:
+def _apply_claude_mcp_tool_delta(
+    statuses: dict[str, str], names: object, status: str
+) -> None:
     if not isinstance(names, list):
         return
     for name in names:
@@ -687,7 +822,9 @@ def _opencode_model(configs: list[dict[str, object]]) -> str | None:
     return None
 
 
-def _opencode_extra(provider: ProviderLayout, session_env: dict[str, str]) -> dict[str, object]:
+def _opencode_extra(
+    provider: ProviderLayout, session_env: dict[str, str]
+) -> dict[str, object]:
     if provider.name != "opencode":
         return {}
     extra: dict[str, object] = {}
@@ -704,14 +841,18 @@ def _opencode_extra(provider: ProviderLayout, session_env: dict[str, str]) -> di
         except json.JSONDecodeError:
             roots = None
         if isinstance(roots, list):
-            extra["opencode_config_skill_roots"] = [str(root) for root in roots if isinstance(root, str)]
+            extra["opencode_config_skill_roots"] = [
+                str(root) for root in roots if isinstance(root, str)
+            ]
     elif resolved:
         roots = _opencode_skill_paths_from_config(resolved)
         if roots:
             extra["opencode_config_skill_roots"] = roots
     config_content = _opencode_config_content(session_env)
     if config_content:
-        extra["opencode_config_content"] = _redact_secret_values(config_content.encode("utf-8")).decode("utf-8")
+        extra["opencode_config_content"] = _redact_secret_values(
+            config_content.encode("utf-8")
+        ).decode("utf-8")
     return extra
 
 
@@ -734,7 +875,9 @@ def _opencode_runtime_env(session_env: dict[str, str]) -> dict[str, str]:
     )
     result = _opencode_runtime_env_from_session(session_env)
     result.update({key: os.environ[key] for key in keys if os.environ.get(key)})
-    permission = os.environ.get("OPENCODE_PERMISSION") or session_env.get("opencode_permission")
+    permission = os.environ.get("OPENCODE_PERMISSION") or session_env.get(
+        "opencode_permission"
+    )
     if permission:
         result["OPENCODE_PERMISSION"] = permission
     return result
@@ -750,7 +893,11 @@ def _opencode_runtime_env_from_session(session_env: dict[str, str]) -> dict[str,
         return {}
     if not isinstance(data, dict):
         return {}
-    return {str(key): str(value) for key, value in data.items() if isinstance(value, (str, int, float, bool))}
+    return {
+        str(key): str(value)
+        for key, value in data.items()
+        if isinstance(value, (str, int, float, bool))
+    }
 
 
 def _opencode_skill_paths_from_config(config: dict[str, object]) -> list[str]:
@@ -773,7 +920,9 @@ def _redact_secret_object(value: object, key: str | None = None) -> object:
     return value
 
 
-def _codex_history_extra(provider: ProviderLayout, store: CheckpointStore) -> dict[str, str]:
+def _codex_history_extra(
+    provider: ProviderLayout, store: CheckpointStore
+) -> dict[str, str]:
     """Capture Codex prompt history (`history.jsonl`) by content hash (G3).
 
     Cross-session prompt recall lives here; like ~/.claude.json it's global state
@@ -808,7 +957,11 @@ def _codex_effort(provider: ProviderLayout, cwd: Path) -> str | None:
 
 
 def _mcp_json_configs(provider: ProviderLayout, cwd: Path) -> list[dict[str, object]]:
-    configs = [_load_json(path) for path in provider.mcp_config_files if path.name == ".mcp.json"]
+    configs = [
+        _load_json(path)
+        for path in provider.mcp_config_files
+        if path.name == ".mcp.json"
+    ]
     for project_root in _ancestor_chain(_nearest_project_root(cwd), cwd):
         configs.append(_load_json(project_root / ".mcp.json"))
     return [config for config in configs if config]
@@ -911,7 +1064,9 @@ def _installed_claude_plugins(plugins_dir: Path) -> list[str]:
     return sorted(names)
 
 
-def _nearest_project_config(config: dict[str, object], cwd: Path) -> dict[str, object] | None:
+def _nearest_project_config(
+    config: dict[str, object], cwd: Path
+) -> dict[str, object] | None:
     projects = config.get("projects")
     if not isinstance(projects, dict):
         return None
@@ -996,7 +1151,9 @@ def _store_file(path: Path | None, store: CheckpointStore) -> str | None:
     return store.store_blob(_read_blob_bytes(path))
 
 
-def _collect_named_files(paths: dict[str, Path], store: CheckpointStore) -> dict[str, str]:
+def _collect_named_files(
+    paths: dict[str, Path], store: CheckpointStore
+) -> dict[str, str]:
     result: dict[str, str] = {}
     for name, path in sorted(paths.items()):
         sha = _store_file(path, store)
@@ -1005,7 +1162,9 @@ def _collect_named_files(paths: dict[str, Path], store: CheckpointStore) -> dict
     return result
 
 
-def _named_paths(paths: Iterable[Path], *, force_absolute: bool = False) -> dict[str, Path]:
+def _named_paths(
+    paths: Iterable[Path], *, force_absolute: bool = False
+) -> dict[str, Path]:
     path_list = list(paths)
     basenames: dict[str, int] = {}
     for path in path_list:
@@ -1025,7 +1184,9 @@ def _collect_named_trees(
 ) -> dict[str, str]:
     result: dict[str, str] = {}
     for name, root in sorted(roots.items()):
-        for rel, sha in _collect_tree(root, store, follow_symlink_dirs=follow_symlink_dirs).items():
+        for rel, sha in _collect_tree(
+            root, store, follow_symlink_dirs=follow_symlink_dirs
+        ).items():
             result[f"{name}/{rel}"] = sha
     return result
 
@@ -1064,14 +1225,18 @@ def _force_absolute_settings(provider: ProviderLayout) -> bool:
     return provider.name == "opencode"
 
 
-def _collect_project_context(cwd: Path, project_files: list[str], store: CheckpointStore) -> dict[str, str]:
+def _collect_project_context(
+    cwd: Path, project_files: list[str], store: CheckpointStore
+) -> dict[str, str]:
     context: dict[str, str] = {}
     for root in _ancestor_chain(_nearest_project_root(cwd), cwd):
         for rel_name in project_files:
             path = Path(rel_name)
             target = path if path.is_absolute() else root / rel_name
             if globlib.has_magic(str(target)):
-                for match in sorted(Path(item) for item in globlib.glob(str(target), recursive=True)):
+                for match in sorted(
+                    Path(item) for item in globlib.glob(str(target), recursive=True)
+                ):
                     _collect_project_context_path(context, match, root, store)
                 continue
             _collect_project_context_path(context, target, root, store)
@@ -1124,7 +1289,9 @@ def _iter_files(root: Path, *, follow_symlink_dirs: bool = False) -> Iterable[Pa
     yield from _iter_files_following_symlink_dirs(root, seen_dirs)
 
 
-def _iter_files_following_symlink_dirs(root: Path, seen_dirs: set[Path]) -> Iterable[Path]:
+def _iter_files_following_symlink_dirs(
+    root: Path, seen_dirs: set[Path]
+) -> Iterable[Path]:
     try:
         resolved = root.resolve(strict=True)
     except OSError:

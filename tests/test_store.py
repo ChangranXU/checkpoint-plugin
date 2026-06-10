@@ -203,7 +203,10 @@ def test_write_manifest_creates_human_readable_env_snapshot_groups(tmp_path):
     assert snapshot["environment"]["provider"] == "codex"
     assert snapshot["environment"]["model"] == "gpt-5"
     assert [turn["turn_id"] for turn in snapshot["turns"]] == [0, 1]
-    assert [turn["user_message_preview"] for turn in snapshot["turns"]] == ["first", "second"]
+    assert [turn["user_message_preview"] for turn in snapshot["turns"]] == [
+        "first",
+        "second",
+    ]
 
 
 def test_env_snapshot_groups_split_when_env_ref_changes(tmp_path):

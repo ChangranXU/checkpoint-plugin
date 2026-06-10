@@ -9,7 +9,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from checkpoint_plugin._utils import backup_file
-from checkpoint_plugin.path_utils import PathRootKind, mirror_path, path_matches_root, rewrite_path_references_bytes
+from checkpoint_plugin.path_utils import (
+    PathRootKind,
+    mirror_path,
+    path_matches_root,
+    rewrite_path_references_bytes,
+)
 from checkpoint_plugin.store import CheckpointStore
 from checkpoint_plugin.types import EnvironmentState, RestoreReport
 
@@ -43,11 +48,24 @@ def restore_environment(
     allowed_roots = _allowed_restore_roots(provider, target)
     path_map = _restore_path_map(target)
 
-    changed.extend(_restore_tree(target.memory_files, provider.memory_dir, store, backup_dir / "memory", backed_up))
+    changed.extend(
+        _restore_tree(
+            target.memory_files,
+            provider.memory_dir,
+            store,
+            backup_dir / "memory",
+            backed_up,
+        )
+    )
     changed.extend(
         _restore_named_skill_trees(
             target.skills,
-            _skill_restore_roots(provider, Path(target.extra.get("cwd") or "."), target.extra, target.skills),
+            _skill_restore_roots(
+                provider,
+                Path(target.extra.get("cwd") or "."),
+                target.extra,
+                target.skills,
+            ),
             store,
             backup_dir / "skills",
             backed_up,
@@ -102,7 +120,9 @@ def restore_environment(
         )
     )
 
-    return RestoreReport(changed=changed, backed_up=backed_up, backup_dir=str(backup_dir))
+    return RestoreReport(
+        changed=changed, backed_up=backed_up, backup_dir=str(backup_dir)
+    )
 
 
 def _restore_named_skill_trees(
@@ -124,9 +144,15 @@ def _restore_named_skill_trees(
 
     changed: list[str] = []
     for name, values in by_root.items():
-        changed.extend(_restore_tree(values, roots[name], store, backup_dir / name, backed_up))
+        changed.extend(
+            _restore_tree(values, roots[name], store, backup_dir / name, backed_up)
+        )
     if legacy:
-        changed.extend(_restore_tree(legacy, roots.get("user"), store, backup_dir / "legacy", backed_up))
+        changed.extend(
+            _restore_tree(
+                legacy, roots.get("user"), store, backup_dir / "legacy", backed_up
+            )
+        )
     return changed
 
 
@@ -152,20 +178,40 @@ def _skill_restore_roots(
         cwd = Path(".").resolve()
     if provider.name == "claude":
         for project_root in (cwd, *cwd.parents):
-            if (project_root / ".git").exists() or project_root == _nearest_project_root(cwd):
-                roots[f"project:{project_root}:.claude/skills"] = project_root / ".claude" / "skills"
+            if (
+                project_root / ".git"
+            ).exists() or project_root == _nearest_project_root(cwd):
+                roots[f"project:{project_root}:.claude/skills"] = (
+                    project_root / ".claude" / "skills"
+                )
     if provider.name == "codex":
         for project_root in (cwd, *cwd.parents):
-            if (project_root / ".git").exists() or project_root == _nearest_project_root(cwd):
-                roots[f"project:{project_root}:.codex/skills"] = project_root / ".codex" / "skills"
-                roots[f"project:{project_root}:.agents/skills"] = project_root / ".agents" / "skills"
+            if (
+                project_root / ".git"
+            ).exists() or project_root == _nearest_project_root(cwd):
+                roots[f"project:{project_root}:.codex/skills"] = (
+                    project_root / ".codex" / "skills"
+                )
+                roots[f"project:{project_root}:.agents/skills"] = (
+                    project_root / ".agents" / "skills"
+                )
     if provider.name == "opencode":
         for project_root in (cwd, *cwd.parents):
-            if (project_root / ".git").exists() or project_root == _nearest_project_root(cwd):
-                roots[f"project:{project_root}:.opencode/skills"] = project_root / ".opencode" / "skills"
-                roots[f"project:{project_root}:.opencode/skill"] = project_root / ".opencode" / "skill"
-                roots[f"project:{project_root}:.agents/skills"] = project_root / ".agents" / "skills"
-                roots[f"project:{project_root}:.claude/skills"] = project_root / ".claude" / "skills"
+            if (
+                project_root / ".git"
+            ).exists() or project_root == _nearest_project_root(cwd):
+                roots[f"project:{project_root}:.opencode/skills"] = (
+                    project_root / ".opencode" / "skills"
+                )
+                roots[f"project:{project_root}:.opencode/skill"] = (
+                    project_root / ".opencode" / "skill"
+                )
+                roots[f"project:{project_root}:.agents/skills"] = (
+                    project_root / ".agents" / "skills"
+                )
+                roots[f"project:{project_root}:.claude/skills"] = (
+                    project_root / ".claude" / "skills"
+                )
         config_roots = (extra or {}).get("opencode_config_skill_roots")
         if isinstance(config_roots, list):
             for root in config_roots:
@@ -177,7 +223,9 @@ def _skill_restore_roots(
     return roots
 
 
-def _codex_plugin_skill_restore_roots(provider: ProviderLayout, skills: dict[str, str]) -> dict[str, Path]:
+def _codex_plugin_skill_restore_roots(
+    provider: ProviderLayout, skills: dict[str, str]
+) -> dict[str, Path]:
     roots: dict[str, Path] = {}
     for key in skills:
         root_name, separator, _rel = key.partition("/")
@@ -187,7 +235,15 @@ def _codex_plugin_skill_restore_roots(provider: ProviderLayout, skills: dict[str
         if len(parts) != 4 or not all(parts[1:]):
             continue
         _prefix, marketplace, plugin, version = parts
-        roots[root_name] = provider.home / "plugins" / "cache" / marketplace / plugin / version / "skills"
+        roots[root_name] = (
+            provider.home
+            / "plugins"
+            / "cache"
+            / marketplace
+            / plugin
+            / version
+            / "skills"
+        )
     return roots
 
 
@@ -207,13 +263,17 @@ def _restore_named_plugin_files(
         if match is None:
             continue
         root_name, rel = match
-        restored = _restore_blob_to(sha, roots[root_name] / rel, store, backup_dir / root_name / rel, backed_up)
+        restored = _restore_blob_to(
+            sha, roots[root_name] / rel, store, backup_dir / root_name / rel, backed_up
+        )
         if restored is not None:
             changed.append(str(restored))
     return changed
 
 
-def _plugin_file_restore_roots(provider: ProviderLayout, extra: dict[str, object] | None = None) -> dict[str, Path]:
+def _plugin_file_restore_roots(
+    provider: ProviderLayout, extra: dict[str, object] | None = None
+) -> dict[str, Path]:
     if provider.name != "codex":
         return {}
 
@@ -227,7 +287,9 @@ def _plugin_file_restore_roots(provider: ProviderLayout, extra: dict[str, object
     return roots
 
 
-def _allowed_restore_roots(provider: ProviderLayout, target: EnvironmentState) -> list[RestoreRoot]:
+def _allowed_restore_roots(
+    provider: ProviderLayout, target: EnvironmentState
+) -> list[RestoreRoot]:
     roots: list[RestoreRoot] = [RestoreRoot(provider.home)]
     if provider.memory_dir is not None:
         roots.append(RestoreRoot(provider.memory_dir))
@@ -237,14 +299,21 @@ def _allowed_restore_roots(provider: ProviderLayout, target: EnvironmentState) -
     cwd = target.extra.get("cwd")
     if isinstance(cwd, str) and cwd:
         cwd_path = Path(cwd).expanduser()
-        roots.extend(RestoreRoot(path) for path in _ancestor_chain(_nearest_project_root(cwd_path), cwd_path))
+        roots.extend(
+            RestoreRoot(path)
+            for path in _ancestor_chain(_nearest_project_root(cwd_path), cwd_path)
+        )
     for item in provider.project_files:
         path = Path(item).expanduser()
         if path.is_absolute():
             roots.append(RestoreRoot(path, _project_file_root_kind(item, path)))
     config_roots = target.extra.get("opencode_config_skill_roots")
     if isinstance(config_roots, list):
-        roots.extend(RestoreRoot(Path(root).expanduser()) for root in config_roots if isinstance(root, str) and root)
+        roots.extend(
+            RestoreRoot(Path(root).expanduser())
+            for root in config_roots
+            if isinstance(root, str) and root
+        )
     return roots
 
 
@@ -310,7 +379,11 @@ def _restore_settings(
     changed: list[str] = []
     for key, path in by_name.items():
         if not _setting_is_targeted(settings, key, path) and path.exists():
-            if ignore_plugin_hooks and is_hook_config_basename(path.name, provider_name) and _is_plugin_hooks_only(path):
+            if (
+                ignore_plugin_hooks
+                and is_hook_config_basename(path.name, provider_name)
+                and _is_plugin_hooks_only(path)
+            ):
                 continue
             backup_file(path, backup_dir / _setting_backup_rel(path), backed_up)
             path.unlink()
@@ -322,7 +395,9 @@ def _restore_settings(
         if path is None and settings_files:
             path = settings_files[0].parent / name
         if path is not None and _path_allowed(path, allowed_roots):
-            preserve_plugin_hooks = ignore_plugin_hooks and is_hook_config_basename(path.name, provider_name)
+            preserve_plugin_hooks = ignore_plugin_hooks and is_hook_config_basename(
+                path.name, provider_name
+            )
             restored = _restore_blob_to(
                 sha,
                 path,
@@ -349,8 +424,7 @@ def _setting_backup_rel(path: Path) -> Path:
 def _settings_restore_paths(paths: list[Path]) -> dict[str, Path]:
     basenames = _basename_counts(paths)
     return {
-        str(path) if basenames[path.name] > 1 else path.name: path
-        for path in paths
+        str(path) if basenames[path.name] > 1 else path.name: path for path in paths
     }
 
 
@@ -413,7 +487,9 @@ def _restore_project_context(
             continue
         if not _path_allowed(path, allowed_roots):
             continue
-        preserve_plugin_hooks = ignore_plugin_hooks and is_hook_config_path(path, provider_name)
+        preserve_plugin_hooks = ignore_plugin_hooks and is_hook_config_path(
+            path, provider_name
+        )
         restored = _restore_blob_to(
             sha,
             path,
@@ -461,7 +537,11 @@ def _restore_blob_to(
     if current == wanted:
         return None
     if path.exists():
-        backup_path = backup_path_or_dir if backup_path_or_dir.suffix else backup_path_or_dir / path.name
+        backup_path = (
+            backup_path_or_dir
+            if backup_path_or_dir.suffix
+            else backup_path_or_dir / path.name
+        )
         backup_file(path, backup_path, backed_up)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(wanted)
@@ -485,8 +565,6 @@ def _is_plugin_hooks_only(path: Path) -> bool:
         return False
     hooks = parsed.get("hooks")
     return hooks in (None, {}, [])
-
-
 
 
 _REDACTED = "***redacted***"

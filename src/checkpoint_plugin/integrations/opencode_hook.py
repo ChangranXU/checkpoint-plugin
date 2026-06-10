@@ -60,7 +60,9 @@ def _settle_poll_s() -> float:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("event", nargs="?", choices=["session_start", "turn_end", "subagent_end"])
+    parser.add_argument(
+        "event", nargs="?", choices=["session_start", "turn_end", "subagent_end"]
+    )
     args = parser.parse_args(argv)
     payload = _sanitize_payload(_read_payload())
     event = args.event or _event_from_payload(payload)
@@ -82,17 +84,27 @@ def main(argv: list[str] | None = None) -> int:
     # OpenCode subagents are regular sessions with parent_session_id set.
     # Detect via the agent_type field the TS plugin passes.
     is_subagent = _first_string(payload, "agent_type") == "subagent"
-    parent_session_id = _first_string(payload, "parent_session_id", "parentSessionId") if is_subagent else None
+    parent_session_id = (
+        _first_string(payload, "parent_session_id", "parentSessionId")
+        if is_subagent
+        else None
+    )
 
     # OpenCode forks have no parent_id; the TS plugin detects them via title
     # pattern and passes source="fork" + forked_from_session_id.
     is_fork = _first_string(payload, "source") == "fork"
-    forked_from_session_id = _first_string(payload, "forked_from_session_id", "forkedFromSessionId") if is_fork else None
+    forked_from_session_id = (
+        _first_string(payload, "forked_from_session_id", "forkedFromSessionId")
+        if is_fork
+        else None
+    )
 
     coordinator = CheckpointCoordinator(session_id=session_id, cwd=cwd)
 
     if event == "session_start":
-        source = _first_string(payload, "source") or ("subagent" if is_subagent else None)
+        source = _first_string(payload, "source") or (
+            "subagent" if is_subagent else None
+        )
         lineage: dict[str, Any] | None = None
         # OC1: Inherit session_env from parent/source session for forks/subagents.
         # Fork/subagent SessionStart payloads often omit runtime fields (model,
@@ -115,7 +127,9 @@ def main(argv: list[str] | None = None) -> int:
         coordinator.on_session_start(
             source=source,
             session_env=session_env,
-            source_transcript_path=_first_string(payload, "transcript_path", "transcriptPath"),
+            source_transcript_path=_first_string(
+                payload, "transcript_path", "transcriptPath"
+            ),
             lineage=lineage,
         )
         _write_ok()
@@ -131,7 +145,9 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _on_subagent_end(payload: dict[str, Any], cwd: Path, parent_session_id: str) -> None:
+def _on_subagent_end(
+    payload: dict[str, Any], cwd: Path, parent_session_id: str
+) -> None:
     """Checkpoint a finished OpenCode subagent as its own session.
 
     OpenCode subagent hooks carry the parent session id; we derive a distinct
@@ -141,9 +157,9 @@ def _on_subagent_end(payload: dict[str, Any], cwd: Path, parent_session_id: str)
     agent_id = _first_string(payload, "agent_id", "agentId")
     # OpenCode SubagentStop carries the subagent's own rollout in `agent_transcript_path`;
     # the common `transcript_path` is the PARENT rollout. Slice the subagent file.
-    transcript_path = _first_string(payload, "agent_transcript_path", "agentTranscriptPath") or _first_string(
-        payload, "transcript_path", "transcriptPath"
-    )
+    transcript_path = _first_string(
+        payload, "agent_transcript_path", "agentTranscriptPath"
+    ) or _first_string(payload, "transcript_path", "transcriptPath")
     if agent_id is None and transcript_path is None:
         return
     suffix = agent_id or (Path(transcript_path).stem if transcript_path else "unknown")
@@ -265,14 +281,20 @@ def _seed_opencode_env(session_id: str, payload: dict[str, Any]) -> None:
     mcp_status = payload.get("mcp_status") or payload.get("mcpStatus")
     if isinstance(mcp_status, dict):
         try:
-            os.environ["OPENCODE_MCP_STATUS"] = json.dumps(mcp_status, separators=(",", ":"))
+            os.environ["OPENCODE_MCP_STATUS"] = json.dumps(
+                mcp_status, separators=(",", ":")
+            )
         except (TypeError, ValueError):
             pass
     resolved_config = payload.get("resolved_config") or payload.get("resolvedConfig")
     if isinstance(resolved_config, dict):
         try:
-            config = _opencode_apply_mcp_status(_redact_secret_object(resolved_config), mcp_status)
-            os.environ["OPENCODE_RESOLVED_CONFIG"] = json.dumps(config, separators=(",", ":"))
+            config = _opencode_apply_mcp_status(
+                _redact_secret_object(resolved_config), mcp_status
+            )
+            os.environ["OPENCODE_RESOLVED_CONFIG"] = json.dumps(
+                config, separators=(",", ":")
+            )
         except (TypeError, ValueError):
             pass
 
@@ -293,7 +315,9 @@ def _session_env(payload: dict[str, Any]) -> dict[str, str]:
         "mode": _opencode_mode(payload),
         "agent_type": _first_string(payload, "agent_type", "agentType"),
         "approval_policy": _first_string(payload, "approval_policy", "approvalPolicy"),
-        "sandbox_mode": _first_string(payload, "sandbox_mode", "sandboxMode", "sandbox_policy", "sandboxPolicy"),
+        "sandbox_mode": _first_string(
+            payload, "sandbox_mode", "sandboxMode", "sandbox_policy", "sandboxPolicy"
+        ),
     }
     # OC2: Extract permission array from session_info if present (subagents with
     # task deny policies, for example). Serialize to JSON for storage as string.
@@ -312,7 +336,9 @@ def _session_env(payload: dict[str, Any]) -> dict[str, str]:
     resolved_config = payload.get("resolved_config") or payload.get("resolvedConfig")
     if isinstance(resolved_config, dict):
         try:
-            config = _opencode_apply_mcp_status(_redact_secret_object(resolved_config), mcp_status)
+            config = _opencode_apply_mcp_status(
+                _redact_secret_object(resolved_config), mcp_status
+            )
             fields["resolved_config"] = json.dumps(config, separators=(",", ":"))
         except (TypeError, ValueError):
             pass
@@ -328,14 +354,20 @@ def _session_env(payload: dict[str, Any]) -> dict[str, str]:
     runtime_env = _opencode_runtime_env()
     if runtime_env:
         fields["opencode_runtime_env"] = json.dumps(runtime_env, separators=(",", ":"))
-    config_skill_roots = _resolved_config_skill_paths(resolved_config if isinstance(resolved_config, dict) else None)
+    config_skill_roots = _resolved_config_skill_paths(
+        resolved_config if isinstance(resolved_config, dict) else None
+    )
     if config_skill_roots:
-        fields["opencode_config_skill_roots"] = json.dumps(config_skill_roots, separators=(",", ":"))
+        fields["opencode_config_skill_roots"] = json.dumps(
+            config_skill_roots, separators=(",", ":")
+        )
     return {key: value for key, value in fields.items() if value}
 
 
 def _opencode_effort(payload: dict[str, Any]) -> str | None:
-    value = _first_string(payload, "effort", "thinking_effort", "thinkingEffort", "variant")
+    value = _first_string(
+        payload, "effort", "thinking_effort", "thinkingEffort", "variant"
+    )
     if value:
         return value
     value = _opencode_model_variant(payload)
@@ -344,7 +376,9 @@ def _opencode_effort(payload: dict[str, Any]) -> str | None:
     for message in reversed(_opencode_raw_messages(payload)):
         info = message.get("info")
         if isinstance(info, dict):
-            value = _first_string(info, "effort", "thinking_effort", "thinkingEffort", "variant")
+            value = _first_string(
+                info, "effort", "thinking_effort", "thinkingEffort", "variant"
+            )
             if value:
                 return value
             value = _opencode_model_variant(info)
@@ -352,9 +386,9 @@ def _opencode_effort(payload: dict[str, Any]) -> str | None:
                 return value
     session_info = payload.get("session_info")
     if isinstance(session_info, dict):
-        return _first_string(session_info, "effort", "thinking_effort", "thinkingEffort", "variant") or _opencode_model_variant(
-            session_info
-        )
+        return _first_string(
+            session_info, "effort", "thinking_effort", "thinkingEffort", "variant"
+        ) or _opencode_model_variant(session_info)
     return None
 
 
@@ -367,7 +401,9 @@ def _opencode_model_variant(value: dict[str, Any]) -> str | None:
 
 
 def _opencode_mode(payload: dict[str, Any]) -> str | None:
-    value = _first_string(payload, "collaboration_mode_kind", "collaborationModeKind", "mode")
+    value = _first_string(
+        payload, "collaboration_mode_kind", "collaborationModeKind", "mode"
+    )
     if value:
         return value
     for message in reversed(_opencode_raw_messages(payload)):
@@ -396,7 +432,9 @@ def _opencode_config_content(
 ) -> str | None:
     if resolved_config:
         try:
-            config = _opencode_apply_mcp_status(_redact_secret_object(resolved_config), mcp_status)
+            config = _opencode_apply_mcp_status(
+                _redact_secret_object(resolved_config), mcp_status
+            )
             return json.dumps(config, separators=(",", ":"))
         except (TypeError, ValueError):
             pass
@@ -411,14 +449,19 @@ def _opencode_config_content(
             return redacted
         if isinstance(config, dict):
             try:
-                return json.dumps(_opencode_apply_mcp_status(config, mcp_status), separators=(",", ":"))
+                return json.dumps(
+                    _opencode_apply_mcp_status(config, mcp_status),
+                    separators=(",", ":"),
+                )
             except (TypeError, ValueError):
                 return redacted
         return redacted
     return None
 
 
-def _opencode_apply_mcp_status(config: object, mcp_status: dict[str, Any] | None) -> object:
+def _opencode_apply_mcp_status(
+    config: object, mcp_status: dict[str, Any] | None
+) -> object:
     if not isinstance(config, dict) or not isinstance(mcp_status, dict):
         return config
     result = dict(config)
@@ -602,22 +645,30 @@ def _turn_record(payload: dict[str, Any]) -> TurnRecord:
                 if role == "user" and not user_message:
                     user_message = content if isinstance(content, str) else str(content)
                 elif role == "assistant" and not assistant_text:
-                    assistant_text = content if isinstance(content, str) else str(content)
+                    assistant_text = (
+                        content if isinstance(content, str) else str(content)
+                    )
             if user_message and assistant_text:
                 break
 
     # Fallback to direct fields if messages array not available
     if not user_message:
-        user_message = _first_string(payload, "prompt", "user_message", "userMessage", "input") or ""
+        user_message = (
+            _first_string(payload, "prompt", "user_message", "userMessage", "input")
+            or ""
+        )
     if not assistant_text:
-        assistant_text = _first_string(
-            payload,
-            "last_assistant_message",
-            "assistant_text",
-            "assistantText",
-            "response",
-            "output",
-        ) or ""
+        assistant_text = (
+            _first_string(
+                payload,
+                "last_assistant_message",
+                "assistant_text",
+                "assistantText",
+                "response",
+                "output",
+            )
+            or ""
+        )
 
     return TurnRecord(
         user_message=user_message,
@@ -645,15 +696,21 @@ def _tool_calls(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return [call]
 
 
-def _trajectory_ref(payload: dict[str, Any], provider: str) -> TrajectoryReference | None:
+def _trajectory_ref(
+    payload: dict[str, Any], provider: str
+) -> TrajectoryReference | None:
     transcript_path = _first_string(payload, "transcript_path", "transcriptPath")
     if transcript_path is None:
         return None
     turn_id = payload.get("turn_id") or payload.get("turnId")
-    return jsonl_ref_for_turn(provider, Path(transcript_path), turn_id, codex_key, claim_leading_keyless=True)
+    return jsonl_ref_for_turn(
+        provider, Path(transcript_path), turn_id, codex_key, claim_leading_keyless=True
+    )
 
 
-def _subagent_trajectory_ref(payload: dict[str, Any], transcript_path: str | None) -> TrajectoryReference | None:
+def _subagent_trajectory_ref(
+    payload: dict[str, Any], transcript_path: str | None
+) -> TrajectoryReference | None:
     if transcript_path is None:
         return None
     # A subagent's dedicated rollout carries inherited ancestor session_meta

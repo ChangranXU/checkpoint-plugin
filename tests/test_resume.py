@@ -64,7 +64,9 @@ def test_resume_diff_backup_and_restore(tmp_path, monkeypatch):
     assert (plugin_home / "backups").exists()
 
 
-def test_resume_promotes_legacy_session_blobs_without_copying_blob_tree(tmp_path, monkeypatch):
+def test_resume_promotes_legacy_session_blobs_without_copying_blob_tree(
+    tmp_path, monkeypatch
+):
     plugin_home = tmp_path / "plugin"
     cwd = tmp_path / "work"
     cwd.mkdir()
@@ -91,7 +93,9 @@ def test_resume_promotes_legacy_session_blobs_without_copying_blob_tree(tmp_path
     assert source_store.legacy_blob_path(file_ref).exists()
 
     target_file.write_text("current", encoding="utf-8")
-    report = ResumeOrchestrator(cwd=cwd).execute(ResumeOrchestrator(cwd=cwd).plan("s1", 0), lambda _text: True)
+    report = ResumeOrchestrator(cwd=cwd).execute(
+        ResumeOrchestrator(cwd=cwd).plan("s1", 0), lambda _text: True
+    )
 
     resumed_store = CheckpointStore(plugin_home / "sessions" / report.new_session_id)
     assert not resumed_store.legacy_blobs_dir.exists()
@@ -120,7 +124,9 @@ def test_resume_copies_trajectory_through_target_turn(tmp_path, monkeypatch):
     resumed_store = CheckpointStore(plugin_home / "sessions" / report.new_session_id)
     events = [
         json.loads(line)
-        for line in resumed_store.trajectory_path.read_text(encoding="utf-8").splitlines()
+        for line in resumed_store.trajectory_path.read_text(
+            encoding="utf-8"
+        ).splitlines()
         if line.strip()
     ]
     assert [event["turn_id"] for event in events] == [0, 1]
@@ -155,7 +161,9 @@ def test_resume_copies_referenced_transcript_slices(tmp_path, monkeypatch):
     assert resumed_store.trajectory_path.read_bytes() == transcript.read_bytes()
 
 
-def test_resume_same_checkpoint_multiple_times_creates_distinct_sessions(tmp_path, monkeypatch):
+def test_resume_same_checkpoint_multiple_times_creates_distinct_sessions(
+    tmp_path, monkeypatch
+):
     plugin_home = tmp_path / "plugin"
     cwd = tmp_path / "work"
     cwd.mkdir()
@@ -205,7 +213,9 @@ def test_resume_can_restore_into_new_folder_copy(tmp_path, monkeypatch):
     assert report.target_cwd == str(copy_cwd)
     resumed_store = CheckpointStore(plugin_home / "sessions" / report.new_session_id)
     resumed_fs = resumed_store.load_json_blob(resumed_store.read_manifest(0).fs_ref)
-    metadata = json.loads((resumed_store.session_dir / "metadata.json").read_text(encoding="utf-8"))
+    metadata = json.loads(
+        (resumed_store.session_dir / "metadata.json").read_text(encoding="utf-8")
+    )
     assert resumed_fs["cwd"] == str(copy_cwd)
     assert metadata["cwd"] == str(copy_cwd)
 
@@ -253,14 +263,19 @@ def test_resume_fails_loudly_when_workspace_is_not_created(tmp_path, monkeypatch
 
     orchestrator = ResumeOrchestrator(cwd=missing_target)
     plan = orchestrator.plan("s1", 0)
-    monkeypatch.setattr("checkpoint_plugin.resume.restore_cwd", lambda *_args, **_kwargs: RestoreReport())
+    monkeypatch.setattr(
+        "checkpoint_plugin.resume.restore_cwd",
+        lambda *_args, **_kwargs: RestoreReport(),
+    )
 
     try:
         orchestrator.execute(plan, lambda _text: True)
     except RuntimeError as exc:
         assert str(exc) == f"Resume workspace was not created: {missing_target}"
     else:
-        raise AssertionError("resume should fail when the workspace directory is missing")
+        raise AssertionError(
+            "resume should fail when the workspace directory is missing"
+        )
 
 
 def test_resume_materializes_codex_native_session(tmp_path, monkeypatch):
@@ -271,7 +286,7 @@ def test_resume_materializes_codex_native_session(tmp_path, monkeypatch):
     transcript = tmp_path / "codex.jsonl"
     cwd.mkdir()
     transcript.write_text(
-        '\n'.join(
+        "\n".join(
             [
                 json.dumps(
                     {
@@ -285,7 +300,12 @@ def test_resume_materializes_codex_native_session(tmp_path, monkeypatch):
                         },
                     }
                 ),
-                json.dumps({"type": "event_msg", "payload": {"turn_id": "turn-1", "type": "turn_start"}}),
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "payload": {"turn_id": "turn-1", "type": "turn_start"},
+                    }
+                ),
                 json.dumps(
                     {
                         "type": "turn_context",
@@ -312,7 +332,9 @@ def test_resume_materializes_codex_native_session(tmp_path, monkeypatch):
     monkeypatch.setenv("CODEX_MODEL", "gpt-target")
     monkeypatch.setenv("CODEX_PERMISSION_MODE", "acceptEdits")
     (codex_home / "config.toml").parent.mkdir(parents=True, exist_ok=True)
-    (codex_home / "config.toml").write_text('model_reasoning_effort = "low"\n', encoding="utf-8")
+    (codex_home / "config.toml").write_text(
+        'model_reasoning_effort = "low"\n', encoding="utf-8"
+    )
 
     coordinator = CheckpointCoordinator(session_id="s1", cwd=cwd)
     coordinator.on_session_start()
@@ -321,7 +343,9 @@ def test_resume_materializes_codex_native_session(tmp_path, monkeypatch):
         TrajectoryReference("codex", str(transcript), 0, transcript.stat().st_size, 2),
     )
 
-    report = ResumeOrchestrator(cwd=cwd).execute(ResumeOrchestrator(cwd=cwd).plan("s1", 0), lambda _text: True)
+    report = ResumeOrchestrator(cwd=cwd).execute(
+        ResumeOrchestrator(cwd=cwd).plan("s1", 0), lambda _text: True
+    )
 
     assert report.provider_session_path is not None
     assert report.env_state_dir is not None
@@ -330,7 +354,10 @@ def test_resume_materializes_codex_native_session(tmp_path, monkeypatch):
     provider_path = runtime_codex_home / "sessions"
     materialized = list(provider_path.glob("**/*.jsonl"))
     assert [path.as_posix() for path in materialized] == [report.provider_session_path]
-    records = [json.loads(line) for line in materialized[0].read_text(encoding="utf-8").splitlines()]
+    records = [
+        json.loads(line)
+        for line in materialized[0].read_text(encoding="utf-8").splitlines()
+    ]
     assert records[0]["payload"]["id"] == report.new_session_id
     assert records[0]["payload"]["originator"] == "Codex Desktop"
     assert records[0]["payload"]["source"] == "vscode"
@@ -371,7 +398,9 @@ def test_resume_materializes_codex_native_session(tmp_path, monkeypatch):
     manifest = resumed_store.read_manifest(0)
     assert manifest.trajectory_ref is not None
     assert manifest.trajectory_ref.transcript_path == report.provider_session_path
-    metadata = json.loads((resumed_store.session_dir / "metadata.json").read_text(encoding="utf-8"))
+    metadata = json.loads(
+        (resumed_store.session_dir / "metadata.json").read_text(encoding="utf-8")
+    )
     assert metadata["session_id"] == report.new_session_id
     assert metadata["resumed_from_session_id"] == "s1"
     # FK1: a resume stamps its own identity rather than inheriting the source's.
@@ -383,7 +412,12 @@ def test_resume_materializes_codex_native_session(tmp_path, monkeypatch):
         "permission_mode": "acceptEdits",
         "effort": "low",
     }
-    source_meta = json.loads((CheckpointStore(plugin_home / "sessions" / "s1").session_dir / "metadata.json").read_text(encoding="utf-8"))
+    source_meta = json.loads(
+        (
+            CheckpointStore(plugin_home / "sessions" / "s1").session_dir
+            / "metadata.json"
+        ).read_text(encoding="utf-8")
+    )
     assert metadata["start_ts"] != source_meta["start_ts"]
     # start_ts is stamped at the resume moment, so it tracks resumed_ts (same UTC day).
     assert metadata["start_ts"][:10] == metadata["resumed_ts"][:10]
@@ -402,7 +436,9 @@ def test_codex_resume_uses_turn_context_effort_over_stale_config(tmp_path, monke
     transcript.write_text(
         "\n".join(
             [
-                json.dumps({"type": "session_meta", "payload": {"id": "old", "cwd": str(cwd)}}),
+                json.dumps(
+                    {"type": "session_meta", "payload": {"id": "old", "cwd": str(cwd)}}
+                ),
                 json.dumps(
                     {
                         "type": "turn_context",
@@ -453,12 +489,16 @@ def test_codex_resume_uses_turn_context_effort_over_stale_config(tmp_path, monke
     assert report.resume_command == f"checkpoint resume-open {report.new_session_id}"
     records = [
         json.loads(line)
-        for line in Path(report.provider_session_path).read_text(encoding="utf-8").splitlines()
+        for line in Path(report.provider_session_path)
+        .read_text(encoding="utf-8")
+        .splitlines()
     ]
     turn_context = next(r for r in records if r.get("type") == "turn_context")
     assert turn_context["payload"]["model_reasoning_effort"] == "high"
     resumed_store = CheckpointStore(plugin_home / "sessions" / report.new_session_id)
-    metadata = json.loads((resumed_store.session_dir / "metadata.json").read_text(encoding="utf-8"))
+    metadata = json.loads(
+        (resumed_store.session_dir / "metadata.json").read_text(encoding="utf-8")
+    )
     assert metadata["session_env"]["effort"] == "high"
 
 
@@ -471,10 +511,17 @@ def test_resume_copy_materializes_codex_session_with_copy_cwd(tmp_path, monkeypa
     transcript = tmp_path / "codex.jsonl"
     cwd.mkdir()
     transcript.write_text(
-        '\n'.join(
+        "\n".join(
             [
-                json.dumps({"type": "session_meta", "payload": {"id": "old", "cwd": str(cwd)}}),
-                json.dumps({"type": "event_msg", "payload": {"turn_id": "turn-1", "type": "turn_start"}}),
+                json.dumps(
+                    {"type": "session_meta", "payload": {"id": "old", "cwd": str(cwd)}}
+                ),
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "payload": {"turn_id": "turn-1", "type": "turn_start"},
+                    }
+                ),
             ]
         )
         + "\n",
@@ -502,12 +549,16 @@ def test_resume_copy_materializes_codex_session_with_copy_cwd(tmp_path, monkeypa
     assert report.provider_session_path is not None
     records = [
         json.loads(line)
-        for line in Path(report.provider_session_path).read_text(encoding="utf-8").splitlines()
+        for line in Path(report.provider_session_path)
+        .read_text(encoding="utf-8")
+        .splitlines()
     ]
     assert records[0]["payload"]["cwd"] == str(copy_cwd)
 
 
-def test_resume_materializes_codex_session_meta_for_sliced_trajectory(tmp_path, monkeypatch):
+def test_resume_materializes_codex_session_meta_for_sliced_trajectory(
+    tmp_path, monkeypatch
+):
     plugin_home = tmp_path / "plugin"
     home = tmp_path / "home"
     codex_home = home / ".codex"
@@ -515,8 +566,19 @@ def test_resume_materializes_codex_session_meta_for_sliced_trajectory(tmp_path, 
     copy_cwd = tmp_path / "work-copy"
     transcript = tmp_path / "codex.jsonl"
     cwd.mkdir()
-    prefix = json.dumps({"type": "session_meta", "payload": {"id": "old", "cwd": str(cwd)}}) + "\n"
-    suffix = json.dumps({"type": "event_msg", "payload": {"turn_id": "turn-1", "type": "turn_start"}}) + "\n"
+    prefix = (
+        json.dumps({"type": "session_meta", "payload": {"id": "old", "cwd": str(cwd)}})
+        + "\n"
+    )
+    suffix = (
+        json.dumps(
+            {
+                "type": "event_msg",
+                "payload": {"turn_id": "turn-1", "type": "turn_start"},
+            }
+        )
+        + "\n"
+    )
     transcript.write_text(prefix + suffix, encoding="utf-8")
     (cwd / "file.txt").write_text("v1", encoding="utf-8")
     monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
@@ -528,7 +590,13 @@ def test_resume_materializes_codex_session_meta_for_sliced_trajectory(tmp_path, 
     coordinator.on_session_start()
     coordinator.on_turn_end(
         TurnRecord(user_message="first"),
-        TrajectoryReference("codex", str(transcript), len(prefix.encode("utf-8")), transcript.stat().st_size, 1),
+        TrajectoryReference(
+            "codex",
+            str(transcript),
+            len(prefix.encode("utf-8")),
+            transcript.stat().st_size,
+            1,
+        ),
     )
 
     orchestrator = ResumeOrchestrator(cwd=cwd)
@@ -540,7 +608,9 @@ def test_resume_materializes_codex_session_meta_for_sliced_trajectory(tmp_path, 
     assert report.provider_session_path is not None
     records = [
         json.loads(line)
-        for line in Path(report.provider_session_path).read_text(encoding="utf-8").splitlines()
+        for line in Path(report.provider_session_path)
+        .read_text(encoding="utf-8")
+        .splitlines()
     ]
     assert records[0]["type"] == "session_meta"
     assert records[0]["payload"]["id"] == report.new_session_id
@@ -558,14 +628,19 @@ def test_resume_materializes_codex_session_meta_for_sliced_trajectory(tmp_path, 
 def test_resume_materializes_claude_native_session(tmp_path, monkeypatch):
     plugin_home = tmp_path / "plugin"
     home = tmp_path / "home"
-    claude_home = home / ".claude"
     cwd = tmp_path / "work"
     transcript = tmp_path / "claude.jsonl"
     cwd.mkdir()
     transcript.write_text(
-        '\n'.join(
+        "\n".join(
             [
-                json.dumps({"type": "permission-mode", "sessionId": "old", "permissionMode": "default"}),
+                json.dumps(
+                    {
+                        "type": "permission-mode",
+                        "sessionId": "old",
+                        "permissionMode": "default",
+                    }
+                ),
                 json.dumps(
                     {
                         "type": "user",
@@ -605,14 +680,24 @@ def test_resume_materializes_claude_native_session(tmp_path, monkeypatch):
         TrajectoryReference("claude", str(transcript), 0, transcript.stat().st_size, 3),
     )
 
-    report = ResumeOrchestrator(cwd=cwd).execute(ResumeOrchestrator(cwd=cwd).plan("s1", 0), lambda _text: True)
+    report = ResumeOrchestrator(cwd=cwd).execute(
+        ResumeOrchestrator(cwd=cwd).plan("s1", 0), lambda _text: True
+    )
 
     assert report.provider_session_path is not None
     assert report.env_state_dir is not None
     runtime_claude_home = Path(report.env_state_dir) / "claude"
-    materialized = runtime_claude_home / "projects" / str(cwd).replace("/", "-") / f"{report.new_session_id}.jsonl"
+    materialized = (
+        runtime_claude_home
+        / "projects"
+        / str(cwd).replace("/", "-")
+        / f"{report.new_session_id}.jsonl"
+    )
     assert str(materialized) == report.provider_session_path
-    records = [json.loads(line) for line in materialized.read_text(encoding="utf-8").splitlines()]
+    records = [
+        json.loads(line)
+        for line in materialized.read_text(encoding="utf-8").splitlines()
+    ]
     # F4: a claude resume is fork-shaped — the leading keyless permission-mode record
     # is stripped (native b57f8e6f drops all such records), leaving the uuid-bearing
     # user + assistant records.
@@ -641,7 +726,9 @@ def test_resume_restores_environment_with_target_provider_layout(tmp_path, monke
     monkeypatch.setenv("CHECKPOINT_PROVIDER", "claude")
 
     (claude_home / "skills" / "skill-a").mkdir(parents=True)
-    (claude_home / "skills" / "skill-a" / "SKILL.md").write_text("claude skill", encoding="utf-8")
+    (claude_home / "skills" / "skill-a" / "SKILL.md").write_text(
+        "claude skill", encoding="utf-8"
+    )
     (claude_home / "settings.json").write_text('{"target": true}', encoding="utf-8")
     (cwd / "file.txt").write_text("v1", encoding="utf-8")
 
@@ -649,21 +736,37 @@ def test_resume_restores_environment_with_target_provider_layout(tmp_path, monke
     coordinator.on_session_start()
     coordinator.on_turn_end(TurnRecord(user_message="checkpoint"))
 
-    (claude_home / "skills" / "skill-a" / "SKILL.md").write_text("changed", encoding="utf-8")
+    (claude_home / "skills" / "skill-a" / "SKILL.md").write_text(
+        "changed", encoding="utf-8"
+    )
     (codex_home / "skills" / "codex-only").mkdir(parents=True)
-    (codex_home / "skills" / "codex-only" / "SKILL.md").write_text("do not delete", encoding="utf-8")
+    (codex_home / "skills" / "codex-only" / "SKILL.md").write_text(
+        "do not delete", encoding="utf-8"
+    )
     monkeypatch.setenv("CHECKPOINT_PROVIDER", "codex")
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
 
-    report = ResumeOrchestrator(cwd=cwd).execute(ResumeOrchestrator(cwd=cwd).plan("s1", 0), lambda _text: True)
+    report = ResumeOrchestrator(cwd=cwd).execute(
+        ResumeOrchestrator(cwd=cwd).plan("s1", 0), lambda _text: True
+    )
 
     assert report.env_state_dir is not None
     runtime_claude_home = Path(report.env_state_dir) / "claude"
-    assert (claude_home / "skills" / "skill-a" / "SKILL.md").read_text(encoding="utf-8") == "changed"
-    assert (claude_home / "settings.json").read_text(encoding="utf-8") == '{"target": true}'
-    assert (runtime_claude_home / "skills" / "skill-a" / "SKILL.md").read_text(encoding="utf-8") == "claude skill"
-    assert (runtime_claude_home / "settings.json").read_text(encoding="utf-8") == '{"target": true}'
-    assert (codex_home / "skills" / "codex-only" / "SKILL.md").read_text(encoding="utf-8") == "do not delete"
+    assert (claude_home / "skills" / "skill-a" / "SKILL.md").read_text(
+        encoding="utf-8"
+    ) == "changed"
+    assert (claude_home / "settings.json").read_text(
+        encoding="utf-8"
+    ) == '{"target": true}'
+    assert (runtime_claude_home / "skills" / "skill-a" / "SKILL.md").read_text(
+        encoding="utf-8"
+    ) == "claude skill"
+    assert (runtime_claude_home / "settings.json").read_text(
+        encoding="utf-8"
+    ) == '{"target": true}'
+    assert (codex_home / "skills" / "codex-only" / "SKILL.md").read_text(
+        encoding="utf-8"
+    ) == "do not delete"
 
 
 def test_resume_reports_only_environment_files_that_changed(tmp_path, monkeypatch):
@@ -678,14 +781,18 @@ def test_resume_reports_only_environment_files_that_changed(tmp_path, monkeypatc
     monkeypatch.setenv("CHECKPOINT_PROVIDER", "codex")
 
     codex_home.mkdir(parents=True)
-    (codex_home / "config.toml").write_text("model = 'old'\napi_key = 'secret-value'\n", encoding="utf-8")
+    (codex_home / "config.toml").write_text(
+        "model = 'old'\napi_key = 'secret-value'\n", encoding="utf-8"
+    )
     (codex_home / "auth.json").write_text('{"token":"same"}\n', encoding="utf-8")
     (cwd / "README.md").write_text("v1\n", encoding="utf-8")
     coordinator = CheckpointCoordinator(session_id="s1", cwd=cwd)
     coordinator.on_session_start()
     coordinator.on_turn_end(TurnRecord(user_message="checkpoint"))
 
-    (codex_home / "config.toml").write_text("model = 'new'\napi_key = 'secret-value'\n", encoding="utf-8")
+    (codex_home / "config.toml").write_text(
+        "model = 'new'\napi_key = 'secret-value'\n", encoding="utf-8"
+    )
     (cwd / "README.md").write_text("v2\n", encoding="utf-8")
 
     orchestrator = ResumeOrchestrator(cwd=cwd)
@@ -700,8 +807,12 @@ def test_resume_reports_only_environment_files_that_changed(tmp_path, monkeypatc
     assert "model = 'old'" in runtime_config
     assert "api_key = 'secret-value'" in runtime_config
     assert "***redacted***" not in runtime_config
-    assert (runtime_codex_home / "auth.json").read_text(encoding="utf-8") == '{"token":"same"}\n'
-    assert (codex_home / "config.toml").read_text(encoding="utf-8") == "model = 'new'\napi_key = 'secret-value'\n"
+    assert (runtime_codex_home / "auth.json").read_text(
+        encoding="utf-8"
+    ) == '{"token":"same"}\n'
+    assert (codex_home / "config.toml").read_text(
+        encoding="utf-8"
+    ) == "model = 'new'\napi_key = 'secret-value'\n"
 
 
 def test_resume_rewrites_codex_config_paths_to_runtime_home(tmp_path, monkeypatch):
@@ -763,25 +874,23 @@ def test_resume_restores_codex_plugin_cache_skills(tmp_path, monkeypatch):
     codex_home = home / ".codex"
     cwd = tmp_path / "work"
     plugin_root = (
-        codex_home
-        / "plugins"
-        / "cache"
-        / "openai-bundled"
-        / "browser"
-        / "26.1.0"
+        codex_home / "plugins" / "cache" / "openai-bundled" / "browser" / "26.1.0"
     )
-    plugin_skill = (
-        plugin_root
-        / "skills"
-        / "control-browser"
-        / "SKILL.md"
-    )
+    plugin_skill = plugin_root / "skills" / "control-browser" / "SKILL.md"
     plugin_script = plugin_root / "scripts" / "browser-client.mjs"
     marketplace_root = codex_home / ".tmp" / "bundled-marketplaces" / "openai-bundled"
     marketplace_plugin = marketplace_root / "plugins" / "browser"
     implicit_marketplace_root = codex_home / ".tmp" / "plugins"
-    implicit_marketplace_manifest = implicit_marketplace_root / ".agents" / "plugins" / "marketplace.json"
-    implicit_marketplace_plugin = implicit_marketplace_root / "plugins" / "github" / ".codex-plugin" / "plugin.json"
+    implicit_marketplace_manifest = (
+        implicit_marketplace_root / ".agents" / "plugins" / "marketplace.json"
+    )
+    implicit_marketplace_plugin = (
+        implicit_marketplace_root
+        / "plugins"
+        / "github"
+        / ".codex-plugin"
+        / "plugin.json"
+    )
     cwd.mkdir()
     plugin_skill.parent.mkdir(parents=True)
     (plugin_root / ".codex-plugin").mkdir(parents=True)
@@ -796,8 +905,12 @@ def test_resume_restores_codex_plugin_cache_skills(tmp_path, monkeypatch):
 
     plugin_skill.write_text("browser skill", encoding="utf-8")
     plugin_script.write_text("export const run = true;\n", encoding="utf-8")
-    (plugin_root / ".codex-plugin" / "plugin.json").write_text('{"name":"browser","version":"26.1.0"}', encoding="utf-8")
-    (marketplace_plugin / ".codex-plugin" / "plugin.json").write_text('{"name":"browser"}', encoding="utf-8")
+    (plugin_root / ".codex-plugin" / "plugin.json").write_text(
+        '{"name":"browser","version":"26.1.0"}', encoding="utf-8"
+    )
+    (marketplace_plugin / ".codex-plugin" / "plugin.json").write_text(
+        '{"name":"browser"}', encoding="utf-8"
+    )
     implicit_marketplace_manifest.write_text(
         """
 {
@@ -872,8 +985,13 @@ enabled = true
         / ".codex-plugin"
         / "plugin.json"
     )
-    assert restored_manifest.read_text(encoding="utf-8") == '{"name":"browser","version":"26.1.0"}'
-    runtime_config = (Path(report.env_state_dir) / "codex" / "config.toml").read_text(encoding="utf-8")
+    assert (
+        restored_manifest.read_text(encoding="utf-8")
+        == '{"name":"browser","version":"26.1.0"}'
+    )
+    runtime_config = (Path(report.env_state_dir) / "codex" / "config.toml").read_text(
+        encoding="utf-8"
+    )
     assert str(marketplace_root) not in runtime_config
     restored_marketplace_manifest = (
         Path(report.env_state_dir)
@@ -886,7 +1004,10 @@ enabled = true
         / ".codex-plugin"
         / "plugin.json"
     )
-    assert restored_marketplace_manifest.read_text(encoding="utf-8") == '{"name":"browser"}'
+    assert (
+        restored_marketplace_manifest.read_text(encoding="utf-8")
+        == '{"name":"browser"}'
+    )
     restored_implicit_marketplace_manifest = (
         Path(report.env_state_dir)
         / "codex"
@@ -896,7 +1017,10 @@ enabled = true
         / "plugins"
         / "marketplace.json"
     )
-    assert '"name": "openai-curated"' in restored_implicit_marketplace_manifest.read_text(encoding="utf-8")
+    assert (
+        '"name": "openai-curated"'
+        in restored_implicit_marketplace_manifest.read_text(encoding="utf-8")
+    )
     restored_implicit_marketplace_plugin = (
         Path(report.env_state_dir)
         / "codex"
@@ -907,7 +1031,10 @@ enabled = true
         / ".codex-plugin"
         / "plugin.json"
     )
-    assert restored_implicit_marketplace_plugin.read_text(encoding="utf-8") == '{"name":"github"}'
+    assert (
+        restored_implicit_marketplace_plugin.read_text(encoding="utf-8")
+        == '{"name":"github"}'
+    )
 
 
 def test_resume_rewrites_claude_settings_paths_to_runtime_home(tmp_path, monkeypatch):
@@ -938,7 +1065,9 @@ def test_resume_rewrites_claude_settings_paths_to_runtime_home(tmp_path, monkeyp
 
     assert report.env_state_dir is not None
     runtime_claude_home = Path(report.env_state_dir) / "claude"
-    runtime_settings = (runtime_claude_home / "settings.json").read_text(encoding="utf-8")
+    runtime_settings = (runtime_claude_home / "settings.json").read_text(
+        encoding="utf-8"
+    )
     assert str(claude_home) not in runtime_settings
     assert str(runtime_claude_home / "bin" / "hook") in runtime_settings
 
@@ -971,7 +1100,9 @@ def test_runtime_path_map_includes_captured_provider_home(tmp_path):
         project_files=[],
     )
 
-    path_map = _runtime_path_map(provider, root, runtime_home, captured_provider_home=captured_home)
+    path_map = _runtime_path_map(
+        provider, root, runtime_home, captured_provider_home=captured_home
+    )
 
     assert path_map[str(live_home)] == str(runtime_home)
     assert path_map[str(captured_home)] == str(runtime_home)
@@ -1032,7 +1163,9 @@ def test_secret_runtime_copy_without_fchmod(tmp_path, monkeypatch):
     assert dest.stat().st_mode & 0o777 == 0o600
 
 
-def test_resume_plan_diffs_environment_with_target_provider_layout(tmp_path, monkeypatch):
+def test_resume_plan_diffs_environment_with_target_provider_layout(
+    tmp_path, monkeypatch
+):
     plugin_home = tmp_path / "plugin"
     home = tmp_path / "home"
     codex_home = home / ".codex"
@@ -1044,7 +1177,9 @@ def test_resume_plan_diffs_environment_with_target_provider_layout(tmp_path, mon
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
 
     (codex_home / "skills" / "codex-skill").mkdir(parents=True)
-    (codex_home / "skills" / "codex-skill" / "SKILL.md").write_text("skill", encoding="utf-8")
+    (codex_home / "skills" / "codex-skill" / "SKILL.md").write_text(
+        "skill", encoding="utf-8"
+    )
     (codex_home / "config.toml").write_text(
         """
 [plugins."hugging-face@openai-curated"]
@@ -1127,8 +1262,22 @@ def test_cli_resume_prints_resume_command_hint(tmp_path, monkeypatch, capsys):
     transcript = tmp_path / "claude.jsonl"
     cwd.mkdir()
     transcript.write_text(
-        json.dumps({"type": "permission-mode", "sessionId": "old", "permissionMode": "default"}) + "\n"
-        + json.dumps({"type": "user", "sessionId": "old", "uuid": "u1", "parentUuid": None, "promptId": "p", "cwd": "/old", "message": {"role": "user", "content": "hi"}}) + "\n",
+        json.dumps(
+            {"type": "permission-mode", "sessionId": "old", "permissionMode": "default"}
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "user",
+                "sessionId": "old",
+                "uuid": "u1",
+                "parentUuid": None,
+                "promptId": "p",
+                "cwd": "/old",
+                "message": {"role": "user", "content": "hi"},
+            }
+        )
+        + "\n",
         encoding="utf-8",
     )
     (cwd / "file.txt").write_text("v1", encoding="utf-8")
@@ -1222,7 +1371,10 @@ def test_resume_open_rejects_env_path_hijack(tmp_path):
                 "cwd": str(cwd),
                 "env_state_dir": str(provider_home.parent),
                 "provider_home": str(provider_home),
-                "env": {"CODEX_HOME": str(provider_home), "PATH": str(tmp_path / "bin")},
+                "env": {
+                    "CODEX_HOME": str(provider_home),
+                    "PATH": str(tmp_path / "bin"),
+                },
                 "preflight": [],
                 "command": ["codex", "resume", session_id],
             }
@@ -1390,7 +1542,9 @@ def test_restore_environment_allows_dot_named_project_directory(tmp_path):
     assert (repo / "AGENTS.md").read_text(encoding="utf-8") == "dot repo instructions"
 
 
-def test_restore_environment_allows_stringified_absolute_project_directory_root(tmp_path):
+def test_restore_environment_allows_stringified_absolute_project_directory_root(
+    tmp_path,
+):
     from checkpoint_plugin.env.providers import ProviderLayout
     from checkpoint_plugin.env.restorer import restore_environment
     from checkpoint_plugin.store import CheckpointStore
@@ -1422,7 +1576,9 @@ def test_restore_environment_allows_stringified_absolute_project_directory_root(
 
     restore_environment(target, provider, store, tmp_path / "backup")
 
-    assert (config_home / "agent" / "build.md").read_text(encoding="utf-8") == "agent docs"
+    assert (config_home / "agent" / "build.md").read_text(
+        encoding="utf-8"
+    ) == "agent docs"
 
 
 def test_restore_environment_allows_remapped_global_opencode_directory_root(tmp_path):
@@ -1456,7 +1612,9 @@ def test_restore_environment_allows_remapped_global_opencode_directory_root(tmp_
 
     restore_environment(target, provider, store, tmp_path / "backup")
 
-    assert (opencode_root / "agent" / "build.md").read_text(encoding="utf-8") == "global agent docs"
+    assert (opencode_root / "agent" / "build.md").read_text(
+        encoding="utf-8"
+    ) == "global agent docs"
 
 
 def test_cli_resume_can_show_file_diff_then_cancel(tmp_path, monkeypatch, capsys):
@@ -1541,7 +1699,10 @@ def test_cli_resume_can_restore_into_chosen_copy(tmp_path, monkeypatch):
     assert main(["resume", "s1", "0"]) == 0
     assert target_file.read_text(encoding="utf-8") == "v2\n"
     assert (copy_cwd / "file.txt").read_text(encoding="utf-8") == "v1\n"
-    assert any("Copy folder (Enter for default, or type an absolute path)" in prompt for prompt in prompts)
+    assert any(
+        "Copy folder (Enter for default, or type an absolute path)" in prompt
+        for prompt in prompts
+    )
 
 
 def test_cli_resume_rejects_relative_copy_folder(tmp_path, monkeypatch, capsys):
@@ -1569,7 +1730,9 @@ def test_cli_resume_rejects_relative_copy_folder(tmp_path, monkeypatch, capsys):
     assert target_file.read_text(encoding="utf-8") == "v2\n"
 
 
-def test_cli_resume_diff_viewer_includes_environment_changes(tmp_path, monkeypatch, capsys):
+def test_cli_resume_diff_viewer_includes_environment_changes(
+    tmp_path, monkeypatch, capsys
+):
     plugin_home = tmp_path / "plugin"
     home = tmp_path / "home"
     codex_home = home / ".codex"
@@ -1672,28 +1835,51 @@ def test_resume_subagent_session_recovers_session_boundary_tail(tmp_path, monkey
 
     rollout = tmp_path / "rollout.jsonl"
     body = (
-        json.dumps({"type": "response_item", "turn_id": "t1", "payload": {"type": "message"}}) + "\n"
-        + json.dumps({"type": "response_item", "turn_id": "t2", "payload": {"type": "message"}}) + "\n"
+        json.dumps(
+            {"type": "response_item", "turn_id": "t1", "payload": {"type": "message"}}
+        )
+        + "\n"
+        + json.dumps(
+            {"type": "response_item", "turn_id": "t2", "payload": {"type": "message"}}
+        )
+        + "\n"
     )
     rollout.write_text(body, encoding="utf-8")
     captured = rollout.stat().st_size
 
     coordinator = CheckpointCoordinator(session_id="parent--subagent-x", cwd=cwd)
-    coordinator.on_session_start(source="subagent", lineage={"parent_session_id": "parent", "agent_id": "x"})
+    coordinator.on_session_start(
+        source="subagent", lineage={"parent_session_id": "parent", "agent_id": "x"}
+    )
     coordinator.on_turn_end(
         TurnRecord(user_message="sub work"),
-        TrajectoryReference("codex", str(rollout), 0, captured, 2, boundary_mode="session_boundary"),
+        TrajectoryReference(
+            "codex", str(rollout), 0, captured, 2, boundary_mode="session_boundary"
+        ),
     )
 
     # The turn-closing record (LAST turn's id) flushes after capture.
     with rollout.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps({"type": "event_msg", "payload": {"type": "task_complete"}, "turn_id": "t2"}) + "\n")
+        handle.write(
+            json.dumps(
+                {
+                    "type": "event_msg",
+                    "payload": {"type": "task_complete"},
+                    "turn_id": "t2",
+                }
+            )
+            + "\n"
+        )
 
     manifest = coordinator.store.read_manifest(0)
-    extended = _read_trajectory_slice_for_manifest(coordinator.store, manifest, extend_to_eof=True)
+    extended = _read_trajectory_slice_for_manifest(
+        coordinator.store, manifest, extend_to_eof=True
+    )
     assert b"task_complete" in extended
     # Without extend_to_eof the stored (short) slice is returned verbatim.
-    stored = _read_trajectory_slice_for_manifest(coordinator.store, manifest, extend_to_eof=False)
+    stored = _read_trajectory_slice_for_manifest(
+        coordinator.store, manifest, extend_to_eof=False
+    )
     assert b"task_complete" not in stored
 
 
@@ -1738,13 +1924,17 @@ def test_resume_keeps_freshly_installed_plugin_hooks(tmp_path, monkeypatch):
     monkeypatch.setenv("TEST_HOME", str(home))
     monkeypatch.setenv("CHECKPOINT_PROVIDER", "claude")
 
-    (claude_home / "settings.json").write_text(_settings_without_plugin_hooks(), encoding="utf-8")
+    (claude_home / "settings.json").write_text(
+        _settings_without_plugin_hooks(), encoding="utf-8"
+    )
 
     coordinator = CheckpointCoordinator(session_id="s1", cwd=cwd)
     coordinator.on_session_start()
     coordinator.on_turn_end(TurnRecord(user_message="checkpoint"))
 
-    (claude_home / "settings.json").write_text(_settings_with_plugin_hooks(), encoding="utf-8")
+    (claude_home / "settings.json").write_text(
+        _settings_with_plugin_hooks(), encoding="utf-8"
+    )
 
     orchestrator = ResumeOrchestrator(cwd=cwd)
     plan = orchestrator.plan("s1", 0)
@@ -1777,13 +1967,17 @@ def test_resume_does_not_reinstall_uninstalled_plugin_hooks(tmp_path, monkeypatc
     monkeypatch.setenv("TEST_HOME", str(home))
     monkeypatch.setenv("CHECKPOINT_PROVIDER", "claude")
 
-    (claude_home / "settings.json").write_text(_settings_with_plugin_hooks(), encoding="utf-8")
+    (claude_home / "settings.json").write_text(
+        _settings_with_plugin_hooks(), encoding="utf-8"
+    )
 
     coordinator = CheckpointCoordinator(session_id="s1", cwd=cwd)
     coordinator.on_session_start()
     coordinator.on_turn_end(TurnRecord(user_message="checkpoint"))
 
-    (claude_home / "settings.json").write_text(_settings_without_plugin_hooks(), encoding="utf-8")
+    (claude_home / "settings.json").write_text(
+        _settings_without_plugin_hooks(), encoding="utf-8"
+    )
 
     orchestrator = ResumeOrchestrator(cwd=cwd)
     plan = orchestrator.plan("s1", 0)
@@ -1793,7 +1987,9 @@ def test_resume_does_not_reinstall_uninstalled_plugin_hooks(tmp_path, monkeypatc
 
     assert report.env_state_dir is not None
     runtime_claude_home = Path(report.env_state_dir) / "claude"
-    after = json.loads((runtime_claude_home / "settings.json").read_text(encoding="utf-8"))
+    after = json.loads(
+        (runtime_claude_home / "settings.json").read_text(encoding="utf-8")
+    )
     assert after["model"] == "sonnet"
     assert after["hooks"] == {}
 
@@ -1810,13 +2006,17 @@ def test_resume_reverts_plugin_hooks_when_flag_disabled(tmp_path, monkeypatch):
     monkeypatch.setenv("TEST_HOME", str(home))
     monkeypatch.setenv("CHECKPOINT_PROVIDER", "claude")
 
-    (claude_home / "settings.json").write_text(_settings_without_plugin_hooks(), encoding="utf-8")
+    (claude_home / "settings.json").write_text(
+        _settings_without_plugin_hooks(), encoding="utf-8"
+    )
 
     coordinator = CheckpointCoordinator(session_id="s1", cwd=cwd)
     coordinator.on_session_start()
     coordinator.on_turn_end(TurnRecord(user_message="checkpoint"))
 
-    (claude_home / "settings.json").write_text(_settings_with_plugin_hooks(), encoding="utf-8")
+    (claude_home / "settings.json").write_text(
+        _settings_with_plugin_hooks(), encoding="utf-8"
+    )
 
     config = load_config()
     config["ignore_plugin_hook_diffs"] = False
@@ -1830,12 +2030,21 @@ def test_resume_reverts_plugin_hooks_when_flag_disabled(tmp_path, monkeypatch):
 
     assert report.env_state_dir is not None
     runtime_claude_home = Path(report.env_state_dir) / "claude"
-    after = json.loads((runtime_claude_home / "settings.json").read_text(encoding="utf-8"))
+    after = json.loads(
+        (runtime_claude_home / "settings.json").read_text(encoding="utf-8")
+    )
     assert after["hooks"] == {}
 
 
 def _seed_claude_session_for_resume(
-    plugin_home, home, cwd, transcript, *, transcript_text, file_history=None, todos=None
+    plugin_home,
+    home,
+    cwd,
+    transcript,
+    *,
+    transcript_text,
+    file_history=None,
+    todos=None,
 ):
     claude_home = home / ".claude"
     cwd.mkdir(exist_ok=True)
@@ -1869,24 +2078,51 @@ def test_resume_extends_latest_turn_to_eof_when_tail_is_complete(tmp_path, monke
     monkeypatch.setenv("CHECKPOINT_PROVIDER", "claude")
 
     captured = (
-        json.dumps({"type": "user", "promptId": "p-1", "uuid": "u1", "parentUuid": None,
-                    "message": {"role": "user", "content": "hi"}}) + "\n"
-        + json.dumps({"type": "assistant", "uuid": "a1", "parentUuid": "u1",
-                      "message": {"role": "assistant", "content": []}}) + "\n"
+        json.dumps(
+            {
+                "type": "user",
+                "promptId": "p-1",
+                "uuid": "u1",
+                "parentUuid": None,
+                "message": {"role": "user", "content": "hi"},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "assistant",
+                "uuid": "a1",
+                "parentUuid": "u1",
+                "message": {"role": "assistant", "content": []},
+            }
+        )
+        + "\n"
     )
-    _seed_claude_session_for_resume(plugin_home, home, cwd, transcript, transcript_text=captured)
+    _seed_claude_session_for_resume(
+        plugin_home, home, cwd, transcript, transcript_text=captured
+    )
 
     # Simulate the trailing flush: same promptId records, complete lines.
     with transcript.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps({"type": "system", "subtype": "stop_hook_summary"}) + "\n")
-        handle.write(json.dumps({"type": "system", "subtype": "turn_duration", "durationMs": 12}) + "\n")
+        handle.write(
+            json.dumps({"type": "system", "subtype": "stop_hook_summary"}) + "\n"
+        )
+        handle.write(
+            json.dumps({"type": "system", "subtype": "turn_duration", "durationMs": 12})
+            + "\n"
+        )
 
     report = ResumeOrchestrator(cwd=cwd).execute(
         ResumeOrchestrator(cwd=cwd).plan("s1", 0), lambda _text: True
     )
     materialized = Path(report.provider_session_path)
-    records = [json.loads(line) for line in materialized.read_text(encoding="utf-8").splitlines()]
-    subtypes = [record.get("subtype") for record in records if record.get("type") == "system"]
+    records = [
+        json.loads(line)
+        for line in materialized.read_text(encoding="utf-8").splitlines()
+    ]
+    subtypes = [
+        record.get("subtype") for record in records if record.get("type") == "system"
+    ]
     assert "stop_hook_summary" in subtypes
     assert "turn_duration" in subtypes
 
@@ -1901,17 +2137,44 @@ def test_resume_does_not_extend_when_tail_starts_new_turn(tmp_path, monkeypatch)
     monkeypatch.setenv("CHECKPOINT_PROVIDER", "claude")
 
     captured = (
-        json.dumps({"type": "user", "promptId": "p-1", "uuid": "u1", "parentUuid": None,
-                    "message": {"role": "user", "content": "hi"}}) + "\n"
-        + json.dumps({"type": "assistant", "uuid": "a1", "parentUuid": "u1",
-                      "message": {"role": "assistant", "content": []}}) + "\n"
+        json.dumps(
+            {
+                "type": "user",
+                "promptId": "p-1",
+                "uuid": "u1",
+                "parentUuid": None,
+                "message": {"role": "user", "content": "hi"},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "assistant",
+                "uuid": "a1",
+                "parentUuid": "u1",
+                "message": {"role": "assistant", "content": []},
+            }
+        )
+        + "\n"
     )
-    _seed_claude_session_for_resume(plugin_home, home, cwd, transcript, transcript_text=captured)
+    _seed_claude_session_for_resume(
+        plugin_home, home, cwd, transcript, transcript_text=captured
+    )
 
     # User raced ahead and started turn 2 before resume fired.
     with transcript.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps({"type": "user", "promptId": "p-2", "uuid": "u2", "parentUuid": "a1",
-                                 "message": {"role": "user", "content": "next"}}) + "\n")
+        handle.write(
+            json.dumps(
+                {
+                    "type": "user",
+                    "promptId": "p-2",
+                    "uuid": "u2",
+                    "parentUuid": "a1",
+                    "message": {"role": "user", "content": "next"},
+                }
+            )
+            + "\n"
+        )
 
     report = ResumeOrchestrator(cwd=cwd).execute(
         ResumeOrchestrator(cwd=cwd).plan("s1", 0), lambda _text: True
@@ -1919,7 +2182,10 @@ def test_resume_does_not_extend_when_tail_starts_new_turn(tmp_path, monkeypatch)
     materialized = Path(report.provider_session_path)
     prompt_ids = [
         record.get("promptId")
-        for record in (json.loads(line) for line in materialized.read_text(encoding="utf-8").splitlines())
+        for record in (
+            json.loads(line)
+            for line in materialized.read_text(encoding="utf-8").splitlines()
+        )
         if record.get("promptId") is not None
     ]
     assert "p-2" not in prompt_ids
@@ -1934,8 +2200,18 @@ def test_resume_hardlinks_file_history_and_todos(tmp_path, monkeypatch):
     monkeypatch.setenv("TEST_HOME", str(home))
     monkeypatch.setenv("CHECKPOINT_PROVIDER", "claude")
 
-    captured = json.dumps({"type": "user", "promptId": "p-1", "uuid": "u1", "parentUuid": None,
-                           "message": {"role": "user", "content": "hi"}}) + "\n"
+    captured = (
+        json.dumps(
+            {
+                "type": "user",
+                "promptId": "p-1",
+                "uuid": "u1",
+                "parentUuid": None,
+                "message": {"role": "user", "content": "hi"},
+            }
+        )
+        + "\n"
+    )
     _seed_claude_session_for_resume(
         plugin_home,
         home,
@@ -1953,7 +2229,9 @@ def test_resume_hardlinks_file_history_and_todos(tmp_path, monkeypatch):
     assert report.env_state_dir is not None
     runtime_claude_home = Path(report.env_state_dir) / "claude"
     src_history = home / ".claude" / "file-history" / "s1" / "006a1ba@v1"
-    dst_history = runtime_claude_home / "file-history" / report.new_session_id / "006a1ba@v1"
+    dst_history = (
+        runtime_claude_home / "file-history" / report.new_session_id / "006a1ba@v1"
+    )
     assert dst_history.exists()
     assert src_history.stat().st_ino == dst_history.stat().st_ino  # hardlink, not copy
 
@@ -1972,16 +2250,30 @@ def test_resume_command_is_set_in_report(tmp_path, monkeypatch):
     monkeypatch.setenv("TEST_HOME", str(home))
     monkeypatch.setenv("CHECKPOINT_PROVIDER", "claude")
 
-    captured = json.dumps({"type": "user", "promptId": "p-1", "uuid": "u1", "parentUuid": None,
-                           "message": {"role": "user", "content": "hi"}}) + "\n"
-    _seed_claude_session_for_resume(plugin_home, home, cwd, transcript, transcript_text=captured)
+    captured = (
+        json.dumps(
+            {
+                "type": "user",
+                "promptId": "p-1",
+                "uuid": "u1",
+                "parentUuid": None,
+                "message": {"role": "user", "content": "hi"},
+            }
+        )
+        + "\n"
+    )
+    _seed_claude_session_for_resume(
+        plugin_home, home, cwd, transcript, transcript_text=captured
+    )
 
     report = ResumeOrchestrator(cwd=cwd).execute(
         ResumeOrchestrator(cwd=cwd).plan("s1", 0), lambda _text: True
     )
     assert report.resume_command == f"checkpoint resume-open {report.new_session_id}"
     resume_open = json.loads(
-        (plugin_home / "sessions" / report.new_session_id / "resume-open.json").read_text(encoding="utf-8")
+        (
+            plugin_home / "sessions" / report.new_session_id / "resume-open.json"
+        ).read_text(encoding="utf-8")
     )
     assert resume_open["env_state_dir"] == report.env_state_dir
     assert resume_open["command"] == ["claude", "--resume", report.new_session_id]
@@ -2007,9 +2299,21 @@ def test_resume_places_claude_json_under_config_dir_for_mcp(tmp_path, monkeypatc
         ),
         encoding="utf-8",
     )
-    captured = json.dumps({"type": "user", "promptId": "p-1", "uuid": "u1", "parentUuid": None,
-                           "message": {"role": "user", "content": "hi"}}) + "\n"
-    _seed_claude_session_for_resume(plugin_home, home, cwd, transcript, transcript_text=captured)
+    captured = (
+        json.dumps(
+            {
+                "type": "user",
+                "promptId": "p-1",
+                "uuid": "u1",
+                "parentUuid": None,
+                "message": {"role": "user", "content": "hi"},
+            }
+        )
+        + "\n"
+    )
+    _seed_claude_session_for_resume(
+        plugin_home, home, cwd, transcript, transcript_text=captured
+    )
 
     report = ResumeOrchestrator(cwd=cwd).execute(
         ResumeOrchestrator(cwd=cwd).plan("s1", 0),
@@ -2024,7 +2328,9 @@ def test_resume_places_claude_json_under_config_dir_for_mcp(tmp_path, monkeypatc
     assert runtime_config["mcpServers"] == {
         "context7": {"type": "stdio", "command": "npx"}
     }
-    assert runtime_config["projects"][str(copy_cwd)]["disabledMcpServers"] == ["context7"]
+    assert runtime_config["projects"][str(copy_cwd)]["disabledMcpServers"] == [
+        "context7"
+    ]
     assert not (Path(report.env_state_dir) / ".claude.json").exists()
 
 
@@ -2048,9 +2354,21 @@ def test_resume_clears_claude_disabled_mcp_servers_when_active(tmp_path, monkeyp
         ),
         encoding="utf-8",
     )
-    captured = json.dumps({"type": "user", "promptId": "p-1", "uuid": "u1", "parentUuid": None,
-                           "message": {"role": "user", "content": "hi"}}) + "\n"
-    _seed_claude_session_for_resume(plugin_home, home, cwd, transcript, transcript_text=captured)
+    captured = (
+        json.dumps(
+            {
+                "type": "user",
+                "promptId": "p-1",
+                "uuid": "u1",
+                "parentUuid": None,
+                "message": {"role": "user", "content": "hi"},
+            }
+        )
+        + "\n"
+    )
+    _seed_claude_session_for_resume(
+        plugin_home, home, cwd, transcript, transcript_text=captured
+    )
 
     report = ResumeOrchestrator(cwd=cwd).execute(
         ResumeOrchestrator(cwd=cwd).plan("s1", 0),
@@ -2059,12 +2377,16 @@ def test_resume_clears_claude_disabled_mcp_servers_when_active(tmp_path, monkeyp
 
     assert report.env_state_dir is not None
     runtime_config = json.loads(
-        (Path(report.env_state_dir) / "claude" / ".claude.json").read_text(encoding="utf-8")
+        (Path(report.env_state_dir) / "claude" / ".claude.json").read_text(
+            encoding="utf-8"
+        )
     )
     assert runtime_config["projects"][str(copy_cwd)]["disabledMcpServers"] == []
 
 
-def test_resume_replays_claude_mcp_delta_when_snapshot_config_was_stale(tmp_path, monkeypatch):
+def test_resume_replays_claude_mcp_delta_when_snapshot_config_was_stale(
+    tmp_path, monkeypatch
+):
     plugin_home = tmp_path / "plugin"
     home = tmp_path / "home"
     cwd = tmp_path / "work"
@@ -2086,8 +2408,15 @@ def test_resume_replays_claude_mcp_delta_when_snapshot_config_was_stale(tmp_path
     )
     captured = "\n".join(
         [
-            json.dumps({"type": "user", "promptId": "p-1", "uuid": "u1", "parentUuid": None,
-                        "message": {"role": "user", "content": "hi"}}),
+            json.dumps(
+                {
+                    "type": "user",
+                    "promptId": "p-1",
+                    "uuid": "u1",
+                    "parentUuid": None,
+                    "message": {"role": "user", "content": "hi"},
+                }
+            ),
             json.dumps(
                 {
                     "type": "attachment",
@@ -2112,7 +2441,9 @@ def test_resume_replays_claude_mcp_delta_when_snapshot_config_was_stale(tmp_path
             "",
         ]
     )
-    _seed_claude_session_for_resume(plugin_home, home, cwd, transcript, transcript_text=captured)
+    _seed_claude_session_for_resume(
+        plugin_home, home, cwd, transcript, transcript_text=captured
+    )
 
     report = ResumeOrchestrator(cwd=cwd).execute(
         ResumeOrchestrator(cwd=cwd).plan("s1", 0),
@@ -2121,7 +2452,9 @@ def test_resume_replays_claude_mcp_delta_when_snapshot_config_was_stale(tmp_path
 
     assert report.env_state_dir is not None
     runtime_config = json.loads(
-        (Path(report.env_state_dir) / "claude" / ".claude.json").read_text(encoding="utf-8")
+        (Path(report.env_state_dir) / "claude" / ".claude.json").read_text(
+            encoding="utf-8"
+        )
     )
     assert runtime_config["projects"][str(copy_cwd)]["disabledMcpServers"] == []
 
@@ -2137,7 +2470,9 @@ def test_resume_command_pins_claude_model_effort_and_permission():
     )
 
     assert (
-        _resume_command("claude", "019e91aa-5d69-7180-8729-1a9a31c7e182", target_env=target_env)
+        _resume_command(
+            "claude", "019e91aa-5d69-7180-8729-1a9a31c7e182", target_env=target_env
+        )
         == "checkpoint resume-open 019e91aa-5d69-7180-8729-1a9a31c7e182"
     )
 
@@ -2148,7 +2483,9 @@ def test_resume_command_pins_codex_model_and_effort():
     target_env = EnvironmentState(provider="codex", model="gpt-5.5", effort="xhigh")
 
     assert (
-        _resume_command("codex", "019e91aa-5d69-7180-8729-1a9a31c7e182", target_env=target_env)
+        _resume_command(
+            "codex", "019e91aa-5d69-7180-8729-1a9a31c7e182", target_env=target_env
+        )
         == "checkpoint resume-open 019e91aa-5d69-7180-8729-1a9a31c7e182"
     )
 
@@ -2163,28 +2500,60 @@ def test_resume_parent_uuid_chain_skips_summary_records(tmp_path, monkeypatch):
     monkeypatch.setenv("CHECKPOINT_PROVIDER", "claude")
 
     transcript_text = (
-        json.dumps({"type": "user", "promptId": "p-1", "uuid": "u1", "parentUuid": None,
-                    "message": {"role": "user", "content": "hi"}}) + "\n"
-        + json.dumps({"type": "assistant", "uuid": "a1", "parentUuid": "u1",
-                      "message": {"role": "assistant", "content": []}}) + "\n"
-        + json.dumps({"type": "summary", "uuid": "sum1", "parentUuid": None}) + "\n"
-        + json.dumps({"type": "user", "promptId": "p-2", "uuid": "u2", "parentUuid": "a1",
-                      "message": {"role": "user", "content": "again"}}) + "\n"
+        json.dumps(
+            {
+                "type": "user",
+                "promptId": "p-1",
+                "uuid": "u1",
+                "parentUuid": None,
+                "message": {"role": "user", "content": "hi"},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "assistant",
+                "uuid": "a1",
+                "parentUuid": "u1",
+                "message": {"role": "assistant", "content": []},
+            }
+        )
+        + "\n"
+        + json.dumps({"type": "summary", "uuid": "sum1", "parentUuid": None})
+        + "\n"
+        + json.dumps(
+            {
+                "type": "user",
+                "promptId": "p-2",
+                "uuid": "u2",
+                "parentUuid": "a1",
+                "message": {"role": "user", "content": "again"},
+            }
+        )
+        + "\n"
     )
-    _seed_claude_session_for_resume(plugin_home, home, cwd, transcript, transcript_text=transcript_text)
+    _seed_claude_session_for_resume(
+        plugin_home, home, cwd, transcript, transcript_text=transcript_text
+    )
 
     report = ResumeOrchestrator(cwd=cwd).execute(
         ResumeOrchestrator(cwd=cwd).plan("s1", 0), lambda _text: True
     )
     records = [
         json.loads(line)
-        for line in Path(report.provider_session_path).read_text(encoding="utf-8").splitlines()
+        for line in Path(report.provider_session_path)
+        .read_text(encoding="utf-8")
+        .splitlines()
     ]
     by_type = {record["type"]: record for record in records if "uuid" in record}
     # The second user record's parentUuid must point at the assistant uuid,
     # NOT at the summary uuid even though summary was written between them.
     assistant_uuid = by_type["assistant"]["uuid"]
-    second_user = [record for record in records if record.get("type") == "user" and record.get("promptId") == "p-2"][0]
+    second_user = [
+        record
+        for record in records
+        if record.get("type") == "user" and record.get("promptId") == "p-2"
+    ][0]
     assert second_user["parentUuid"] == assistant_uuid
 
 
@@ -2194,11 +2563,30 @@ def test_codex_rewrite_repoints_forked_from_id():
     from checkpoint_plugin.resume import _rewrite_codex_trajectory
 
     trajectory = (
-        json.dumps({"type": "session_meta", "payload": {"id": "ORIGINAL", "forked_from_id": "STALE-ANCESTOR", "cwd": "/old"}}) + "\n"
-        + json.dumps({"type": "turn_context", "payload": {"turn_id": "t-1", "model": "m"}}) + "\n"
+        json.dumps(
+            {
+                "type": "session_meta",
+                "payload": {
+                    "id": "ORIGINAL",
+                    "forked_from_id": "STALE-ANCESTOR",
+                    "cwd": "/old",
+                },
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {"type": "turn_context", "payload": {"turn_id": "t-1", "model": "m"}}
+        )
+        + "\n"
     ).encode("utf-8")
-    out = _rewrite_codex_trajectory(trajectory, "NEW", Path("/new"), None, None, None, None)
-    metas = [json.loads(l)["payload"] for l in out.splitlines() if json.loads(l).get("type") == "session_meta"]
+    out = _rewrite_codex_trajectory(
+        trajectory, "NEW", Path("/new"), None, None, None, None
+    )
+    metas = [
+        json.loads(line)["payload"]
+        for line in out.splitlines()
+        if json.loads(line).get("type") == "session_meta"
+    ]
     assert metas, "expected a session_meta record"
     meta = metas[0]
     assert meta["id"] == "NEW"
@@ -2214,9 +2602,14 @@ def test_codex_rewrite_preserves_structured_permission_profile():
     path (P4-2)."""
     from checkpoint_plugin.resume import _rewrite_codex_trajectory
 
-    profile = {"type": "managed", "file_system": {"type": "restricted"}, "network": "restricted"}
+    profile = {
+        "type": "managed",
+        "file_system": {"type": "restricted"},
+        "network": "restricted",
+    }
     trajectory = (
-        json.dumps({"type": "session_meta", "payload": {"id": "old", "cwd": "/old"}}) + "\n"
+        json.dumps({"type": "session_meta", "payload": {"id": "old", "cwd": "/old"}})
+        + "\n"
         + json.dumps(
             {
                 "type": "turn_context",
@@ -2232,9 +2625,13 @@ def test_codex_rewrite_preserves_structured_permission_profile():
         + "\n"
     ).encode("utf-8")
 
-    out = _rewrite_codex_trajectory(trajectory, "NEW", Path("/new"), "gpt-target", "acceptEdits", None, None)
+    out = _rewrite_codex_trajectory(
+        trajectory, "NEW", Path("/new"), "gpt-target", "acceptEdits", None, None
+    )
     records = [json.loads(line) for line in out.splitlines()]
-    turn_context = next(r["payload"] for r in records if r.get("type") == "turn_context")
+    turn_context = next(
+        r["payload"] for r in records if r.get("type") == "turn_context"
+    )
     # Structured profile is preserved verbatim; model is re-pinned; sandbox/approval untouched.
     assert turn_context["permission_profile"] == profile
     assert turn_context["model"] == "gpt-target"
@@ -2248,11 +2645,24 @@ def test_codex_rewrite_repins_model_on_real_turn_context_shape():
     from checkpoint_plugin.resume import _rewrite_codex_trajectory
 
     trajectory = (
-        json.dumps({"type": "session_meta", "payload": {"id": "old", "cwd": "/old"}}) + "\n"
-        + json.dumps({"type": "turn_context", "payload": {"turn_id": "t-1", "model": "old-model"}}) + "\n"
+        json.dumps({"type": "session_meta", "payload": {"id": "old", "cwd": "/old"}})
+        + "\n"
+        + json.dumps(
+            {
+                "type": "turn_context",
+                "payload": {"turn_id": "t-1", "model": "old-model"},
+            }
+        )
+        + "\n"
     ).encode("utf-8")
-    out = _rewrite_codex_trajectory(trajectory, "NEW", Path("/new"), "gpt-target", None, None, None)
-    tc = next(json.loads(l)["payload"] for l in out.splitlines() if json.loads(l).get("type") == "turn_context")
+    out = _rewrite_codex_trajectory(
+        trajectory, "NEW", Path("/new"), "gpt-target", None, None, None
+    )
+    tc = next(
+        json.loads(line)["payload"]
+        for line in out.splitlines()
+        if json.loads(line).get("type") == "turn_context"
+    )
     assert tc["model"] == "gpt-target"
 
 
@@ -2261,14 +2671,27 @@ def test_codex_rewrite_repins_string_permission_profile():
     from checkpoint_plugin.resume import _rewrite_codex_trajectory
 
     trajectory = (
-        json.dumps({"type": "session_meta", "payload": {"id": "old", "cwd": "/old"}}) + "\n"
+        json.dumps({"type": "session_meta", "payload": {"id": "old", "cwd": "/old"}})
+        + "\n"
         + json.dumps(
-            {"type": "turn_context", "payload": {"permission_profile": "old", "sandbox_policy": "workspace-write"}}
+            {
+                "type": "turn_context",
+                "payload": {
+                    "permission_profile": "old",
+                    "sandbox_policy": "workspace-write",
+                },
+            }
         )
         + "\n"
     ).encode("utf-8")
-    out = _rewrite_codex_trajectory(trajectory, "NEW", Path("/new"), None, "acceptEdits", None, None)
-    tc = next(json.loads(l)["payload"] for l in out.splitlines() if json.loads(l).get("type") == "turn_context")
+    out = _rewrite_codex_trajectory(
+        trajectory, "NEW", Path("/new"), None, "acceptEdits", None, None
+    )
+    tc = next(
+        json.loads(line)["payload"]
+        for line in out.splitlines()
+        if json.loads(line).get("type") == "turn_context"
+    )
     assert tc["permission_profile"] == "acceptEdits"
     assert tc["sandbox_policy"] == "workspace-write"
 
@@ -2280,11 +2703,44 @@ def test_claude_rewrite_repins_model_on_assistant_message():
     from checkpoint_plugin.resume import _rewrite_claude_trajectory
 
     trajectory = (
-        json.dumps({"type": "user", "sessionId": "old", "uuid": "u1", "parentUuid": None, "promptId": "p", "message": {"role": "user", "content": "hi"}}) + "\n"
-        + json.dumps({"type": "assistant", "sessionId": "old", "uuid": "a1", "parentUuid": "u1", "message": {"role": "assistant", "model": "claude-opus-4-8", "content": []}}) + "\n"
-        + json.dumps({"type": "file-history-snapshot", "messageId": "a1", "snapshot": {}, "isSnapshotUpdate": False}) + "\n"
+        json.dumps(
+            {
+                "type": "user",
+                "sessionId": "old",
+                "uuid": "u1",
+                "parentUuid": None,
+                "promptId": "p",
+                "message": {"role": "user", "content": "hi"},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "assistant",
+                "sessionId": "old",
+                "uuid": "a1",
+                "parentUuid": "u1",
+                "message": {
+                    "role": "assistant",
+                    "model": "claude-opus-4-8",
+                    "content": [],
+                },
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "file-history-snapshot",
+                "messageId": "a1",
+                "snapshot": {},
+                "isSnapshotUpdate": False,
+            }
+        )
+        + "\n"
     ).encode("utf-8")
-    out = _rewrite_claude_trajectory(trajectory, "NEW", Path("/new"), "claude-sonnet-4-6", None, None)
+    out = _rewrite_claude_trajectory(
+        trajectory, "NEW", Path("/new"), "claude-sonnet-4-6", None, None
+    )
     records = [json.loads(line) for line in out.splitlines()]
     assistant = next(r for r in records if r.get("type") == "assistant")
     assert assistant["message"]["model"] == "claude-sonnet-4-6"
@@ -2303,10 +2759,29 @@ def test_claude_rewrite_remaps_file_history_message_id():
 
     # messageId points FORWARD to an assistant uuid that appears later.
     trajectory = (
-        json.dumps({"type": "file-history-snapshot", "messageId": "a1", "snapshot": {}}) + "\n"
-        + json.dumps({"type": "user", "uuid": "u1", "parentUuid": None, "promptId": "p", "message": {"role": "user", "content": "hi"}}) + "\n"
-        + json.dumps({"type": "assistant", "uuid": "a1", "parentUuid": "u1", "message": {"role": "assistant", "content": []}}) + "\n"
-        + json.dumps({"type": "last-prompt", "leafUuid": "a1"}) + "\n"
+        json.dumps({"type": "file-history-snapshot", "messageId": "a1", "snapshot": {}})
+        + "\n"
+        + json.dumps(
+            {
+                "type": "user",
+                "uuid": "u1",
+                "parentUuid": None,
+                "promptId": "p",
+                "message": {"role": "user", "content": "hi"},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "assistant",
+                "uuid": "a1",
+                "parentUuid": "u1",
+                "message": {"role": "assistant", "content": []},
+            }
+        )
+        + "\n"
+        + json.dumps({"type": "last-prompt", "leafUuid": "a1"})
+        + "\n"
     ).encode("utf-8")
     out = _rewrite_claude_trajectory(trajectory, "NEW", Path("/new"), None, None, None)
     records = [json.loads(line) for line in out.splitlines()]
@@ -2327,10 +2802,34 @@ def test_claude_rewrite_remaps_nested_snapshot_message_id():
     from checkpoint_plugin.resume import _rewrite_claude_trajectory
 
     trajectory = (
-        json.dumps({"type": "user", "uuid": "u1", "parentUuid": None, "promptId": "p", "message": {"role": "user", "content": "hi"}}) + "\n"
-        + json.dumps({"type": "assistant", "uuid": "a1", "parentUuid": "u1", "message": {"role": "assistant", "content": []}}) + "\n"
+        json.dumps(
+            {
+                "type": "user",
+                "uuid": "u1",
+                "parentUuid": None,
+                "promptId": "p",
+                "message": {"role": "user", "content": "hi"},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "assistant",
+                "uuid": "a1",
+                "parentUuid": "u1",
+                "message": {"role": "assistant", "content": []},
+            }
+        )
+        + "\n"
         # nested snapshot.messageId points at the assistant uuid a1
-        + json.dumps({"type": "file-history-snapshot", "messageId": "a1", "snapshot": {"messageId": "a1", "files": {}}}) + "\n"
+        + json.dumps(
+            {
+                "type": "file-history-snapshot",
+                "messageId": "a1",
+                "snapshot": {"messageId": "a1", "files": {}},
+            }
+        )
+        + "\n"
     ).encode("utf-8")
     out = _rewrite_claude_trajectory(trajectory, "NEW", Path("/new"), None, None, None)
     records = [json.loads(line) for line in out.splitlines()]
@@ -2350,18 +2849,52 @@ def test_resume_forked_session_includes_inherited_prefix(tmp_path, monkeypatch):
     materialize the inherited pre-fork records, not start amnesiac."""
     plugin_home = tmp_path / "plugin"
     home = tmp_path / "home"
-    claude_home = home / ".claude"
     cwd = tmp_path / "work"
     transcript = tmp_path / "claude.jsonl"
     cwd.mkdir()
     # Inherited pre-fork history, then the forked turn (new promptId).
     inherited = (
-        json.dumps({"type": "mode", "mode": "normal", "sessionId": "old"}) + "\n"
-        + json.dumps({"type": "user", "sessionId": "old", "uuid": "iu", "parentUuid": None, "promptId": "old-p", "cwd": "/old", "message": {"role": "user", "content": "INHERITED-PROMPT"}}) + "\n"
-        + json.dumps({"type": "assistant", "sessionId": "old", "uuid": "ia", "parentUuid": "iu", "cwd": "/old", "message": {"role": "assistant", "content": []}}) + "\n"
+        json.dumps({"type": "mode", "mode": "normal", "sessionId": "old"})
+        + "\n"
+        + json.dumps(
+            {
+                "type": "user",
+                "sessionId": "old",
+                "uuid": "iu",
+                "parentUuid": None,
+                "promptId": "old-p",
+                "cwd": "/old",
+                "message": {"role": "user", "content": "INHERITED-PROMPT"},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "assistant",
+                "sessionId": "old",
+                "uuid": "ia",
+                "parentUuid": "iu",
+                "cwd": "/old",
+                "message": {"role": "assistant", "content": []},
+            }
+        )
+        + "\n"
     )
     fork_offset = len(inherited.encode("utf-8"))
-    forked_turn = json.dumps({"type": "user", "sessionId": "old", "uuid": "fu", "parentUuid": "ia", "promptId": "fork-p", "cwd": "/old", "message": {"role": "user", "content": "FORKED-PROMPT"}}) + "\n"
+    forked_turn = (
+        json.dumps(
+            {
+                "type": "user",
+                "sessionId": "old",
+                "uuid": "fu",
+                "parentUuid": "ia",
+                "promptId": "fork-p",
+                "cwd": "/old",
+                "message": {"role": "user", "content": "FORKED-PROMPT"},
+            }
+        )
+        + "\n"
+    )
     transcript.write_text(inherited + forked_turn, encoding="utf-8")
     (cwd / "file.txt").write_text("v1", encoding="utf-8")
     _isolate_provider_env(monkeypatch)
@@ -2370,14 +2903,20 @@ def test_resume_forked_session_includes_inherited_prefix(tmp_path, monkeypatch):
     monkeypatch.setenv("CHECKPOINT_PROVIDER", "claude")
 
     coordinator = CheckpointCoordinator(session_id="forked", cwd=cwd)
-    coordinator.on_session_start(source="resume", source_transcript_path=str(transcript))
+    coordinator.on_session_start(
+        source="resume", source_transcript_path=str(transcript)
+    )
     # The captured turn anchors at the fork offset, mirroring real on-disk forks.
     coordinator.on_turn_end(
         TurnRecord(user_message="forked"),
-        TrajectoryReference("claude", str(transcript), fork_offset, transcript.stat().st_size, 1),
+        TrajectoryReference(
+            "claude", str(transcript), fork_offset, transcript.stat().st_size, 1
+        ),
     )
 
-    report = ResumeOrchestrator(cwd=cwd).execute(ResumeOrchestrator(cwd=cwd).plan("forked", 0), lambda _text: True)
+    report = ResumeOrchestrator(cwd=cwd).execute(
+        ResumeOrchestrator(cwd=cwd).plan("forked", 0), lambda _text: True
+    )
     materialized = Path(report.provider_session_path).read_text(encoding="utf-8")
     # Both the inherited history AND the forked turn are present in the resume.
     assert "INHERITED-PROMPT" in materialized
@@ -2399,10 +2938,48 @@ def test_resume_of_a_resume_preserves_all_records(tmp_path, monkeypatch):
     # permission-mode record and re-serializes, shifting byte offsets).
     lines = [
         json.dumps({"type": "mode", "mode": "normal", "sessionId": "old"}),
-        json.dumps({"type": "user", "sessionId": "old", "uuid": "u1", "parentUuid": None, "promptId": "p1", "cwd": "/old", "message": {"role": "user", "content": "turn one"}}),
-        json.dumps({"type": "assistant", "sessionId": "old", "uuid": "a1", "parentUuid": "u1", "cwd": "/old", "message": {"role": "assistant", "model": "m", "content": []}}),
-        json.dumps({"type": "user", "sessionId": "old", "uuid": "u2", "parentUuid": "a1", "promptId": "p2", "cwd": "/old", "message": {"role": "user", "content": "turn two"}}),
-        json.dumps({"type": "assistant", "sessionId": "old", "uuid": "a2", "parentUuid": "u2", "cwd": "/old", "message": {"role": "assistant", "model": "m", "content": []}}),
+        json.dumps(
+            {
+                "type": "user",
+                "sessionId": "old",
+                "uuid": "u1",
+                "parentUuid": None,
+                "promptId": "p1",
+                "cwd": "/old",
+                "message": {"role": "user", "content": "turn one"},
+            }
+        ),
+        json.dumps(
+            {
+                "type": "assistant",
+                "sessionId": "old",
+                "uuid": "a1",
+                "parentUuid": "u1",
+                "cwd": "/old",
+                "message": {"role": "assistant", "model": "m", "content": []},
+            }
+        ),
+        json.dumps(
+            {
+                "type": "user",
+                "sessionId": "old",
+                "uuid": "u2",
+                "parentUuid": "a1",
+                "promptId": "p2",
+                "cwd": "/old",
+                "message": {"role": "user", "content": "turn two"},
+            }
+        ),
+        json.dumps(
+            {
+                "type": "assistant",
+                "sessionId": "old",
+                "uuid": "a2",
+                "parentUuid": "u2",
+                "cwd": "/old",
+                "message": {"role": "assistant", "model": "m", "content": []},
+            }
+        ),
     ]
     data = ("\n".join(lines) + "\n").encode("utf-8")
     transcript.write_bytes(data)
@@ -2418,22 +2995,44 @@ def test_resume_of_a_resume_preserves_all_records(tmp_path, monkeypatch):
     turn0_end = data.rfind(b"\n", 0, turn0_end) + 1
     coordinator = CheckpointCoordinator(session_id="s1", cwd=cwd)
     coordinator.on_session_start()
-    coordinator.on_turn_end(TurnRecord(user_message="one"), TrajectoryReference("claude", str(transcript), 0, turn0_end, 3))
-    coordinator.on_turn_end(TurnRecord(user_message="two"), TrajectoryReference("claude", str(transcript), turn0_end, len(data), 2))
+    coordinator.on_turn_end(
+        TurnRecord(user_message="one"),
+        TrajectoryReference("claude", str(transcript), 0, turn0_end, 3),
+    )
+    coordinator.on_turn_end(
+        TurnRecord(user_message="two"),
+        TrajectoryReference("claude", str(transcript), turn0_end, len(data), 2),
+    )
 
     def _count(path):
-        return sum(1 for line in Path(path).read_text(encoding="utf-8").splitlines() if line.strip())
+        return sum(
+            1
+            for line in Path(path).read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        )
 
-    gen1 = ResumeOrchestrator(cwd=cwd).execute(ResumeOrchestrator(cwd=cwd).plan("s1", 1), lambda _t: True)
+    gen1 = ResumeOrchestrator(cwd=cwd).execute(
+        ResumeOrchestrator(cwd=cwd).plan("s1", 1), lambda _t: True
+    )
     gen1_records = _count(gen1.provider_session_path)
 
     # Resume the resumed session — this is where stale offsets would drop records.
-    gen2 = ResumeOrchestrator(cwd=cwd).execute(ResumeOrchestrator(cwd=cwd).plan(gen1.new_session_id, 1), lambda _t: True)
+    gen2 = ResumeOrchestrator(cwd=cwd).execute(
+        ResumeOrchestrator(cwd=cwd).plan(gen1.new_session_id, 1), lambda _t: True
+    )
     gen2_records = _count(gen2.provider_session_path)
 
-    assert gen2_records == gen1_records, f"resume-of-resume dropped records: {gen1_records} -> {gen2_records}"
+    assert gen2_records == gen1_records, (
+        f"resume-of-resume dropped records: {gen1_records} -> {gen2_records}"
+    )
     # Chain still coherent after two generations.
-    recs = [json.loads(line) for line in Path(gen2.provider_session_path).read_text(encoding="utf-8").splitlines() if line.strip()]
+    recs = [
+        json.loads(line)
+        for line in Path(gen2.provider_session_path)
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line.strip()
+    ]
     assert {r["sessionId"] for r in recs} == {gen2.new_session_id}
     seen: set[str] = set()
     for r in recs:
@@ -2458,11 +3057,47 @@ def test_fork_resume_of_resume_does_not_reinject_permission_mode(tmp_path, monke
     # Inherited pre-fork history carrying forkedFrom (as a captured native/plugin
     # fork would), then the forked turn (new promptId) anchored past byte 0.
     inherited = (
-        json.dumps({"type": "user", "sessionId": "old", "uuid": "iu", "parentUuid": None, "promptId": "old-p", "cwd": "/old", "forkedFrom": {"sessionId": "anc", "messageUuid": "iu"}, "message": {"role": "user", "content": "INHERITED"}}) + "\n"
-        + json.dumps({"type": "assistant", "sessionId": "old", "uuid": "ia", "parentUuid": "iu", "cwd": "/old", "forkedFrom": {"sessionId": "anc", "messageUuid": "ia"}, "message": {"role": "assistant", "model": "m", "content": []}}) + "\n"
+        json.dumps(
+            {
+                "type": "user",
+                "sessionId": "old",
+                "uuid": "iu",
+                "parentUuid": None,
+                "promptId": "old-p",
+                "cwd": "/old",
+                "forkedFrom": {"sessionId": "anc", "messageUuid": "iu"},
+                "message": {"role": "user", "content": "INHERITED"},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "assistant",
+                "sessionId": "old",
+                "uuid": "ia",
+                "parentUuid": "iu",
+                "cwd": "/old",
+                "forkedFrom": {"sessionId": "anc", "messageUuid": "ia"},
+                "message": {"role": "assistant", "model": "m", "content": []},
+            }
+        )
+        + "\n"
     )
     fork_offset = len(inherited.encode("utf-8"))
-    forked_turn = json.dumps({"type": "user", "sessionId": "old", "uuid": "fu", "parentUuid": "ia", "promptId": "fork-p", "cwd": "/old", "message": {"role": "user", "content": "FORKED"}}) + "\n"
+    forked_turn = (
+        json.dumps(
+            {
+                "type": "user",
+                "sessionId": "old",
+                "uuid": "fu",
+                "parentUuid": "ia",
+                "promptId": "fork-p",
+                "cwd": "/old",
+                "message": {"role": "user", "content": "FORKED"},
+            }
+        )
+        + "\n"
+    )
     transcript.write_text(inherited + forked_turn, encoding="utf-8")
     (cwd / "file.txt").write_text("v1", encoding="utf-8")
     _isolate_provider_env(monkeypatch)
@@ -2472,19 +3107,31 @@ def test_fork_resume_of_resume_does_not_reinject_permission_mode(tmp_path, monke
     monkeypatch.setenv("CLAUDE_PERMISSION_MODE", "acceptEdits")
 
     coordinator = CheckpointCoordinator(session_id="forked", cwd=cwd)
-    coordinator.on_session_start(source="resume", source_transcript_path=str(transcript))
+    coordinator.on_session_start(
+        source="resume", source_transcript_path=str(transcript)
+    )
     coordinator.on_turn_end(
         TurnRecord(user_message="forked"),
-        TrajectoryReference("claude", str(transcript), fork_offset, transcript.stat().st_size, 1),
+        TrajectoryReference(
+            "claude", str(transcript), fork_offset, transcript.stat().st_size, 1
+        ),
     )
 
     def _counts(path):
-        recs = [json.loads(line) for line in Path(path).read_text(encoding="utf-8").splitlines() if line.strip()]
+        recs = [
+            json.loads(line)
+            for line in Path(path).read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
         return len(recs), sum(1 for r in recs if r.get("type") == "permission-mode")
 
-    gen1 = ResumeOrchestrator(cwd=cwd).execute(ResumeOrchestrator(cwd=cwd).plan("forked", 0), lambda _t: True)
+    gen1 = ResumeOrchestrator(cwd=cwd).execute(
+        ResumeOrchestrator(cwd=cwd).plan("forked", 0), lambda _t: True
+    )
     n1, pm1 = _counts(gen1.provider_session_path)
-    gen2 = ResumeOrchestrator(cwd=cwd).execute(ResumeOrchestrator(cwd=cwd).plan(gen1.new_session_id, 0), lambda _t: True)
+    gen2 = ResumeOrchestrator(cwd=cwd).execute(
+        ResumeOrchestrator(cwd=cwd).plan(gen1.new_session_id, 0), lambda _t: True
+    )
     n2, pm2 = _counts(gen2.provider_session_path)
 
     # A fork-prefix resume never carries a synthetic permission-mode, and that holds
@@ -2527,12 +3174,32 @@ def test_codex_rewrite_preserves_session_meta_chain():
     from checkpoint_plugin.resume import _rewrite_codex_trajectory
 
     trajectory = (
-        json.dumps({"type": "session_meta", "payload": {"id": "SUB", "forked_from_id": "PARENT", "cwd": "/old"}}) + "\n"
-        + json.dumps({"type": "session_meta", "payload": {"id": "PARENT", "forked_from_id": "GRAND", "cwd": "/old"}}) + "\n"
-        + json.dumps({"type": "session_meta", "payload": {"id": "GRAND", "cwd": "/old"}}) + "\n"
-        + json.dumps({"type": "turn_context", "payload": {"turn_id": "t-1", "model": "m"}}) + "\n"
+        json.dumps(
+            {
+                "type": "session_meta",
+                "payload": {"id": "SUB", "forked_from_id": "PARENT", "cwd": "/old"},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "session_meta",
+                "payload": {"id": "PARENT", "forked_from_id": "GRAND", "cwd": "/old"},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {"type": "session_meta", "payload": {"id": "GRAND", "cwd": "/old"}}
+        )
+        + "\n"
+        + json.dumps(
+            {"type": "turn_context", "payload": {"turn_id": "t-1", "model": "m"}}
+        )
+        + "\n"
     ).encode("utf-8")
-    out = _rewrite_codex_trajectory(trajectory, "NEW", Path("/new"), None, None, None, None)
+    out = _rewrite_codex_trajectory(
+        trajectory, "NEW", Path("/new"), None, None, None, None
+    )
     records = [json.loads(line) for line in out.splitlines()]
     metas = [r for r in records if r.get("type") == "session_meta"]
     # Fresh head + the three inlined source metas.
@@ -2556,26 +3223,67 @@ def test_rewrite_preserves_source_key_order_not_alphabetical():
     be alphabetized. sort_keys re-serialization was a 100%-vs-0% fingerprint
     distinguishing every resumed record from a native one."""
     from collections import OrderedDict
-    from checkpoint_plugin.resume import _rewrite_claude_trajectory, _rewrite_codex_trajectory
+    from checkpoint_plugin.resume import (
+        _rewrite_claude_trajectory,
+        _rewrite_codex_trajectory,
+    )
 
     def _key_order(line: bytes) -> list[str]:
         return list(json.loads(line, object_pairs_hook=OrderedDict).keys())
 
     # Claude: a deliberately non-alphabetical native key order must round-trip as-is.
     claude_src = (
-        json.dumps({"type": "user", "sessionId": "old", "uuid": "u1", "parentUuid": None, "promptId": "p1", "cwd": "/old", "message": {"role": "user", "content": "hi"}}) + "\n"
+        json.dumps(
+            {
+                "type": "user",
+                "sessionId": "old",
+                "uuid": "u1",
+                "parentUuid": None,
+                "promptId": "p1",
+                "cwd": "/old",
+                "message": {"role": "user", "content": "hi"},
+            }
+        )
+        + "\n"
     ).encode("utf-8")
-    claude_out = _rewrite_claude_trajectory(claude_src, "NEW", Path("/new"), "m", None, None)
+    claude_out = _rewrite_claude_trajectory(
+        claude_src, "NEW", Path("/new"), "m", None, None
+    )
     claude_keys = _key_order(claude_out.splitlines()[0])
-    assert claude_keys == ["type", "sessionId", "uuid", "parentUuid", "promptId", "cwd", "message"]
+    assert claude_keys == [
+        "type",
+        "sessionId",
+        "uuid",
+        "parentUuid",
+        "promptId",
+        "cwd",
+        "message",
+    ]
     assert claude_keys != sorted(claude_keys), "claude record must NOT be alphabetized"
 
     # Codex: synthetic + rewritten meta keeps native payload order (id, timestamp, cwd, ...).
     codex_src = (
-        json.dumps({"timestamp": "t", "type": "session_meta", "payload": {"id": "old", "timestamp": "t", "cwd": "/old", "originator": "X"}}) + "\n"
-        + json.dumps({"type": "turn_context", "payload": {"turn_id": "t-1", "model": "m"}}) + "\n"
+        json.dumps(
+            {
+                "timestamp": "t",
+                "type": "session_meta",
+                "payload": {
+                    "id": "old",
+                    "timestamp": "t",
+                    "cwd": "/old",
+                    "originator": "X",
+                },
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {"type": "turn_context", "payload": {"turn_id": "t-1", "model": "m"}}
+        )
+        + "\n"
     ).encode("utf-8")
-    codex_out = _rewrite_codex_trajectory(codex_src, "NEW", Path("/new"), "m", None, None, None)
+    codex_out = _rewrite_codex_trajectory(
+        codex_src, "NEW", Path("/new"), "m", None, None, None
+    )
     codex_top = _key_order(codex_out.splitlines()[0])
     assert codex_top == ["timestamp", "type", "payload"]
     assert codex_top != sorted(codex_top), "codex meta must NOT be alphabetized"
@@ -2596,7 +3304,6 @@ def test_rewrite_preserves_source_key_order_not_alphabetical():
             assert isinstance(json.loads(line), dict)
 
 
-
 def test_codex_rewrite_keeps_full_inlined_meta_chain_with_original_ids():
     """F2: native codex resume keeps the source's FULL inlined meta history verbatim
     (each meta keeps its ORIGINAL id), and prepends a single fresh head meta. This
@@ -2610,20 +3317,50 @@ def test_codex_rewrite_keeps_full_inlined_meta_chain_with_original_ids():
     HEAD, ANCESTOR = "019e648f", "019e644b"
     trajectory = (
         # head/fork meta — carries forked_from_id (it IS a fork of the ancestor)
-        json.dumps({"type": "session_meta", "payload": {"id": HEAD, "forked_from_id": ANCESTOR, "cwd": "/old"}}) + "\n"
+        json.dumps(
+            {
+                "type": "session_meta",
+                "payload": {"id": HEAD, "forked_from_id": ANCESTOR, "cwd": "/old"},
+            }
+        )
+        + "\n"
         # leading inlined ancestor meta — id != head, forked_from_id=None
-        + json.dumps({"type": "session_meta", "payload": {"id": ANCESTOR, "cwd": "/old"}}) + "\n"
-        + json.dumps({"type": "turn_context", "payload": {"turn_id": "t-1", "model": "m"}}) + "\n"
-        + json.dumps({"type": "response_item", "payload": {"type": "message"}}) + "\n"
+        + json.dumps(
+            {"type": "session_meta", "payload": {"id": ANCESTOR, "cwd": "/old"}}
+        )
+        + "\n"
+        + json.dumps(
+            {"type": "turn_context", "payload": {"turn_id": "t-1", "model": "m"}}
+        )
+        + "\n"
+        + json.dumps({"type": "response_item", "payload": {"type": "message"}})
+        + "\n"
         # MID-STREAM inlined ancestor meta — id != head
-        + json.dumps({"type": "session_meta", "payload": {"id": ANCESTOR, "cwd": "/old"}}) + "\n"
-        + json.dumps({"type": "turn_context", "payload": {"turn_id": "t-2", "model": "m"}}) + "\n"
+        + json.dumps(
+            {"type": "session_meta", "payload": {"id": ANCESTOR, "cwd": "/old"}}
+        )
+        + "\n"
+        + json.dumps(
+            {"type": "turn_context", "payload": {"turn_id": "t-2", "model": "m"}}
+        )
+        + "\n"
         # MID-STREAM same-head-id meta — this fork's own restart marker
-        + json.dumps({"type": "session_meta", "payload": {"id": HEAD, "forked_from_id": ANCESTOR, "cwd": "/old"}}) + "\n"
-        + json.dumps({"type": "turn_context", "payload": {"turn_id": "t-3", "model": "m"}}) + "\n"
+        + json.dumps(
+            {
+                "type": "session_meta",
+                "payload": {"id": HEAD, "forked_from_id": ANCESTOR, "cwd": "/old"},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {"type": "turn_context", "payload": {"turn_id": "t-3", "model": "m"}}
+        )
+        + "\n"
     ).encode("utf-8")
 
-    out = _rewrite_codex_trajectory(trajectory, "NEW", Path("/new"), None, None, None, None)
+    out = _rewrite_codex_trajectory(
+        trajectory, "NEW", Path("/new"), None, None, None, None
+    )
     records = [json.loads(line) for line in out.splitlines()]
     metas = [r for r in records if r.get("type") == "session_meta"]
     # Fresh head (id=NEW) + all four inlined source metas preserved with original ids.
@@ -2635,9 +3372,10 @@ def test_codex_rewrite_keeps_full_inlined_meta_chain_with_original_ids():
     # cwd re-pinned on every meta; original ids otherwise untouched.
     assert all(m["payload"]["cwd"] == "/new" for m in metas)
     # All turns survive (no records dropped between metas).
-    turn_ids = {r["payload"].get("turn_id") for r in records if r.get("type") == "turn_context"}
+    turn_ids = {
+        r["payload"].get("turn_id") for r in records if r.get("type") == "turn_context"
+    }
     assert turn_ids == {"t-1", "t-2", "t-3"}
-
 
 
 def test_codex_rewrite_keeps_thread_rolled_back():
@@ -2648,11 +3386,21 @@ def test_codex_rewrite_keeps_thread_rolled_back():
     from checkpoint_plugin.resume import _rewrite_codex_trajectory
 
     trajectory = (
-        json.dumps({"type": "session_meta", "payload": {"id": "old", "cwd": "/old"}}) + "\n"
-        + json.dumps({"type": "event_msg", "payload": {"type": "thread_rolled_back", "num_turns": 1}}) + "\n"
-        + json.dumps({"type": "event_msg", "payload": {"type": "task_started"}}) + "\n"
+        json.dumps({"type": "session_meta", "payload": {"id": "old", "cwd": "/old"}})
+        + "\n"
+        + json.dumps(
+            {
+                "type": "event_msg",
+                "payload": {"type": "thread_rolled_back", "num_turns": 1},
+            }
+        )
+        + "\n"
+        + json.dumps({"type": "event_msg", "payload": {"type": "task_started"}})
+        + "\n"
     ).encode("utf-8")
-    out = _rewrite_codex_trajectory(trajectory, "NEW", Path("/new"), None, None, None, None)
+    out = _rewrite_codex_trajectory(
+        trajectory, "NEW", Path("/new"), None, None, None, None
+    )
     assert b"thread_rolled_back" in out
     assert b"task_started" in out
 
@@ -2680,27 +3428,46 @@ def test_codex_rewrite_preserves_structured_source_and_provenance():
             }
         )
         + "\n"
-        + json.dumps({"type": "turn_context", "payload": {"turn_id": "t-1", "model": "m"}}) + "\n"
+        + json.dumps(
+            {"type": "turn_context", "payload": {"turn_id": "t-1", "model": "m"}}
+        )
+        + "\n"
     ).encode("utf-8")
-    out = _rewrite_codex_trajectory(trajectory, "NEW", Path("/new"), None, None, None, None)
-    metas = [json.loads(l)["payload"] for l in out.splitlines() if json.loads(l).get("type") == "session_meta"]
+    out = _rewrite_codex_trajectory(
+        trajectory, "NEW", Path("/new"), None, None, None, None
+    )
+    metas = [
+        json.loads(line)["payload"]
+        for line in out.splitlines()
+        if json.loads(line).get("type") == "session_meta"
+    ]
     # F2: the structured-source meta is kept as the INLINED source meta (records[1]),
     # under its original id; the fresh head (records[0]) is the new session.
     assert metas[0]["id"] == "NEW"
     inlined = metas[1]
     assert inlined["id"] == "old"
-    assert inlined["source"] == sub_source, "structured dict source must survive, not coerced to 'vscode'"
+    assert inlined["source"] == sub_source, (
+        "structured dict source must survive, not coerced to 'vscode'"
+    )
     assert inlined["thread_source"] == "subagent"
     assert inlined["agent_nickname"] == "Tesla"
     assert inlined["originator"] == "codex_cli_rs"
 
     # (b) meta missing provenance fields → defaults applied (on both head + inlined).
     bare = (
-        json.dumps({"type": "session_meta", "payload": {"id": "old", "cwd": "/old"}}) + "\n"
-        + json.dumps({"type": "turn_context", "payload": {"turn_id": "t-1", "model": "m"}}) + "\n"
+        json.dumps({"type": "session_meta", "payload": {"id": "old", "cwd": "/old"}})
+        + "\n"
+        + json.dumps(
+            {"type": "turn_context", "payload": {"turn_id": "t-1", "model": "m"}}
+        )
+        + "\n"
     ).encode("utf-8")
     out2 = _rewrite_codex_trajectory(bare, "NEW", Path("/new"), None, None, None, None)
-    meta2 = next(json.loads(l)["payload"] for l in out2.splitlines() if json.loads(l).get("type") == "session_meta")
+    meta2 = next(
+        json.loads(line)["payload"]
+        for line in out2.splitlines()
+        if json.loads(line).get("type") == "session_meta"
+    )
     assert meta2["source"] == "vscode"
     assert meta2["originator"] == "Codex Desktop"
     assert meta2["thread_source"] == "user"
@@ -2776,8 +3543,9 @@ def test_codex_session_index_thread_name_never_null(tmp_path, monkeypatch):
     # No previews anywhere → constant fallback, never null/empty.
     store3 = CheckpointStore(tmp_path / "sess3")
     store3.write_manifest(_mk(0, ""))
-    assert _derive_session_title(store3, SimpleNamespace(turn_id=0)) == "Resumed session"
-
+    assert (
+        _derive_session_title(store3, SimpleNamespace(turn_id=0)) == "Resumed session"
+    )
 
 
 def test_render_diff_shows_effort_change():
@@ -2799,13 +3567,39 @@ def test_claude_rewrite_drops_dangling_trailing_pointer():
     from checkpoint_plugin.resume import _rewrite_claude_trajectory
 
     trajectory = (
-        json.dumps({"type": "user", "uuid": "u-1", "sessionId": "old", "message": {"role": "user", "content": "hi"}}) + "\n"
-        + json.dumps({"type": "assistant", "uuid": "a-1", "parentUuid": "u-1", "sessionId": "old", "message": {"role": "assistant", "content": "yo"}}) + "\n"
-        + json.dumps({"type": "file-history-snapshot", "messageId": "FORWARD-MISSING", "snapshot": {}}) + "\n"
+        json.dumps(
+            {
+                "type": "user",
+                "uuid": "u-1",
+                "sessionId": "old",
+                "message": {"role": "user", "content": "hi"},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "assistant",
+                "uuid": "a-1",
+                "parentUuid": "u-1",
+                "sessionId": "old",
+                "message": {"role": "assistant", "content": "yo"},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "file-history-snapshot",
+                "messageId": "FORWARD-MISSING",
+                "snapshot": {},
+            }
+        )
+        + "\n"
     ).encode("utf-8")
     out = _rewrite_claude_trajectory(trajectory, "NEW", Path("/new"), None, None, None)
     records = [json.loads(line) for line in out.splitlines()]
-    assert all(r.get("type") != "file-history-snapshot" for r in records), "dangling snapshot must be dropped"
+    assert all(r.get("type") != "file-history-snapshot" for r in records), (
+        "dangling snapshot must be dropped"
+    )
     # The real message records survive and are remapped.
     assert any(r.get("type") == "assistant" for r in records)
 
@@ -2855,9 +3649,33 @@ def test_parent_resume_rewrites_carried_subagent_sessionid(tmp_path, monkeypatch
     transcript.write_text(
         "\n".join(
             [
-                json.dumps({"type": "permission-mode", "sessionId": "old", "permissionMode": "default"}),
-                json.dumps({"type": "user", "sessionId": "old", "uuid": "u-1", "parentUuid": None, "cwd": "/old", "message": {"role": "user", "content": "hi"}}),
-                json.dumps({"type": "assistant", "sessionId": "old", "uuid": "a-1", "parentUuid": "u-1", "cwd": "/old", "message": {"role": "assistant", "content": []}}),
+                json.dumps(
+                    {
+                        "type": "permission-mode",
+                        "sessionId": "old",
+                        "permissionMode": "default",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "user",
+                        "sessionId": "old",
+                        "uuid": "u-1",
+                        "parentUuid": None,
+                        "cwd": "/old",
+                        "message": {"role": "user", "content": "hi"},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "sessionId": "old",
+                        "uuid": "a-1",
+                        "parentUuid": "u-1",
+                        "cwd": "/old",
+                        "message": {"role": "assistant", "content": []},
+                    }
+                ),
             ]
         )
         + "\n",
@@ -2869,10 +3687,29 @@ def test_parent_resume_rewrites_carried_subagent_sessionid(tmp_path, monkeypatch
     sub_dir.mkdir(parents=True)
     sub_file = sub_dir / "agent-abc.jsonl"
     sub_records = [
-        {"type": "user", "sessionId": "s1", "uuid": "sub-u1", "parentUuid": None, "cwd": "/old", "isSidechain": True, "sourceToolAssistantUUID": "sub-u1", "message": {"role": "user", "content": "go"}},
-        {"type": "assistant", "sessionId": "s1", "uuid": "sub-a1", "parentUuid": "sub-u1", "cwd": "/old", "isSidechain": True, "message": {"role": "assistant", "content": []}},
+        {
+            "type": "user",
+            "sessionId": "s1",
+            "uuid": "sub-u1",
+            "parentUuid": None,
+            "cwd": "/old",
+            "isSidechain": True,
+            "sourceToolAssistantUUID": "sub-u1",
+            "message": {"role": "user", "content": "go"},
+        },
+        {
+            "type": "assistant",
+            "sessionId": "s1",
+            "uuid": "sub-a1",
+            "parentUuid": "sub-u1",
+            "cwd": "/old",
+            "isSidechain": True,
+            "message": {"role": "assistant", "content": []},
+        },
     ]
-    sub_file.write_text("\n".join(json.dumps(r) for r in sub_records) + "\n", encoding="utf-8")
+    sub_file.write_text(
+        "\n".join(json.dumps(r) for r in sub_records) + "\n", encoding="utf-8"
+    )
 
     (cwd / "file.txt").write_text("v1", encoding="utf-8")
     _isolate_provider_env(monkeypatch)
@@ -2887,13 +3724,26 @@ def test_parent_resume_rewrites_carried_subagent_sessionid(tmp_path, monkeypatch
         TrajectoryReference("claude", str(transcript), 0, transcript.stat().st_size, 3),
     )
 
-    report = ResumeOrchestrator(cwd=cwd).execute(ResumeOrchestrator(cwd=cwd).plan("s1", 0), lambda _text: True)
+    report = ResumeOrchestrator(cwd=cwd).execute(
+        ResumeOrchestrator(cwd=cwd).plan("s1", 0), lambda _text: True
+    )
 
     assert report.env_state_dir is not None
     runtime_claude_home = Path(report.env_state_dir) / "claude"
-    carried = runtime_claude_home / "projects" / project / report.new_session_id / "subagents" / "agent-abc.jsonl"
+    carried = (
+        runtime_claude_home
+        / "projects"
+        / project
+        / report.new_session_id
+        / "subagents"
+        / "agent-abc.jsonl"
+    )
     assert carried.exists()
-    out = [json.loads(line) for line in carried.read_text(encoding="utf-8").splitlines() if line.strip()]
+    out = [
+        json.loads(line)
+        for line in carried.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
     assert {r["sessionId"] for r in out} == {report.new_session_id}
     # Internal uuid/parentUuid chain is preserved verbatim (self-contained sidechain).
     assert [r["uuid"] for r in out] == ["sub-u1", "sub-a1"]
@@ -2918,19 +3768,24 @@ def test_realign_handles_interior_record_drop(tmp_path):
     # Rewritten file: leading session_meta (keyless), then 3 turns. Turn 1 has only
     # ONE content record (a record was dropped vs the pre-rewrite count of 2).
     records = [
-        {"type": "session_meta", "payload": {"id": "S"}},                      # keyless -> turn 0
-        {"type": "turn_context", "payload": {"turn_id": "t0"}},                # turn 0
-        {"type": "response_item", "payload": {"turn_id": "t0", "n": 1}},       # turn 0
-        {"type": "turn_context", "payload": {"turn_id": "t1"}},                # turn 1
-        {"type": "response_item", "payload": {"turn_id": "t1", "n": 1}},       # turn 1 (the 2nd was dropped)
-        {"type": "turn_context", "payload": {"turn_id": "t2"}},                # turn 2
-        {"type": "response_item", "payload": {"turn_id": "t2", "n": 1}},       # turn 2
+        {"type": "session_meta", "payload": {"id": "S"}},  # keyless -> turn 0
+        {"type": "turn_context", "payload": {"turn_id": "t0"}},  # turn 0
+        {"type": "response_item", "payload": {"turn_id": "t0", "n": 1}},  # turn 0
+        {"type": "turn_context", "payload": {"turn_id": "t1"}},  # turn 1
+        {
+            "type": "response_item",
+            "payload": {"turn_id": "t1", "n": 1},
+        },  # turn 1 (the 2nd was dropped)
+        {"type": "turn_context", "payload": {"turn_id": "t2"}},  # turn 2
+        {"type": "response_item", "payload": {"turn_id": "t2", "n": 1}},  # turn 2
     ]
     f = _write_jsonl(tmp_path / "rollout.jsonl", records)
     # Pre-rewrite spans had turn1 count=3 (stale); realign must fix it from keys.
     spans = {0: (0, 0, 3), 1: (0, 0, 3), 2: (0, 0, 2)}
     turn_keys = {0: "t0", 1: "t1", 2: "t2"}
-    out = _realign_spans_to_provider_file(f, spans, provider_name="codex", turn_keys=turn_keys)
+    out = _realign_spans_to_provider_file(
+        f, spans, provider_name="codex", turn_keys=turn_keys
+    )
 
     data = f.read_bytes()
     # Gap-free, line-aligned, full coverage.
@@ -2964,12 +3819,15 @@ def test_realign_attaches_midstream_meta_both_orderings(tmp_path):
         {"type": "turn_context", "payload": {"turn_id": "t0"}},
         {"type": "response_item", "payload": {"turn_id": "t0"}},
         {"type": "turn_context", "payload": {"turn_id": "t1"}},  # opens turn 1
-        {"type": "session_meta", "payload": {"id": "S"}},        # keyless -> turn 1
+        {"type": "session_meta", "payload": {"id": "S"}},  # keyless -> turn 1
         {"type": "response_item", "payload": {"turn_id": "t1"}},
     ]
     fa = _write_jsonl(tmp_path / "a.jsonl", recs_a)
     out_a = _realign_spans_to_provider_file(
-        fa, {0: (0, 0, 2), 1: (0, 0, 3)}, provider_name="codex", turn_keys={0: "t0", 1: "t1"}
+        fa,
+        {0: (0, 0, 2), 1: (0, 0, 3)},
+        provider_name="codex",
+        turn_keys={0: "t0", 1: "t1"},
     )
     assert out_a[0][2] == 2  # turn 0: its 2 records only
     assert out_a[1][2] == 3  # turn 1: opens at t1, absorbs the keyless meta
@@ -2978,13 +3836,16 @@ def test_realign_attaches_midstream_meta_both_orderings(tmp_path):
     recs_b = [
         {"type": "turn_context", "payload": {"turn_id": "t0"}},
         {"type": "response_item", "payload": {"turn_id": "t0"}},
-        {"type": "session_meta", "payload": {"id": "S"}},        # keyless -> still turn 0
+        {"type": "session_meta", "payload": {"id": "S"}},  # keyless -> still turn 0
         {"type": "turn_context", "payload": {"turn_id": "t1"}},  # opens turn 1 here
         {"type": "response_item", "payload": {"turn_id": "t1"}},
     ]
     fb = _write_jsonl(tmp_path / "b.jsonl", recs_b)
     out_b = _realign_spans_to_provider_file(
-        fb, {0: (0, 0, 2), 1: (0, 0, 3)}, provider_name="codex", turn_keys={0: "t0", 1: "t1"}
+        fb,
+        {0: (0, 0, 2), 1: (0, 0, 3)},
+        provider_name="codex",
+        turn_keys={0: "t0", 1: "t1"},
     )
     assert out_b[0][2] == 3  # turn 0 keeps the keyless meta (most-recent-keyed = t0)
     assert out_b[1][2] == 2  # turn 1: just its 2 keyed records
@@ -3009,8 +3870,12 @@ def test_parent_turn_for_subagent_picks_spawning_turn(tmp_path, monkeypatch):
 
     def _mk(turn_id, ts, ref=None):
         return CheckpointManifest(
-            turn_id=turn_id, session_id="parent", created_ts=ts,
-            env_ref="e", fs_ref="f", trajectory_ref=ref,
+            turn_id=turn_id,
+            session_id="parent",
+            created_ts=ts,
+            env_ref="e",
+            fs_ref="f",
+            trajectory_ref=ref,
         )
 
     # Three turns at increasing timestamps; no agent_id reference in any slice.
@@ -3020,36 +3885,72 @@ def test_parent_turn_for_subagent_picks_spawning_turn(tmp_path, monkeypatch):
 
     # (b) subagent started at 00:00:30 — it ran during turn 1 (the earliest turn
     # that ended at/after start), NOT turn 0 (which ended before it started).
-    turn = _parent_turn_for_subagent(home, "parent", None, {"start_ts": "2026-01-01T00:00:30Z"})
-    assert turn == 1, "corrected fallback must pick the earliest turn ending >= start_ts"
+    turn = _parent_turn_for_subagent(
+        home, "parent", None, {"start_ts": "2026-01-01T00:00:30Z"}
+    )
+    assert turn == 1, (
+        "corrected fallback must pick the earliest turn ending >= start_ts"
+    )
 
     # A start before all turns -> earliest turn.
-    assert _parent_turn_for_subagent(home, "parent", None, {"start_ts": "2025-12-31T00:00:00Z"}) == 0
+    assert (
+        _parent_turn_for_subagent(
+            home, "parent", None, {"start_ts": "2025-12-31T00:00:00Z"}
+        )
+        == 0
+    )
     # A start after all turns -> latest turn (nothing ended at/after it).
-    assert _parent_turn_for_subagent(home, "parent", None, {"start_ts": "2027-01-01T00:00:00Z"}) == 2
+    assert (
+        _parent_turn_for_subagent(
+            home, "parent", None, {"start_ts": "2027-01-01T00:00:00Z"}
+        )
+        == 2
+    )
 
 
 def test_no_synthetic_permission_mode_for_fork_resume():
     """P6-14: a fork-style resume (inherited prefix present) must NOT get a synthetic
     lone permission-mode record; a normal resume still does. Also: off-enum modes
     coerce to 'default'."""
-    from checkpoint_plugin.resume import _rewrite_claude_trajectory, _normalize_permission_mode
+    from checkpoint_plugin.resume import (
+        _rewrite_claude_trajectory,
+        _normalize_permission_mode,
+    )
 
     traj = (
-        json.dumps({"type": "user", "uuid": "u1", "parentUuid": None, "promptId": "p", "message": {"role": "user", "content": "hi"}}) + "\n"
-        + json.dumps({"type": "assistant", "uuid": "a1", "parentUuid": "u1", "message": {"role": "assistant", "content": []}}) + "\n"
+        json.dumps(
+            {
+                "type": "user",
+                "uuid": "u1",
+                "parentUuid": None,
+                "promptId": "p",
+                "message": {"role": "user", "content": "hi"},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "assistant",
+                "uuid": "a1",
+                "parentUuid": "u1",
+                "message": {"role": "assistant", "content": []},
+            }
+        )
+        + "\n"
     ).encode("utf-8")
 
     # Normal resume (no inherited prefix) -> synthetic permission-mode injected.
-    normal = _rewrite_claude_trajectory(traj, "NEW", Path("/new"), None, "acceptEdits", None)
-    normal_recs = [json.loads(l) for l in normal.splitlines()]
+    normal = _rewrite_claude_trajectory(
+        traj, "NEW", Path("/new"), None, "acceptEdits", None
+    )
+    normal_recs = [json.loads(line) for line in normal.splitlines()]
     assert any(r.get("type") == "permission-mode" for r in normal_recs)
 
     # Fork-style resume (inherited prefix) -> NO synthetic permission-mode.
     forked = _rewrite_claude_trajectory(
         traj, "NEW", Path("/new"), None, "acceptEdits", None, has_inherited_prefix=True
     )
-    forked_recs = [json.loads(l) for l in forked.splitlines()]
+    forked_recs = [json.loads(line) for line in forked.splitlines()]
     assert not any(r.get("type") == "permission-mode" for r in forked_recs)
 
     # Off-enum mode coerces to default.
@@ -3068,20 +3969,54 @@ def test_claude_resume_stamps_forkedfrom_resolving_into_parent():
     from checkpoint_plugin.resume import _rewrite_claude_trajectory
 
     traj = (
-        json.dumps({"type": "user", "uuid": "src-u", "parentUuid": None, "promptId": "p0", "message": {"role": "user", "content": "first"}}) + "\n"
-        + json.dumps({"type": "assistant", "uuid": "src-a", "parentUuid": "src-u", "message": {"role": "assistant", "content": "resp"}}) + "\n"
-        + json.dumps({"type": "user", "uuid": "src-u2", "parentUuid": "src-a", "promptId": "P", "message": {"role": "user", "content": "second"}}) + "\n"
+        json.dumps(
+            {
+                "type": "user",
+                "uuid": "src-u",
+                "parentUuid": None,
+                "promptId": "p0",
+                "message": {"role": "user", "content": "first"},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "assistant",
+                "uuid": "src-a",
+                "parentUuid": "src-u",
+                "message": {"role": "assistant", "content": "resp"},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "user",
+                "uuid": "src-u2",
+                "parentUuid": "src-a",
+                "promptId": "P",
+                "message": {"role": "user", "content": "second"},
+            }
+        )
+        + "\n"
     ).encode("utf-8")
     source_uuids = {"src-u", "src-a", "src-u2"}
 
     out = _rewrite_claude_trajectory(
-        traj, "NEW", Path("/new"), None, None, None, source_session_id="SOURCE",
+        traj,
+        "NEW",
+        Path("/new"),
+        None,
+        None,
+        None,
+        source_session_id="SOURCE",
     )
-    recs = [json.loads(l) for l in out.splitlines()]
+    recs = [json.loads(line) for line in out.splitlines()]
     # Every uuid-bearing record is fork-stamped, uuid preserved byte-identical.
     assert len(recs) == 3
     for r in recs:
-        assert r["uuid"] in source_uuids, "inherited uuid must be preserved byte-identical"
+        assert r["uuid"] in source_uuids, (
+            "inherited uuid must be preserved byte-identical"
+        )
         assert r["forkedFrom"]["sessionId"] == "SOURCE"
         # messageUuid == own preserved uuid → resolves INTO the parent session.
         assert r["forkedFrom"]["messageUuid"] == r["uuid"]
@@ -3100,16 +4035,41 @@ def test_claude_resume_of_resume_preserves_existing_forkedfrom():
 
     # An inherited record already stamped (gen1): forkedFrom.messageUuid == own uuid.
     traj = (
-        json.dumps({"type": "user", "uuid": "g1-u", "parentUuid": None, "promptId": "old-p", "forkedFrom": {"sessionId": "ANC", "messageUuid": "g1-u"}, "message": {"role": "user", "content": "inh"}}) + "\n"
-        + json.dumps({"type": "user", "uuid": "cap-u", "parentUuid": "g1-u", "promptId": "P", "message": {"role": "user", "content": "cap"}}) + "\n"
+        json.dumps(
+            {
+                "type": "user",
+                "uuid": "g1-u",
+                "parentUuid": None,
+                "promptId": "old-p",
+                "forkedFrom": {"sessionId": "ANC", "messageUuid": "g1-u"},
+                "message": {"role": "user", "content": "inh"},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "user",
+                "uuid": "cap-u",
+                "parentUuid": "g1-u",
+                "promptId": "P",
+                "message": {"role": "user", "content": "cap"},
+            }
+        )
+        + "\n"
     ).encode("utf-8")
 
     out = _rewrite_claude_trajectory(
-        traj, "NEW", Path("/new"), None, None, None,
-        has_inherited_prefix=True, source_session_id="ANC",
+        traj,
+        "NEW",
+        Path("/new"),
+        None,
+        None,
+        None,
+        has_inherited_prefix=True,
+        source_session_id="ANC",
         inherited_record_count=1,
     )
-    recs = [json.loads(l) for l in out.splitlines()]
+    recs = [json.loads(line) for line in out.splitlines()]
     inh = next(r for r in recs if r["message"]["content"] == "inh")
     # uuid preserved byte-identical; pre-existing forkedFrom kept (not overwritten).
     assert inh["uuid"] == "g1-u"
@@ -3124,13 +4084,38 @@ def test_claude_resume_repins_version_uniform_to_latest():
     """P7-6: a resumed transcript carries one uniform CLI version like a native
     session. An inherited prefix written by an older client is re-pinned to the
     most recent version present, instead of mixing versions."""
-    from checkpoint_plugin.resume import _rewrite_claude_trajectory, _latest_claude_version
+    from checkpoint_plugin.resume import (
+        _rewrite_claude_trajectory,
+        _latest_claude_version,
+    )
 
     traj = (
-        json.dumps({"type": "user", "uuid": "u1", "parentUuid": None, "promptId": "p1", "version": "2.1.150", "message": {"role": "user", "content": "inherited"}}) + "\n"
-        + json.dumps({"type": "assistant", "uuid": "a1", "parentUuid": "u1", "version": "2.1.156", "message": {"role": "assistant", "content": "resp"}}) + "\n"
+        json.dumps(
+            {
+                "type": "user",
+                "uuid": "u1",
+                "parentUuid": None,
+                "promptId": "p1",
+                "version": "2.1.150",
+                "message": {"role": "user", "content": "inherited"},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "assistant",
+                "uuid": "a1",
+                "parentUuid": "u1",
+                "version": "2.1.156",
+                "message": {"role": "assistant", "content": "resp"},
+            }
+        )
+        + "\n"
     ).encode("utf-8")
-    assert _latest_claude_version([{"version": "2.1.150"}, {"version": "2.1.156"}]) == "2.1.156"
+    assert (
+        _latest_claude_version([{"version": "2.1.150"}, {"version": "2.1.156"}])
+        == "2.1.156"
+    )
     assert _latest_claude_version([{"type": "x"}]) is None
 
     out = _rewrite_claude_trajectory(traj, "NEW", Path("/new"), None, None, None)
@@ -3146,11 +4131,30 @@ def test_claude_resume_is_fork_shaped_even_from_startup():
     from checkpoint_plugin.resume import _rewrite_claude_trajectory
 
     traj = (
-        json.dumps({"type": "user", "uuid": "u1", "parentUuid": None, "promptId": "P", "message": {"role": "user", "content": "hi"}}) + "\n"
-        + json.dumps({"type": "assistant", "uuid": "a1", "parentUuid": "u1", "message": {"role": "assistant", "content": []}}) + "\n"
+        json.dumps(
+            {
+                "type": "user",
+                "uuid": "u1",
+                "parentUuid": None,
+                "promptId": "P",
+                "message": {"role": "user", "content": "hi"},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "assistant",
+                "uuid": "a1",
+                "parentUuid": "u1",
+                "message": {"role": "assistant", "content": []},
+            }
+        )
+        + "\n"
     ).encode("utf-8")
-    out = _rewrite_claude_trajectory(traj, "NEW", Path("/new"), None, "acceptEdits", None, source_session_id="SOURCE")
-    recs = [json.loads(l) for l in out.splitlines()]
+    out = _rewrite_claude_trajectory(
+        traj, "NEW", Path("/new"), None, "acceptEdits", None, source_session_id="SOURCE"
+    )
+    recs = [json.loads(line) for line in out.splitlines()]
     # Fork-shaped: forkedFrom on every record, uuids preserved, no synthetic mode rec.
     assert all(r["forkedFrom"]["sessionId"] == "SOURCE" for r in recs)
     assert {r["uuid"] for r in recs} == {"u1", "a1"}
@@ -3167,21 +4171,61 @@ def test_claude_fork_resume_linearizes_branched_inherited_region():
 
     # Source with a BRANCH: both `a2` (idx3) and `u2` (idx4) point at `a1` (idx2).
     traj = (
-        json.dumps({"type": "user", "uuid": "u1", "parentUuid": None, "promptId": "P1", "message": {"role": "user", "content": "one"}}) + "\n"
-        + json.dumps({"type": "assistant", "uuid": "a1", "parentUuid": "u1", "message": {"role": "assistant", "content": []}}) + "\n"
-        + json.dumps({"type": "assistant", "uuid": "a2", "parentUuid": "a1", "message": {"role": "assistant", "content": []}}) + "\n"
-        + json.dumps({"type": "user", "uuid": "u2", "parentUuid": "a1", "promptId": "P2", "message": {"role": "user", "content": "two"}}) + "\n"
+        json.dumps(
+            {
+                "type": "user",
+                "uuid": "u1",
+                "parentUuid": None,
+                "promptId": "P1",
+                "message": {"role": "user", "content": "one"},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "assistant",
+                "uuid": "a1",
+                "parentUuid": "u1",
+                "message": {"role": "assistant", "content": []},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "assistant",
+                "uuid": "a2",
+                "parentUuid": "a1",
+                "message": {"role": "assistant", "content": []},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "user",
+                "uuid": "u2",
+                "parentUuid": "a1",
+                "promptId": "P2",
+                "message": {"role": "user", "content": "two"},
+            }
+        )
+        + "\n"
     ).encode("utf-8")
-    out = _rewrite_claude_trajectory(traj, "NEW", Path("/new"), None, None, None, source_session_id="SRC")
-    recs = [json.loads(l) for l in out.splitlines()]
+    out = _rewrite_claude_trajectory(
+        traj, "NEW", Path("/new"), None, None, None, source_session_id="SRC"
+    )
+    recs = [json.loads(line) for line in out.splitlines()]
     by_uuid = {r["uuid"]: r for r in recs}
     # The branching record u2 is re-pointed to the PREVIOUS emitted record (a2),
     # collapsing the branch into a single spine: u1 -> a1 -> a2 -> u2.
     assert by_uuid["a1"]["parentUuid"] == "u1"
     assert by_uuid["a2"]["parentUuid"] == "a1"
-    assert by_uuid["u2"]["parentUuid"] == "a2", "branch must linearize to previous record"
+    assert by_uuid["u2"]["parentUuid"] == "a2", (
+        "branch must linearize to previous record"
+    )
     # Exactly one leaf (u2 is unreferenced; everything else is a parent).
-    referenced = {r.get("parentUuid") for r in recs if isinstance(r.get("parentUuid"), str)}
+    referenced = {
+        r.get("parentUuid") for r in recs if isinstance(r.get("parentUuid"), str)
+    }
     leaves = [u for u in by_uuid if u not in referenced]
     assert leaves == ["u2"], f"expected single leaf, got {leaves}"
 
@@ -3193,13 +4237,43 @@ def test_claude_linearization_chains_through_all_content_types():
     from checkpoint_plugin.resume import _rewrite_claude_trajectory
 
     traj = (
-        json.dumps({"type": "user", "uuid": "u1", "parentUuid": None, "promptId": "P", "message": {"role": "user", "content": "hi"}}) + "\n"
-        + json.dumps({"type": "assistant", "uuid": "a1", "parentUuid": "u1", "message": {"role": "assistant", "content": []}}) + "\n"
-        + json.dumps({"type": "system", "uuid": "s1", "parentUuid": "a1", "content": "note"}) + "\n"
-        + json.dumps({"type": "assistant", "uuid": "a2", "parentUuid": "wrong-branch", "message": {"role": "assistant", "content": []}}) + "\n"
+        json.dumps(
+            {
+                "type": "user",
+                "uuid": "u1",
+                "parentUuid": None,
+                "promptId": "P",
+                "message": {"role": "user", "content": "hi"},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "assistant",
+                "uuid": "a1",
+                "parentUuid": "u1",
+                "message": {"role": "assistant", "content": []},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {"type": "system", "uuid": "s1", "parentUuid": "a1", "content": "note"}
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "assistant",
+                "uuid": "a2",
+                "parentUuid": "wrong-branch",
+                "message": {"role": "assistant", "content": []},
+            }
+        )
+        + "\n"
     ).encode("utf-8")
-    out = _rewrite_claude_trajectory(traj, "NEW", Path("/new"), None, None, None, source_session_id="SRC")
-    by_uuid = {r["uuid"]: r for r in (json.loads(l) for l in out.splitlines())}
+    out = _rewrite_claude_trajectory(
+        traj, "NEW", Path("/new"), None, None, None, source_session_id="SRC"
+    )
+    by_uuid = {r["uuid"]: r for r in (json.loads(line) for line in out.splitlines())}
     assert by_uuid["s1"]["parentUuid"] == "a1"
     # a2 chains to the previous emitted record (the system record), NOT the last assistant.
     assert by_uuid["a2"]["parentUuid"] == "s1"
@@ -3217,6 +4291,7 @@ def test_codex_resume_id_is_uuidv7_but_claude_is_uuid4(tmp_path, monkeypatch):
     assert _uuid.UUID(claude_id).version == 4, "claude resume id must be uuid4"
     # uuidv7 is time-ordered: a later-generated id sorts after an earlier one.
     import time
+
     first = _new_resume_session_id("codex")
     time.sleep(0.002)
     second = _new_resume_session_id("codex")
@@ -3232,17 +4307,37 @@ def test_codex_head_meta_native_key_order():
     from checkpoint_plugin.resume import _rewrite_codex_trajectory
 
     src_meta = {
-        "id": "old", "timestamp": "t", "cwd": "/old",
-        "originator": "Codex Desktop", "cli_version": "1.2.3", "source": "vscode",
-        "thread_source": "user", "model_provider": "prov",
-        "base_instructions": {"text": "x"}, "dynamic_tools": [],
+        "id": "old",
+        "timestamp": "t",
+        "cwd": "/old",
+        "originator": "Codex Desktop",
+        "cli_version": "1.2.3",
+        "source": "vscode",
+        "thread_source": "user",
+        "model_provider": "prov",
+        "base_instructions": {"text": "x"},
+        "dynamic_tools": [],
     }
-    traj = (json.dumps({"timestamp": "t", "type": "session_meta", "payload": src_meta}) + "\n").encode("utf-8")
-    out = _rewrite_codex_trajectory(traj, "NEW", Path("/new"), None, None, None, src_meta)
+    traj = (
+        json.dumps({"timestamp": "t", "type": "session_meta", "payload": src_meta})
+        + "\n"
+    ).encode("utf-8")
+    out = _rewrite_codex_trajectory(
+        traj, "NEW", Path("/new"), None, None, None, src_meta
+    )
     head = json.loads(out.splitlines()[0], object_pairs_hook=OrderedDict)
     assert list(head["payload"].keys()) == [
-        "id", "forked_from_id", "timestamp", "cwd", "originator", "cli_version",
-        "source", "thread_source", "model_provider", "base_instructions", "dynamic_tools",
+        "id",
+        "forked_from_id",
+        "timestamp",
+        "cwd",
+        "originator",
+        "cli_version",
+        "source",
+        "thread_source",
+        "model_provider",
+        "base_instructions",
+        "dynamic_tools",
     ]
 
 
@@ -3252,10 +4347,21 @@ def test_codex_resume_timestamps_are_millisecond_precision():
     import re
     from checkpoint_plugin.resume import _rewrite_codex_trajectory
 
-    traj = (json.dumps({"timestamp": "t", "type": "session_meta", "payload": {"id": "old", "cwd": "/old"}}) + "\n").encode("utf-8")
+    traj = (
+        json.dumps(
+            {
+                "timestamp": "t",
+                "type": "session_meta",
+                "payload": {"id": "old", "cwd": "/old"},
+            }
+        )
+        + "\n"
+    ).encode("utf-8")
     out = _rewrite_codex_trajectory(traj, "NEW", Path("/new"), None, None, None, None)
     head = json.loads(out.splitlines()[0])
-    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z", head["timestamp"]), head["timestamp"]
+    assert re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z", head["timestamp"]
+    ), head["timestamp"]
 
 
 def test_codex_resume_restamps_body_record_ts_no_temporal_inversion():
@@ -3266,21 +4372,50 @@ def test_codex_resume_restamps_body_record_ts_no_temporal_inversion():
     from checkpoint_plugin.resume import _rewrite_codex_trajectory
 
     traj = (
-        json.dumps({"timestamp": "2020-01-01T00:00:00.000Z", "type": "session_meta", "payload": {"id": "old", "timestamp": "2020-01-01T00:00:00.000Z", "cwd": "/old"}}) + "\n"
-        + json.dumps({"timestamp": "2020-01-01T00:00:01.000Z", "type": "response_item", "payload": {"type": "message", "turn_id": "t-1"}}) + "\n"
-        + json.dumps({"timestamp": "2020-01-01T00:00:02.000Z", "type": "turn_context", "payload": {"turn_id": "t-1", "model": "m"}}) + "\n"
+        json.dumps(
+            {
+                "timestamp": "2020-01-01T00:00:00.000Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "old",
+                    "timestamp": "2020-01-01T00:00:00.000Z",
+                    "cwd": "/old",
+                },
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "timestamp": "2020-01-01T00:00:01.000Z",
+                "type": "response_item",
+                "payload": {"type": "message", "turn_id": "t-1"},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "timestamp": "2020-01-01T00:00:02.000Z",
+                "type": "turn_context",
+                "payload": {"turn_id": "t-1", "model": "m"},
+            }
+        )
+        + "\n"
     ).encode("utf-8")
     out = _rewrite_codex_trajectory(traj, "NEW", Path("/new"), None, None, None, None)
-    recs = [json.loads(l) for l in out.splitlines()]
+    recs = [json.loads(line) for line in out.splitlines()]
     head_ts = recs[0]["timestamp"]
     body = [r for r in recs if r.get("type") != "session_meta"]
     # No body record carries a record-ts earlier than the head meta.
-    assert all(r["timestamp"] >= head_ts for r in body), "temporal inversion: body precedes head"
+    assert all(r["timestamp"] >= head_ts for r in body), (
+        "temporal inversion: body precedes head"
+    )
     # All body record-ts equal the resume moment (== head record-ts).
     assert all(r["timestamp"] == head_ts for r in body)
     # Payload-internal timestamps untouched on inlined ancestor metas.
     inlined = [r for r in recs if r.get("type") == "session_meta"][1:]
-    assert all(m["payload"].get("timestamp") == "2020-01-01T00:00:00.000Z" for m in inlined)
+    assert all(
+        m["payload"].get("timestamp") == "2020-01-01T00:00:00.000Z" for m in inlined
+    )
 
 
 def test_codex_resume_rewrites_cwd_in_dict_keys():
@@ -3290,13 +4425,30 @@ def test_codex_resume_rewrites_cwd_in_dict_keys():
 
     src_meta = {"id": "old", "cwd": "/src/work"}
     traj = (
-        json.dumps({"timestamp": "t", "type": "session_meta", "payload": src_meta}) + "\n"
-        + json.dumps({"timestamp": "t", "type": "event_msg", "payload": {"type": "patch_apply_end", "changes": {"/src/work/README.md": {"add": 1}}}}) + "\n"
+        json.dumps({"timestamp": "t", "type": "session_meta", "payload": src_meta})
+        + "\n"
+        + json.dumps(
+            {
+                "timestamp": "t",
+                "type": "event_msg",
+                "payload": {
+                    "type": "patch_apply_end",
+                    "changes": {"/src/work/README.md": {"add": 1}},
+                },
+            }
+        )
+        + "\n"
     ).encode("utf-8")
-    out = _rewrite_codex_trajectory(traj, "NEW", Path("/dst/copy"), None, None, None, src_meta)
+    out = _rewrite_codex_trajectory(
+        traj, "NEW", Path("/dst/copy"), None, None, None, src_meta
+    )
     assert b"/src/work" not in out, "source cwd must not survive (incl. dict keys)"
     # The path key was rewritten to the target cwd.
-    changes_rec = [json.loads(l) for l in out.splitlines() if json.loads(l).get("payload", {}).get("type") == "patch_apply_end"][0]
+    changes_rec = [
+        json.loads(line)
+        for line in out.splitlines()
+        if json.loads(line).get("payload", {}).get("type") == "patch_apply_end"
+    ][0]
     assert "/dst/copy/README.md" in changes_rec["payload"]["changes"]
 
 
@@ -3305,18 +4457,60 @@ def test_resume_fork_truncation_recovery_from_blob(tmp_path, monkeypatch, capsys
     (forked_at_offset > parent file size), recover from fork_point_trajectory_ref blob."""
     plugin_home = tmp_path / "plugin"
     home = tmp_path / "home"
-    claude_home = home / ".claude"
     cwd = tmp_path / "work"
     parent_transcript = tmp_path / "parent.jsonl"
     cwd.mkdir()
 
     # Original parent trajectory at fork time
     inherited = (
-        json.dumps({"type": "mode", "mode": "normal", "sessionId": "parent"}) + "\n"
-        + json.dumps({"type": "user", "sessionId": "parent", "uuid": "u1", "parentUuid": None, "promptId": "p1", "cwd": "/old", "message": {"role": "user", "content": "PARENT-TURN-1"}}) + "\n"
-        + json.dumps({"type": "assistant", "sessionId": "parent", "uuid": "a1", "parentUuid": "u1", "cwd": "/old", "message": {"role": "assistant", "content": []}}) + "\n"
-        + json.dumps({"type": "user", "sessionId": "parent", "uuid": "u2", "parentUuid": "a1", "promptId": "p2", "cwd": "/old", "message": {"role": "user", "content": "PARENT-TURN-2"}}) + "\n"
-        + json.dumps({"type": "assistant", "sessionId": "parent", "uuid": "a2", "parentUuid": "u2", "cwd": "/old", "message": {"role": "assistant", "content": []}}) + "\n"
+        json.dumps({"type": "mode", "mode": "normal", "sessionId": "parent"})
+        + "\n"
+        + json.dumps(
+            {
+                "type": "user",
+                "sessionId": "parent",
+                "uuid": "u1",
+                "parentUuid": None,
+                "promptId": "p1",
+                "cwd": "/old",
+                "message": {"role": "user", "content": "PARENT-TURN-1"},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "assistant",
+                "sessionId": "parent",
+                "uuid": "a1",
+                "parentUuid": "u1",
+                "cwd": "/old",
+                "message": {"role": "assistant", "content": []},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "user",
+                "sessionId": "parent",
+                "uuid": "u2",
+                "parentUuid": "a1",
+                "promptId": "p2",
+                "cwd": "/old",
+                "message": {"role": "user", "content": "PARENT-TURN-2"},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "assistant",
+                "sessionId": "parent",
+                "uuid": "a2",
+                "parentUuid": "u2",
+                "cwd": "/old",
+                "message": {"role": "assistant", "content": []},
+            }
+        )
+        + "\n"
     )
     fork_offset = len(inherited.encode("utf-8"))
     original_parent_data = inherited.encode("utf-8")
@@ -3325,7 +4519,20 @@ def test_resume_fork_truncation_recovery_from_blob(tmp_path, monkeypatch, capsys
     parent_transcript.write_bytes(original_parent_data)
 
     # Forked turn
-    forked_turn = json.dumps({"type": "user", "sessionId": "parent", "uuid": "fu", "parentUuid": "a2", "promptId": "fork-p", "cwd": "/old", "message": {"role": "user", "content": "FORKED-PROMPT"}}) + "\n"
+    forked_turn = (
+        json.dumps(
+            {
+                "type": "user",
+                "sessionId": "parent",
+                "uuid": "fu",
+                "parentUuid": "a2",
+                "promptId": "fork-p",
+                "cwd": "/old",
+                "message": {"role": "user", "content": "FORKED-PROMPT"},
+            }
+        )
+        + "\n"
+    )
     fork_transcript = tmp_path / "fork.jsonl"
     fork_transcript.write_text(inherited + forked_turn, encoding="utf-8")
 
@@ -3337,16 +4544,28 @@ def test_resume_fork_truncation_recovery_from_blob(tmp_path, monkeypatch, capsys
 
     # Capture fork session with fork_point_trajectory_ref
     coordinator = CheckpointCoordinator(session_id="forked", cwd=cwd)
-    coordinator.on_session_start(source="resume", source_transcript_path=str(fork_transcript))
+    coordinator.on_session_start(
+        source="resume", source_transcript_path=str(fork_transcript)
+    )
     coordinator.on_turn_end(
         TurnRecord(user_message="forked"),
-        TrajectoryReference("claude", str(fork_transcript), fork_offset, fork_transcript.stat().st_size, 1),
+        TrajectoryReference(
+            "claude",
+            str(fork_transcript),
+            fork_offset,
+            fork_transcript.stat().st_size,
+            1,
+        ),
     )
 
     # Verify fork_point_trajectory_ref was stored
     store = CheckpointStore(plugin_home / "sessions" / "forked")
-    metadata = json.loads((store.session_dir / "metadata.json").read_text(encoding="utf-8"))
-    assert "fork_point_trajectory_ref" in metadata, "fork_point_trajectory_ref should be stored"
+    metadata = json.loads(
+        (store.session_dir / "metadata.json").read_text(encoding="utf-8")
+    )
+    assert "fork_point_trajectory_ref" in metadata, (
+        "fork_point_trajectory_ref should be stored"
+    )
     fork_point_ref = metadata["fork_point_trajectory_ref"]
 
     # Verify the blob contains the original parent data
@@ -3355,8 +4574,20 @@ def test_resume_fork_truncation_recovery_from_blob(tmp_path, monkeypatch, capsys
 
     # Simulate parent file truncation (rewritten after fork, now shorter)
     truncated_parent = (
-        json.dumps({"type": "mode", "mode": "normal", "sessionId": "parent"}) + "\n"
-        + json.dumps({"type": "user", "sessionId": "parent", "uuid": "u1", "parentUuid": None, "promptId": "p1", "cwd": "/old", "message": {"role": "user", "content": "PARENT-TURN-1"}}) + "\n"
+        json.dumps({"type": "mode", "mode": "normal", "sessionId": "parent"})
+        + "\n"
+        + json.dumps(
+            {
+                "type": "user",
+                "sessionId": "parent",
+                "uuid": "u1",
+                "parentUuid": None,
+                "promptId": "p1",
+                "cwd": "/old",
+                "message": {"role": "user", "content": "PARENT-TURN-1"},
+            }
+        )
+        + "\n"
     )
     fork_transcript.write_text(truncated_parent, encoding="utf-8")
 
@@ -3366,8 +4597,7 @@ def test_resume_fork_truncation_recovery_from_blob(tmp_path, monkeypatch, capsys
     # Resume should recover from blob
     capsys.readouterr()  # Clear any previous output
     report = ResumeOrchestrator(cwd=cwd).execute(
-        ResumeOrchestrator(cwd=cwd).plan("forked", 0),
-        lambda _text: True
+        ResumeOrchestrator(cwd=cwd).plan("forked", 0), lambda _text: True
     )
 
     # Check that recovery message was printed
@@ -3394,9 +4624,24 @@ def test_resume_fork_without_recovery_blob_shows_warning(tmp_path, monkeypatch, 
     cwd.mkdir()
 
     # Minimal forked session
-    inherited = json.dumps({"type": "mode", "mode": "normal", "sessionId": "old"}) + "\n"
+    inherited = (
+        json.dumps({"type": "mode", "mode": "normal", "sessionId": "old"}) + "\n"
+    )
     fork_offset = len(inherited.encode("utf-8"))
-    forked_turn = json.dumps({"type": "user", "sessionId": "old", "uuid": "fu", "parentUuid": None, "promptId": "fork-p", "cwd": "/old", "message": {"role": "user", "content": "FORKED"}}) + "\n"
+    forked_turn = (
+        json.dumps(
+            {
+                "type": "user",
+                "sessionId": "old",
+                "uuid": "fu",
+                "parentUuid": None,
+                "promptId": "fork-p",
+                "cwd": "/old",
+                "message": {"role": "user", "content": "FORKED"},
+            }
+        )
+        + "\n"
+    )
     transcript.write_text(inherited + forked_turn, encoding="utf-8")
 
     (cwd / "file.txt").write_text("v1", encoding="utf-8")
@@ -3407,10 +4652,14 @@ def test_resume_fork_without_recovery_blob_shows_warning(tmp_path, monkeypatch, 
 
     # Manually create session without fork_point_trajectory_ref (simulating old capture)
     coordinator = CheckpointCoordinator(session_id="old-fork", cwd=cwd)
-    coordinator.on_session_start(source="resume", source_transcript_path=str(transcript))
+    coordinator.on_session_start(
+        source="resume", source_transcript_path=str(transcript)
+    )
     coordinator.on_turn_end(
         TurnRecord(user_message="forked"),
-        TrajectoryReference("claude", str(transcript), fork_offset, transcript.stat().st_size, 1),
+        TrajectoryReference(
+            "claude", str(transcript), fork_offset, transcript.stat().st_size, 1
+        ),
     )
 
     # Remove fork_point_trajectory_ref to simulate old session
@@ -3418,16 +4667,18 @@ def test_resume_fork_without_recovery_blob_shows_warning(tmp_path, monkeypatch, 
     metadata_path = store.session_dir / "metadata.json"
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     metadata.pop("fork_point_trajectory_ref", None)
-    metadata_path.write_text(json.dumps(metadata, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+    metadata_path.write_text(
+        json.dumps(metadata, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
 
     # Truncate the transcript
     transcript.write_text("", encoding="utf-8")
 
     # Resume should show warning about missing recovery blob
     capsys.readouterr()
-    report = ResumeOrchestrator(cwd=cwd).execute(
-        ResumeOrchestrator(cwd=cwd).plan("old-fork", 0),
-        lambda _text: True
+    ResumeOrchestrator(cwd=cwd).execute(
+        ResumeOrchestrator(cwd=cwd).plan("old-fork", 0), lambda _text: True
     )
 
     captured = capsys.readouterr()

@@ -66,7 +66,9 @@ def provider_layouts() -> list[ProviderLayout]:
         ProviderLayout(
             "codex",
             sessions=(
-                SourceGroup("codex", "active_sessions", codex_dir / "sessions", ("*.jsonl",)),
+                SourceGroup(
+                    "codex", "active_sessions", codex_dir / "sessions", ("*.jsonl",)
+                ),
                 SourceGroup(
                     "codex",
                     "archived_sessions",
@@ -77,36 +79,77 @@ def provider_layouts() -> list[ProviderLayout]:
             environment_groups=(
                 SourceGroup("codex", "skills", codex_dir / "skills", ("**/*",)),
                 SourceGroup("codex", "agent_skills", agents_dir / "skills", ("**/*",)),
-                SourceGroup("codex", "admin_skills", Path("/etc/codex/skills"), ("**/*",)),
-                SourceGroup("codex", "hooks", codex_dir, ("hooks.json",), recursive=False),
+                SourceGroup(
+                    "codex", "admin_skills", Path("/etc/codex/skills"), ("**/*",)
+                ),
+                SourceGroup(
+                    "codex", "hooks", codex_dir, ("hooks.json",), recursive=False
+                ),
                 SourceGroup("codex", "rules", codex_dir / "rules", ("**/*",)),
                 SourceGroup(
-                    "codex", "profile_configs", codex_dir, ("*.config.toml",), recursive=False
+                    "codex",
+                    "profile_configs",
+                    codex_dir,
+                    ("*.config.toml",),
+                    recursive=False,
                 ),
                 SourceGroup("codex", "runtime_logs", codex_dir / "log", ("**/*",)),
                 SourceGroup(
-                    "codex", "runtime_sqlite", codex_dir, ("*.sqlite*",), recursive=False
+                    "codex",
+                    "runtime_sqlite",
+                    codex_dir,
+                    ("*.sqlite*",),
+                    recursive=False,
                 ),
-                SourceGroup("codex", "runtime_sqlite_dir", codex_dir / "sqlite", ("**/*",)),
-                SourceGroup("codex", "shell_snapshots", codex_dir / "shell_snapshots", ("**/*",)),
+                SourceGroup(
+                    "codex", "runtime_sqlite_dir", codex_dir / "sqlite", ("**/*",)
+                ),
+                SourceGroup(
+                    "codex", "shell_snapshots", codex_dir / "shell_snapshots", ("**/*",)
+                ),
                 SourceGroup("codex", "runtime_cache", codex_dir / "cache", ("**/*",)),
                 SourceGroup("codex", "plugins", codex_dir / "plugins", ("**/*",)),
-                SourceGroup("codex", "vendor_imports", codex_dir / "vendor_imports", ("**/*",)),
+                SourceGroup(
+                    "codex", "vendor_imports", codex_dir / "vendor_imports", ("**/*",)
+                ),
                 SourceGroup("codex", "memories", codex_dir / "memories", ("**/*",)),
                 SourceGroup(
-                    "codex", "memories_extensions", codex_dir / "memories_extensions", ("**/*",)
+                    "codex",
+                    "memories_extensions",
+                    codex_dir / "memories_extensions",
+                    ("**/*",),
                 ),
                 SourceGroup("codex", "node_repl", codex_dir / "node_repl", ("**/*",)),
-                SourceGroup("codex", "computer_use", codex_dir / "computer-use", ("**/*",)),
-                SourceGroup("codex", "app_server_control", codex_dir / "app-server-control", ("**/*",)),
-                SourceGroup("codex", "app_server_state", codex_dir / "app-server-daemon", ("**/*",)),
-                SourceGroup("codex", "model_catalogs", codex_dir / "model-catalogs", ("**/*",)),
-                SourceGroup("codex", "package_cache", codex_dir / "packages", ("**/*",)),
+                SourceGroup(
+                    "codex", "computer_use", codex_dir / "computer-use", ("**/*",)
+                ),
+                SourceGroup(
+                    "codex",
+                    "app_server_control",
+                    codex_dir / "app-server-control",
+                    ("**/*",),
+                ),
+                SourceGroup(
+                    "codex",
+                    "app_server_state",
+                    codex_dir / "app-server-daemon",
+                    ("**/*",),
+                ),
+                SourceGroup(
+                    "codex", "model_catalogs", codex_dir / "model-catalogs", ("**/*",)
+                ),
+                SourceGroup(
+                    "codex", "package_cache", codex_dir / "packages", ("**/*",)
+                ),
             ),
             environment_files=(
                 SingleFileSource("codex", "agent_config", codex_dir / "config.toml"),
-                SingleFileSource("codex", "managed_config", Path("/etc/codex/managed_config.toml")),
-                SingleFileSource("codex", "requirements", Path("/etc/codex/requirements.toml")),
+                SingleFileSource(
+                    "codex", "managed_config", Path("/etc/codex/managed_config.toml")
+                ),
+                SingleFileSource(
+                    "codex", "requirements", Path("/etc/codex/requirements.toml")
+                ),
                 SingleFileSource(
                     "codex",
                     "macos_managed_preferences",
@@ -114,13 +157,21 @@ def provider_layouts() -> list[ProviderLayout]:
                 ),
                 SingleFileSource("codex", "agent_auth", codex_dir / "auth.json"),
                 SingleFileSource("codex", "mcp_config", codex_dir / "mcp.json"),
-                SingleFileSource("codex", "agent_instructions", codex_dir / "AGENTS.md"),
                 SingleFileSource(
-                    "codex", "agent_instructions_override", codex_dir / "AGENTS.override.md"
+                    "codex", "agent_instructions", codex_dir / "AGENTS.md"
                 ),
-                SingleFileSource("codex", "session_index", codex_dir / "session_index.jsonl"),
+                SingleFileSource(
+                    "codex",
+                    "agent_instructions_override",
+                    codex_dir / "AGENTS.override.md",
+                ),
+                SingleFileSource(
+                    "codex", "session_index", codex_dir / "session_index.jsonl"
+                ),
                 SingleFileSource("codex", "history", codex_dir / "history.jsonl"),
-                SingleFileSource("codex", "models_cache", codex_dir / "models_cache.json"),
+                SingleFileSource(
+                    "codex", "models_cache", codex_dir / "models_cache.json"
+                ),
                 SingleFileSource("codex", "version", codex_dir / "version.json"),
                 SingleFileSource(
                     "codex", "global_state", codex_dir / ".codex-global-state.json"
@@ -130,24 +181,43 @@ def provider_layouts() -> list[ProviderLayout]:
         ProviderLayout(
             "claude",
             sessions=(
-                SourceGroup("claude", "projects", claude_dir / "projects", ("*.jsonl",)),
-                SourceGroup("claude", "sessions", claude_dir / "sessions", ("*.jsonl",)),
+                SourceGroup(
+                    "claude", "projects", claude_dir / "projects", ("*.jsonl",)
+                ),
+                SourceGroup(
+                    "claude", "sessions", claude_dir / "sessions", ("*.jsonl",)
+                ),
             ),
             environment_groups=(
                 SourceGroup("claude", "skills", claude_dir / "skills", ("**/*",)),
                 SourceGroup("claude", "agents", claude_dir / "agents", ("**/*",)),
                 SourceGroup("claude", "commands", claude_dir / "commands", ("**/*",)),
-                SourceGroup("claude", "output_styles", claude_dir / "output-styles", ("**/*",)),
+                SourceGroup(
+                    "claude", "output_styles", claude_dir / "output-styles", ("**/*",)
+                ),
                 SourceGroup("claude", "rules", claude_dir / "rules", ("**/*",)),
-                SourceGroup("claude", "file_history", claude_dir / "file-history", ("**/*",)),
+                SourceGroup(
+                    "claude", "file_history", claude_dir / "file-history", ("**/*",)
+                ),
                 SourceGroup("claude", "runtime_cache", claude_dir / "cache", ("**/*",)),
-                SourceGroup("claude", "config_backups", claude_dir / "backups", ("**/*",)),
+                SourceGroup(
+                    "claude", "config_backups", claude_dir / "backups", ("**/*",)
+                ),
                 SourceGroup("claude", "plugins", claude_dir / "plugins", ("**/*",)),
                 SourceGroup("claude", "downloads", claude_dir / "downloads", ("**/*",)),
-                SourceGroup("claude", "paste_cache", claude_dir / "paste-cache", ("**/*",)),
+                SourceGroup(
+                    "claude", "paste_cache", claude_dir / "paste-cache", ("**/*",)
+                ),
                 SourceGroup("claude", "plans", claude_dir / "plans", ("**/*",)),
-                SourceGroup("claude", "session_env", claude_dir / "session-env", ("**/*",)),
-                SourceGroup("claude", "shell_snapshots", claude_dir / "shell-snapshots", ("**/*",)),
+                SourceGroup(
+                    "claude", "session_env", claude_dir / "session-env", ("**/*",)
+                ),
+                SourceGroup(
+                    "claude",
+                    "shell_snapshots",
+                    claude_dir / "shell-snapshots",
+                    ("**/*",),
+                ),
                 SourceGroup("claude", "tasks", claude_dir / "tasks", ("**/*",)),
                 SourceGroup("claude", "todos", claude_dir / "todos", ("**/*",)),
                 SourceGroup("claude", "telemetry", claude_dir / "telemetry", ("**/*",)),
@@ -160,15 +230,24 @@ def provider_layouts() -> list[ProviderLayout]:
                     ("**/*",),
                 ),
                 SourceGroup(
-                    "claude", "managed_settings_dir_unix", Path("/etc/claude-code"), ("**/*",)
+                    "claude",
+                    "managed_settings_dir_unix",
+                    Path("/etc/claude-code"),
+                    ("**/*",),
                 ),
             ),
             environment_files=(
-                SingleFileSource("claude", "agent_settings", claude_dir / "settings.json"),
+                SingleFileSource(
+                    "claude", "agent_settings", claude_dir / "settings.json"
+                ),
                 SingleFileSource("claude", "agent_config", claude_dir / "config.json"),
-                SingleFileSource("claude", "legacy_agent_settings", claude_dir / "claude.json"),
+                SingleFileSource(
+                    "claude", "legacy_agent_settings", claude_dir / "claude.json"
+                ),
                 SingleFileSource("claude", "mcp_config", home / ".claude.json"),
-                SingleFileSource("claude", "agent_instructions", claude_dir / "CLAUDE.md"),
+                SingleFileSource(
+                    "claude", "agent_instructions", claude_dir / "CLAUDE.md"
+                ),
                 SingleFileSource(
                     "claude",
                     "macos_managed_preferences",
@@ -213,8 +292,12 @@ def file_record(
         record["ref"] = ref
         return record, ref
 
-    destination = output_dir / provider / kind / label / (
-        relative_destination if relative_destination is not None else source.name
+    destination = (
+        output_dir
+        / provider
+        / kind
+        / label
+        / (relative_destination if relative_destination is not None else source.name)
     )
     copy_file(source, destination)
     ref = str(destination.relative_to(output_dir))
@@ -498,7 +581,14 @@ def collect_context_tree_once(
         if not source.is_file():
             continue
         ref = collect_context_file_once(
-            provider, label, source, output_dir, entry, manifest, copied_context, copy_files
+            provider,
+            label,
+            source,
+            output_dir,
+            entry,
+            manifest,
+            copied_context,
+            copy_files,
         )
         if ref is not None:
             refs.append(ref)
@@ -654,7 +744,13 @@ def session_project_context_refs(
         elif provider == "claude":
             refs.extend(
                 collect_claude_project_context(
-                    cwd, session_path, output_dir, entry, manifest, copied_context, copy_files
+                    cwd,
+                    session_path,
+                    output_dir,
+                    entry,
+                    manifest,
+                    copied_context,
+                    copy_files,
                 )
             )
     return sorted(set(refs))
@@ -682,18 +778,24 @@ def collect(output_dir: Path, copy_files: bool = False) -> dict:
 
         for group in layout.environment_groups:
             context_refs.extend(
-                collect_group(group, output_dir, entry, manifest, "environment", copy_files)
+                collect_group(
+                    group, output_dir, entry, manifest, "environment", copy_files
+                )
             )
 
         for source in layout.environment_files:
-            ref = collect_single_file(source, output_dir, entry, manifest, "environment", copy_files)
+            ref = collect_single_file(
+                source, output_dir, entry, manifest, "environment", copy_files
+            )
             if ref is not None:
                 context_refs.append(ref)
 
         entry["sessionContextRefs"] = context_refs
 
         for group in layout.sessions:
-            session_refs = collect_group(group, output_dir, entry, manifest, "sessions", copy_files)
+            session_refs = collect_group(
+                group, output_dir, entry, manifest, "sessions", copy_files
+            )
             session_ref_set = set(session_refs)
             for file_entry in entry["files"]:
                 if file_entry.get("kind") != "sessions":

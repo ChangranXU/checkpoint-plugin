@@ -23,13 +23,17 @@ def test_codex_session_start_writes_metadata(tmp_path, monkeypatch):
 
     assert codex_hook.main([]) == 0
 
-    metadata = json.loads((plugin_home / "sessions" / "codex-s1" / "metadata.json").read_text())
+    metadata = json.loads(
+        (plugin_home / "sessions" / "codex-s1" / "metadata.json").read_text()
+    )
     assert metadata["provider"] == "codex"
     assert metadata["cwd"] == str(cwd)
     assert metadata["source"] == "startup"
 
 
-def test_codex_session_env_captures_approval_and_sandbox_when_present(tmp_path, monkeypatch):
+def test_codex_session_env_captures_approval_and_sandbox_when_present(
+    tmp_path, monkeypatch
+):
     """F15: when the codex hook payload carries approval_policy/sandbox, record them
     in session_env so the checkpoint metadata describes the actual policy, not just
     the coarse permission_mode. Best-effort: only when the payload provides them."""
@@ -50,7 +54,9 @@ def test_codex_session_env_captures_approval_and_sandbox_when_present(tmp_path, 
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
     assert codex_hook.main([]) == 0
 
-    env = json.loads((plugin_home / "sessions" / "codex-pol" / "metadata.json").read_text())["session_env"]
+    env = json.loads(
+        (plugin_home / "sessions" / "codex-pol" / "metadata.json").read_text()
+    )["session_env"]
     assert env["approval_policy"] == "on-request"
     assert env["sandbox_mode"] == "workspace-write"
     assert env["permission_mode"] == "default"
@@ -72,7 +78,9 @@ def test_codex_session_env_omits_policy_when_absent(tmp_path, monkeypatch):
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
     assert codex_hook.main([]) == 0
 
-    env = json.loads((plugin_home / "sessions" / "codex-nopol" / "metadata.json").read_text()).get("session_env", {})
+    env = json.loads(
+        (plugin_home / "sessions" / "codex-nopol" / "metadata.json").read_text()
+    ).get("session_env", {})
     assert "approval_policy" not in env
     assert "sandbox_mode" not in env
 
@@ -93,7 +101,9 @@ def test_codex_resume_session_records_fork_lineage(tmp_path, monkeypatch):
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
     assert codex_hook.main([]) == 0
 
-    metadata = json.loads((plugin_home / "sessions" / "codex-forked" / "metadata.json").read_text())
+    metadata = json.loads(
+        (plugin_home / "sessions" / "codex-forked" / "metadata.json").read_text()
+    )
     assert metadata["source"] == "resume"
     assert metadata["forked_from_transcript"] == "/prior/rollout.jsonl"
 
@@ -105,8 +115,10 @@ def test_codex_resume_records_fork_anchor_offset(tmp_path, monkeypatch):
     cwd.mkdir()
     prior = tmp_path / "prior-rollout.jsonl"
     prior.write_text(
-        json.dumps({"type": "session_meta", "payload": {"id": "old"}}) + "\n"
-        + json.dumps({"type": "event_msg", "payload": {"type": "user_message"}}) + "\n",
+        json.dumps({"type": "session_meta", "payload": {"id": "old"}})
+        + "\n"
+        + json.dumps({"type": "event_msg", "payload": {"type": "user_message"}})
+        + "\n",
         encoding="utf-8",
     )
     payload = {
@@ -120,7 +132,9 @@ def test_codex_resume_records_fork_anchor_offset(tmp_path, monkeypatch):
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
     assert codex_hook.main([]) == 0
 
-    metadata = json.loads((plugin_home / "sessions" / "codex-forked2" / "metadata.json").read_text())
+    metadata = json.loads(
+        (plugin_home / "sessions" / "codex-forked2" / "metadata.json").read_text()
+    )
     assert metadata["forked_from_transcript"] == str(prior)
     assert metadata["forked_at_offset"] == prior.stat().st_size
     assert metadata["forked_at_record_count"] == 2
@@ -139,7 +153,16 @@ def test_codex_turn_end_maps_payload_to_checkpoint(tmp_path, monkeypatch):
         "\n".join(
             [
                 json.dumps({"turn_id": "turn-0", "message": "previous"}),
-                json.dumps({"type": "event_msg", "payload": {"turn_id": "turn-1", "type": "user_message", "message": "current"}}),
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "payload": {
+                            "turn_id": "turn-1",
+                            "type": "user_message",
+                            "message": "current",
+                        },
+                    }
+                ),
                 "",
             ]
         ),
@@ -172,7 +195,9 @@ def test_codex_turn_end_maps_payload_to_checkpoint(tmp_path, monkeypatch):
     assert manifest.trajectory_ref.transcript_path == str(transcript)
     assert manifest.trajectory_ref.record_count == 1
     assert manifest.user_message_preview == "current"
-    assert b'"message": "current"' in store.read_trajectory_slice(manifest.trajectory_ref)
+    assert b'"message": "current"' in store.read_trajectory_slice(
+        manifest.trajectory_ref
+    )
     assert not (plugin_home / "sessions" / "codex-s1" / "trajectory.jsonl").exists()
 
 
@@ -181,10 +206,27 @@ def test_codex_reference_includes_intervening_records_until_next_turn(tmp_path):
     transcript.write_text(
         "\n".join(
             [
-                json.dumps({"type": "event_msg", "payload": {"turn_id": "turn-1", "type": "task_started"}}),
-                json.dumps({"type": "response_item", "payload": {"message": "assistant"}}),
-                json.dumps({"type": "event_msg", "payload": {"turn_id": "turn-1", "type": "task_complete"}}),
-                json.dumps({"type": "event_msg", "payload": {"turn_id": "turn-2", "type": "task_started"}}),
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "payload": {"turn_id": "turn-1", "type": "task_started"},
+                    }
+                ),
+                json.dumps(
+                    {"type": "response_item", "payload": {"message": "assistant"}}
+                ),
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "payload": {"turn_id": "turn-1", "type": "task_complete"},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "payload": {"turn_id": "turn-2", "type": "task_started"},
+                    }
+                ),
                 "",
             ]
         ),
@@ -208,13 +250,51 @@ def test_codex_turn_claims_leading_keyless_user_prompt(tmp_path):
     transcript.write_text(
         "\n".join(
             [
-                json.dumps({"type": "event_msg", "payload": {"turn_id": "turn-1", "type": "task_started"}}),
-                json.dumps({"type": "response_item", "payload": {"type": "message", "role": "assistant", "content": "answer-1"}}),
-                json.dumps({"type": "event_msg", "payload": {"turn_id": "turn-1", "type": "task_complete"}}),
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "payload": {"turn_id": "turn-1", "type": "task_started"},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": "answer-1",
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "payload": {"turn_id": "turn-1", "type": "task_complete"},
+                    }
+                ),
                 # turn-2's user prompt carries no turn_id and precedes task_started.
-                json.dumps({"type": "response_item", "payload": {"type": "message", "role": "user", "content": "prompt-2"}}),
-                json.dumps({"type": "event_msg", "payload": {"turn_id": "turn-2", "type": "task_started"}}),
-                json.dumps({"type": "turn_context", "payload": {"type": "turn_context", "turn_id": "turn-2"}}),
+                json.dumps(
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": "prompt-2",
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "payload": {"turn_id": "turn-2", "type": "task_started"},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "turn_context",
+                        "payload": {"type": "turn_context", "turn_id": "turn-2"},
+                    }
+                ),
                 "",
             ]
         ),
@@ -249,8 +329,22 @@ def test_codex_subagent_stop_creates_separate_checkpoint(tmp_path, monkeypatch):
     transcript.write_text(
         "\n".join(
             [
-                json.dumps({"type": "event_msg", "payload": {"turn_id": "t-1", "type": "task_started"}}),
-                json.dumps({"type": "response_item", "payload": {"type": "message", "role": "user", "content": "sub-task"}}),
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "payload": {"turn_id": "t-1", "type": "task_started"},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": "sub-task",
+                        },
+                    }
+                ),
                 "",
             ]
         ),
@@ -269,11 +363,18 @@ def test_codex_subagent_stop_creates_separate_checkpoint(tmp_path, monkeypatch):
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
     assert codex_hook.main([]) == 0
 
-    assert CheckpointStore(plugin_home / "sessions" / "codex-parent").list_manifests() == []
-    sub_store = CheckpointStore(plugin_home / "sessions" / "codex-parent--subagent-agent-9")
+    assert (
+        CheckpointStore(plugin_home / "sessions" / "codex-parent").list_manifests()
+        == []
+    )
+    sub_store = CheckpointStore(
+        plugin_home / "sessions" / "codex-parent--subagent-agent-9"
+    )
     manifests = sub_store.list_manifests()
     assert len(manifests) == 1
-    metadata = json.loads((sub_store.session_dir / "metadata.json").read_text(encoding="utf-8"))
+    metadata = json.loads(
+        (sub_store.session_dir / "metadata.json").read_text(encoding="utf-8")
+    )
     assert metadata["lineage"]["parent_session_id"] == "codex-parent"
     assert metadata["lineage"]["agent_type"] == "Plan"
 
@@ -287,14 +388,38 @@ def test_codex_subagent_slices_agent_transcript_not_parent(tmp_path, monkeypatch
     cwd.mkdir()
     (cwd / "AGENTS.md").write_text("agent", encoding="utf-8")
     parent_transcript.write_text(
-        json.dumps({"type": "response_item", "payload": {"type": "message", "role": "user", "content": "PARENT-ONLY"}}) + "\n",
+        json.dumps(
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": "PARENT-ONLY",
+                },
+            }
+        )
+        + "\n",
         encoding="utf-8",
     )
     agent_transcript.write_text(
         "\n".join(
             [
-                json.dumps({"type": "event_msg", "payload": {"turn_id": "t-1", "type": "task_started"}}),
-                json.dumps({"type": "response_item", "payload": {"type": "message", "role": "user", "content": "SUBAGENT-ONLY"}}),
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "payload": {"turn_id": "t-1", "type": "task_started"},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": "SUBAGENT-ONLY",
+                        },
+                    }
+                ),
                 "",
             ]
         ),
@@ -313,7 +438,9 @@ def test_codex_subagent_slices_agent_transcript_not_parent(tmp_path, monkeypatch
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
     assert codex_hook.main([]) == 0
 
-    sub_store = CheckpointStore(plugin_home / "sessions" / "codex-parent--subagent-agent-9")
+    sub_store = CheckpointStore(
+        plugin_home / "sessions" / "codex-parent--subagent-agent-9"
+    )
     manifest = sub_store.list_manifests()[0]
     assert manifest.trajectory_ref.transcript_path == str(agent_transcript.resolve())
     sliced = sub_store.read_trajectory_slice(manifest.trajectory_ref)
@@ -377,13 +504,37 @@ def test_subagent_ref_captures_full_conversation_after_leading_metas(tmp_path):
 
     rollout = tmp_path / "rollout-sub.jsonl"
     lines = [
-        json.dumps({"type": "session_meta", "payload": {"id": "SUB", "forked_from_id": "PARENT"}}),
-        json.dumps({"type": "session_meta", "payload": {"id": "PARENT", "forked_from_id": "GRAND"}}),
+        json.dumps(
+            {
+                "type": "session_meta",
+                "payload": {"id": "SUB", "forked_from_id": "PARENT"},
+            }
+        ),
+        json.dumps(
+            {
+                "type": "session_meta",
+                "payload": {"id": "PARENT", "forked_from_id": "GRAND"},
+            }
+        ),
         json.dumps({"type": "session_meta", "payload": {"id": "GRAND"}}),
-        json.dumps({"type": "event_msg", "payload": {"type": "task_started", "turn_id": "own-1"}}),
-        json.dumps({"type": "response_item", "payload": {"role": "user", "type": "message"}}),
-        json.dumps({"type": "event_msg", "payload": {"type": "task_started", "turn_id": "own-2"}}),
-        json.dumps({"type": "response_item", "payload": {"role": "user", "type": "message"}}),
+        json.dumps(
+            {
+                "type": "event_msg",
+                "payload": {"type": "task_started", "turn_id": "own-1"},
+            }
+        ),
+        json.dumps(
+            {"type": "response_item", "payload": {"role": "user", "type": "message"}}
+        ),
+        json.dumps(
+            {
+                "type": "event_msg",
+                "payload": {"type": "task_started", "turn_id": "own-2"},
+            }
+        ),
+        json.dumps(
+            {"type": "response_item", "payload": {"role": "user", "type": "message"}}
+        ),
     ]
     data = ("\n".join(lines) + "\n").encode("utf-8")
     rollout.write_bytes(data)
@@ -412,13 +563,25 @@ def test_codex_startup_fork_records_lineage_from_session_meta(tmp_path, monkeypa
     parent_dir.mkdir(parents=True)
     parent = parent_dir / "rollout-2026-05-30T00-00-00-PARENTID.jsonl"
     parent.write_bytes(
-        (json.dumps({"type": "session_meta", "payload": {"id": "PARENTID"}}) + "\n"
-         + json.dumps({"type": "event_msg", "payload": {"type": "task_started"}}) + "\n").encode("utf-8")
+        (
+            json.dumps({"type": "session_meta", "payload": {"id": "PARENTID"}})
+            + "\n"
+            + json.dumps({"type": "event_msg", "payload": {"type": "task_started"}})
+            + "\n"
+        ).encode("utf-8")
     )
     # The new forked session's own rollout points at the parent via forked_from_id.
     own = tmp_path / "rollout-2026-05-30T01-00-00-FORKED.jsonl"
     own.write_bytes(
-        (json.dumps({"type": "session_meta", "payload": {"id": "FORKED", "forked_from_id": "PARENTID"}}) + "\n").encode("utf-8")
+        (
+            json.dumps(
+                {
+                    "type": "session_meta",
+                    "payload": {"id": "FORKED", "forked_from_id": "PARENTID"},
+                }
+            )
+            + "\n"
+        ).encode("utf-8")
     )
     payload = {
         "hook_event_name": "SessionStart",
@@ -432,7 +595,9 @@ def test_codex_startup_fork_records_lineage_from_session_meta(tmp_path, monkeypa
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
     assert codex_hook.main([]) == 0
 
-    metadata = json.loads((plugin_home / "sessions" / "FORKED" / "metadata.json").read_text())
+    metadata = json.loads(
+        (plugin_home / "sessions" / "FORKED" / "metadata.json").read_text()
+    )
     # P6-16: a fork that arrived disguised as source="startup" is normalized to "fork".
     assert metadata["source"] == "fork"
     assert metadata["forked_from_transcript"] == str(parent)
@@ -442,7 +607,9 @@ def test_codex_startup_fork_records_lineage_from_session_meta(tmp_path, monkeypa
     assert metadata["forked_at_record_count"] == 1
 
 
-def test_codex_resume_resolves_ancestor_not_self_and_anchors_on_parent(tmp_path, monkeypatch):
+def test_codex_resume_resolves_ancestor_not_self_and_anchors_on_parent(
+    tmp_path, monkeypatch
+):
     """F6/F7: a codex resume's SessionStart transcript_path is the resume's OWN
     rollout (first session_meta carries forked_from_id). Lineage must resolve the
     true ancestor (not self-reference) and anchor on the PARENT's EOF (the branch
@@ -456,19 +623,41 @@ def test_codex_resume_resolves_ancestor_not_self_and_anchors_on_parent(tmp_path,
     parent_dir.mkdir(parents=True)
     parent = parent_dir / "rollout-2026-05-30T00-00-00-ANCESTOR.jsonl"
     parent.write_bytes(
-        (json.dumps({"type": "session_meta", "payload": {"id": "ANCESTOR"}}) + "\n"
-         + json.dumps({"type": "event_msg", "payload": {"type": "task_started"}}) + "\n"
-         + json.dumps({"type": "event_msg", "payload": {"type": "task_complete"}}) + "\n").encode("utf-8")
+        (
+            json.dumps({"type": "session_meta", "payload": {"id": "ANCESTOR"}})
+            + "\n"
+            + json.dumps({"type": "event_msg", "payload": {"type": "task_started"}})
+            + "\n"
+            + json.dumps({"type": "event_msg", "payload": {"type": "task_complete"}})
+            + "\n"
+        ).encode("utf-8")
     )
     # The resume's OWN rollout: inlines the ancestor head meta + ancestor history +
     # its own new turn (so the self-file is LONGER than the true branch point).
     own = parent_dir / "rollout-2026-05-30T02-00-00-RESUMED.jsonl"
     own.write_bytes(
-        (json.dumps({"type": "session_meta", "payload": {"id": "RESUMED", "forked_from_id": "ANCESTOR"}}) + "\n"
-         + json.dumps({"type": "session_meta", "payload": {"id": "ANCESTOR"}}) + "\n"
-         + json.dumps({"type": "event_msg", "payload": {"type": "task_started"}}) + "\n"
-         + json.dumps({"type": "event_msg", "payload": {"type": "task_complete"}}) + "\n"
-         + json.dumps({"type": "event_msg", "payload": {"type": "task_started", "note": "own new turn"}}) + "\n").encode("utf-8")
+        (
+            json.dumps(
+                {
+                    "type": "session_meta",
+                    "payload": {"id": "RESUMED", "forked_from_id": "ANCESTOR"},
+                }
+            )
+            + "\n"
+            + json.dumps({"type": "session_meta", "payload": {"id": "ANCESTOR"}})
+            + "\n"
+            + json.dumps({"type": "event_msg", "payload": {"type": "task_started"}})
+            + "\n"
+            + json.dumps({"type": "event_msg", "payload": {"type": "task_complete"}})
+            + "\n"
+            + json.dumps(
+                {
+                    "type": "event_msg",
+                    "payload": {"type": "task_started", "note": "own new turn"},
+                }
+            )
+            + "\n"
+        ).encode("utf-8")
     )
     payload = {
         "hook_event_name": "SessionStart",
@@ -482,7 +671,9 @@ def test_codex_resume_resolves_ancestor_not_self_and_anchors_on_parent(tmp_path,
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
     assert codex_hook.main([]) == 0
 
-    metadata = json.loads((plugin_home / "sessions" / "RESUMED" / "metadata.json").read_text())
+    metadata = json.loads(
+        (plugin_home / "sessions" / "RESUMED" / "metadata.json").read_text()
+    )
     # source stays "resume" (NOT relabeled to "fork").
     assert metadata["source"] == "resume"
     # F6: ancestor resolved to the PARENT rollout, not the self-referential own path.
@@ -491,10 +682,14 @@ def test_codex_resume_resolves_ancestor_not_self_and_anchors_on_parent(tmp_path,
     # F7: anchor on the parent EOF (branch point), not the longer self-file.
     assert metadata["forked_at_offset"] == parent.stat().st_size
     assert metadata["forked_at_record_count"] == 3
-    assert metadata["forked_at_offset"] < own.stat().st_size  # self-file would overshoot
+    assert (
+        metadata["forked_at_offset"] < own.stat().st_size
+    )  # self-file would overshoot
 
 
-def test_codex_subagent_settle_captures_late_flushed_task_complete(tmp_path, monkeypatch):
+def test_codex_subagent_settle_captures_late_flushed_task_complete(
+    tmp_path, monkeypatch
+):
     """F12-codex: SubagentStop fires before codex flushes the turn-closing
     `task_complete` event. The hook settles (polls until the tail is task_complete)
     before the slice, so the closing event is captured rather than truncated."""
@@ -508,15 +703,36 @@ def test_codex_subagent_settle_captures_late_flushed_task_complete(tmp_path, mon
     agent_transcript = tmp_path / "agent-rollout.jsonl"
     # At SubagentStop time the closing task_complete is NOT yet present.
     agent_transcript.write_text(
-        json.dumps({"type": "event_msg", "payload": {"turn_id": "t-1", "type": "task_started"}}) + "\n"
-        + json.dumps({"type": "response_item", "payload": {"type": "message", "role": "assistant", "content": "DELIVERABLE"}}) + "\n",
+        json.dumps(
+            {"type": "event_msg", "payload": {"turn_id": "t-1", "type": "task_started"}}
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": "DELIVERABLE",
+                },
+            }
+        )
+        + "\n",
         encoding="utf-8",
     )
 
     def _flush_task_complete_late():
         time.sleep(0.15)
         with agent_transcript.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps({"type": "event_msg", "payload": {"type": "task_complete", "turn_id": "t-1"}}) + "\n")
+            handle.write(
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "payload": {"type": "task_complete", "turn_id": "t-1"},
+                    }
+                )
+                + "\n"
+            )
 
     monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
     monkeypatch.setenv("CHECKPOINT_SIDECHAIN_SETTLE_TIMEOUT", "2.0")
@@ -536,8 +752,12 @@ def test_codex_subagent_settle_captures_late_flushed_task_complete(tmp_path, mon
     finally:
         t.join()
 
-    sub_store = CheckpointStore(plugin_home / "sessions" / "codex-parent--subagent-agent-late")
+    sub_store = CheckpointStore(
+        plugin_home / "sessions" / "codex-parent--subagent-agent-late"
+    )
     ref = sub_store.list_manifests()[0].trajectory_ref
     sliced = sub_store.read_trajectory_slice(ref)
-    assert b"task_complete" in sliced, "late-flushed task_complete must be captured after settle"
+    assert b"task_complete" in sliced, (
+        "late-flushed task_complete must be captured after settle"
+    )
     assert ref.end_offset == agent_transcript.stat().st_size

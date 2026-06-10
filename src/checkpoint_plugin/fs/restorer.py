@@ -29,7 +29,9 @@ def diff_filesystems(current: FilesystemSnapshot, target: FilesystemSnapshot) ->
     return FsDiff(
         added=sorted(target_keys - current_keys),
         deleted=sorted(current_keys - target_keys),
-        modified=sorted(key for key in common if current.files[key] != target.files[key]),
+        modified=sorted(
+            key for key in common if current.files[key] != target.files[key]
+        ),
     )
 
 
@@ -78,17 +80,21 @@ def restore_cwd(
         path.write_bytes(store.load_blob(snapshot.files[rel]))
         changed.append(str(path))
 
-    return RestoreReport(changed=changed, backed_up=backed_up, backup_dir=str(backup_dir))
+    return RestoreReport(
+        changed=changed, backed_up=backed_up, backup_dir=str(backup_dir)
+    )
 
 
-def _current_files(target: Path, store: CheckpointStore, ignore: IgnoreMatcher) -> FilesystemSnapshot:
+def _current_files(
+    target: Path, store: CheckpointStore, ignore: IgnoreMatcher
+) -> FilesystemSnapshot:
     files: dict[str, str] = {}
     for path in sorted(target.rglob("*")):
         if path.is_file() and not ignore.matches(path):
-            files[path.relative_to(target).as_posix()] = store.store_blob(path.read_bytes())
+            files[path.relative_to(target).as_posix()] = store.store_blob(
+                path.read_bytes()
+            )
     return FilesystemSnapshot(cwd=str(target), files=files, git=None)
-
-
 
 
 def _prune_empty_parents(path: Path, stop: Path) -> None:

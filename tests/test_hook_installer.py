@@ -23,10 +23,14 @@ def test_install_and_uninstall_claude_hooks(tmp_path, monkeypatch):
     assert "PostToolUse" not in data["hooks"]
     assert len(data["hooks"]["SubagentStop"]) == 1
     subagent_command = data["hooks"]["SubagentStop"][0]["hooks"][0]["command"]
-    assert subagent_command.endswith("checkpoint_plugin.integrations.claude_code_hook subagent_end")
+    assert subagent_command.endswith(
+        "checkpoint_plugin.integrations.claude_code_hook subagent_end"
+    )
     command = data["hooks"]["SessionStart"][0]["hooks"][0]["command"]
     assert command.startswith(sys.executable)
-    assert command.endswith("checkpoint_plugin.integrations.claude_code_hook session_start")
+    assert command.endswith(
+        "checkpoint_plugin.integrations.claude_code_hook session_start"
+    )
 
     removed = uninstall_hooks("claude")
 
@@ -95,7 +99,9 @@ def test_reinstall_replaces_legacy_python_hook_command(tmp_path, monkeypatch):
         for hook in entry["hooks"]
     ]
     assert result[0].changed is True
-    assert "python -m checkpoint_plugin.integrations.codex_hook turn_end" not in commands
+    assert (
+        "python -m checkpoint_plugin.integrations.codex_hook turn_end" not in commands
+    )
     assert any(command.startswith(sys.executable) for command in commands)
 
 
@@ -188,11 +194,16 @@ def test_uninstall_keeps_unrelated_hooks_and_settings(tmp_path, monkeypatch):
     data = json.loads(hooks_path.read_text(encoding="utf-8"))
     assert result[0].changed is True
     assert data["theme"] == "dark"
-    assert data["hooks"]["SessionStart"][0]["hooks"][0]["command"] == other_session_command
+    assert (
+        data["hooks"]["SessionStart"][0]["hooks"][0]["command"] == other_session_command
+    )
     assert data["hooks"]["Stop"] == [
         {"hooks": [{"type": "command", "command": other_stop_command}]}
     ]
-    assert data["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"] == "/usr/local/bin/custom-prompt-hook"
+    assert (
+        data["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
+        == "/usr/local/bin/custom-prompt-hook"
+    )
 
 
 def test_hooks_cli_installs_all(tmp_path, monkeypatch, capsys):

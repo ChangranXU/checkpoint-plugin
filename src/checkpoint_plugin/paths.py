@@ -62,7 +62,10 @@ def ensure_home(home: Path | None = None) -> Path:
     (root / "backups").mkdir(parents=True, exist_ok=True)
     path = root / "config.json"
     if not path.exists():
-        path.write_text(json.dumps(DEFAULT_CONFIG, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        path.write_text(
+            json.dumps(DEFAULT_CONFIG, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
     return root
 
 
