@@ -9,6 +9,7 @@ from checkpoint_plugin.cli import (
     _edit_send_replaced_turns,
     _rolled_back_count,
     _supports_color,
+    _turns_carrying_pre_fork_rollback,
 )
 from checkpoint_plugin.store import CheckpointStore
 from checkpoint_plugin.types import CheckpointManifest, TrajectoryReference
@@ -445,6 +446,47 @@ def test_edit_send_replaced_turns_skips_already_replaced_turns(tmp_path):
     )
 
     assert replaced == {3: 4, 4: 5, 2: 5}
+
+
+def test_pre_fork_carrier_detection_counts_all_captured_turns(tmp_path):
+    """A rollback reaching already-replaced captured turns is not pre-fork."""
+    transcript = tmp_path / "rollout.jsonl"
+    slices = []
+    payloads = [
+        {"type": "user_message", "message": "turn 1"},
+        {"type": "user_message", "message": "turn 2"},
+        {"type": "user_message", "message": "turn 3"},
+        {"type": "thread_rolled_back", "num_turns": 1},
+        {"type": "thread_rolled_back", "num_turns": 4},
+    ]
+    offset = 0
+    lines = []
+    for payload in payloads:
+        line = json.dumps({"type": "event_msg", "payload": payload}) + "\n"
+        encoded_len = len(line.encode("utf-8"))
+        slices.append((offset, offset + encoded_len))
+        lines.append(line)
+        offset += encoded_len
+    transcript.write_text("".join(lines), encoding="utf-8")
+    manifests = [
+        CheckpointManifest(
+            turn_id=turn_id,
+            session_id="captured",
+            created_ts=f"2026-06-10T00:00:0{turn_id}Z",
+            env_ref="env",
+            fs_ref="fs",
+            trajectory_ref=TrajectoryReference("codex", str(transcript), start, end, 1),
+        )
+        for turn_id, (start, end) in enumerate(slices, start=1)
+    ]
+
+    replaced = _edit_send_replaced_turns(
+        CheckpointStore(tmp_path / "session"), manifests
+    )
+    carriers = _turns_carrying_pre_fork_rollback(manifests, replaced)
+
+    assert replaced == {3: 4, 4: 5, 2: 5, 1: 5}
+    assert carriers == set()
 
 
 def test_edit_send_no_rollback_is_empty(tmp_path, monkeypatch):

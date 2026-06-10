@@ -854,11 +854,11 @@ def _validate_provider_runtime_args(
     index = 0
     while index < len(args):
         option = args[index]
-        assigned_option, assigned_separator, assigned_value = option.partition("=")
-        if assigned_separator and assigned_option in value_options and assigned_value:
+        assigned_option, assigned_separator, _assigned_value = option.partition("=")
+        if assigned_separator and assigned_option in value_options:
             index += 1
             continue
-        if option in value_options and index + 1 < len(args) and args[index + 1]:
+        if option in value_options and index + 1 < len(args):
             index += 2
             continue
         if option in json_config_options and index + 1 < len(args):

@@ -1393,6 +1393,18 @@ def test_resume_open_accepts_self_written_dash_prefixed_runtime_value(tmp_path):
     assert loaded.command == spec.command
 
 
+def test_resume_open_accepts_empty_runtime_value(tmp_path):
+    from checkpoint_plugin.env.providers import CODEX_RESUME_POLICY
+    from checkpoint_plugin.resume import _validate_provider_runtime_args
+
+    _validate_provider_runtime_args(
+        ["--model", ""], CODEX_RESUME_POLICY, tmp_path / "resume-open.json"
+    )
+    _validate_provider_runtime_args(
+        ["--model="], CODEX_RESUME_POLICY, tmp_path / "resume-open.json"
+    )
+
+
 def test_resume_open_rejects_env_path_hijack(tmp_path):
     import pytest
 

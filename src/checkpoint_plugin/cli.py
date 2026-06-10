@@ -349,8 +349,7 @@ def _cmd_list(session: str | None, show_all: bool = False) -> int:
     # a co-located reader sees immediately), so the settle timeout is not relied upon.
     reanchor_last_turn_to_eof(store)
     manifests = store.list_manifests()
-    replaced = _edit_send_replaced_turns(store, manifests)
-    carries_pre_fork = _turns_carrying_pre_fork_rollback(manifests, replaced)
+    replaced, carries_pre_fork = _rollback_relationships(manifests)
     for manifest in manifests:
         preview = manifest.user_message_preview.replace("\n", " ")
         if manifest.turn_id in replaced:
@@ -384,11 +383,7 @@ def _edit_send_replaced_turns(
     Returns {replaced_turn_id: replacing_turn_id}. Empty when no rollback is found
     (the common case) or for non-codex sessions (claude edit-send has no marker).
     """
-    replaced: dict[int, int] = {}
-    victims_by_turn, _carriers = _live_rollback_victims(manifests)
-    for replacing_turn_id, victims in victims_by_turn.items():
-        for tid in victims:
-            replaced[tid] = replacing_turn_id
+    replaced, _carriers = _rollback_relationships(manifests)
     return replaced
 
 
@@ -409,8 +404,17 @@ def _turns_carrying_pre_fork_rollback(
     Empty for the common case (a fully-captured in-session edit-send, already covered by
     `replaced`).
     """
-    _victims_by_turn, carriers = _live_rollback_victims(manifests)
+    _replaced, carriers = _rollback_relationships(manifests)
     return carriers
+
+
+def _rollback_relationships(manifests: list[Any]) -> tuple[dict[int, int], set[int]]:
+    replaced: dict[int, int] = {}
+    victims_by_turn, carriers = _live_rollback_victims(manifests)
+    for replacing_turn_id, victims in victims_by_turn.items():
+        for tid in victims:
+            replaced[tid] = replacing_turn_id
+    return replaced, carriers
 
 
 def _live_rollback_victims(
@@ -419,15 +423,19 @@ def _live_rollback_victims(
     victims_by_turn: dict[int, list[int]] = {}
     carriers: set[int] = set()
     live_turn_ids = {m.turn_id for m in manifests}
+    captured_turn_ids = {m.turn_id for m in manifests}
     for manifest in sorted(manifests, key=lambda item: item.turn_id):
         num_turns = _rolled_back_count(manifest)
         if num_turns <= 0:
             continue
+        captured_below_count = sum(
+            1 for tid in captured_turn_ids if tid < manifest.turn_id
+        )
         live_below = sorted(
             (tid for tid in live_turn_ids if tid < manifest.turn_id), reverse=True
         )
         victims = live_below[:num_turns]
-        if num_turns > len(live_below):
+        if num_turns > captured_below_count:
             carriers.add(manifest.turn_id)
         if victims:
             victims_by_turn[manifest.turn_id] = victims
@@ -505,8 +513,7 @@ def _cmd_show(session: str, turn: int | None, metadata_only: bool = False) -> in
     if not manifests:
         print("  (no turns captured)")
     else:
-        replaced = _edit_send_replaced_turns(store, manifests)
-        carries_pre_fork = _turns_carrying_pre_fork_rollback(manifests, replaced)
+        replaced, carries_pre_fork = _rollback_relationships(manifests)
         for manifest in manifests:
             preview = manifest.user_message_preview.replace("\n", " ")[:80]
             marker = ""
