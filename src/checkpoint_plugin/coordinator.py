@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ._utils import expand_and_resolve
 from .env.collector import collect_environment, environment_to_blob
 from .env.providers import detect_provider
 from .fs.ignore import IgnoreMatcher
@@ -39,7 +40,7 @@ class CheckpointCoordinator:
     ) -> None:
         self.home = ensure_home(plugin_home)
         self.session_id = session_id or str(uuid.uuid4())
-        self.cwd = Path(cwd or Path.cwd()).expanduser().resolve()
+        self.cwd = expand_and_resolve(cwd or Path.cwd())
         self.session_dir = session_dir(self.session_id, self.home)
         self.store = CheckpointStore(self.session_dir)
 

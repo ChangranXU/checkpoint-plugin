@@ -388,7 +388,7 @@ def _edit_send_replaced_turns(
 
 
 def _turns_carrying_pre_fork_rollback(manifests: list[Any]) -> set[int]:
-    """Turns whose `thread_rolled_back` rolled back MORE turns than are captured (ES3).
+    """Turns whose `thread_rolled_back` rolled back more turns than are live (ES3).
 
     On a forked resume, codex replays a `thread_rolled_back num_turns=K` at the head of
     a captured turn whose K victims were edit-sent away BEFORE the fork — so they live
@@ -420,19 +420,15 @@ def _live_rollback_victims(
     victims_by_turn: dict[int, list[int]] = {}
     carriers: set[int] = set()
     live_turn_ids = {m.turn_id for m in manifests}
-    captured_turn_ids = {m.turn_id for m in manifests}
     for manifest in sorted(manifests, key=lambda item: item.turn_id):
         num_turns = _rolled_back_count(manifest)
         if num_turns <= 0:
             continue
-        captured_below_count = sum(
-            1 for tid in captured_turn_ids if tid < manifest.turn_id
-        )
         live_below = sorted(
             (tid for tid in live_turn_ids if tid < manifest.turn_id), reverse=True
         )
         victims = live_below[:num_turns]
-        if num_turns > captured_below_count:
+        if num_turns > len(live_below):
             carriers.add(manifest.turn_id)
         if victims:
             victims_by_turn[manifest.turn_id] = victims

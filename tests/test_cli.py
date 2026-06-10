@@ -448,16 +448,14 @@ def test_edit_send_replaced_turns_skips_already_replaced_turns(tmp_path):
     assert replaced == {3: 4, 4: 5, 2: 5}
 
 
-def test_pre_fork_carrier_detection_counts_all_captured_turns(tmp_path):
-    """A rollback reaching already-replaced captured turns is not pre-fork."""
+def test_pre_fork_carrier_detection_counts_only_live_captured_turns(tmp_path):
+    """A rollback reaching past already-replaced captured turns is a carrier."""
     transcript = tmp_path / "rollout.jsonl"
     slices = []
     payloads = [
-        {"type": "user_message", "message": "turn 1"},
-        {"type": "user_message", "message": "turn 2"},
-        {"type": "user_message", "message": "turn 3"},
+        {"type": "user_message", "message": "turn 0"},
         {"type": "thread_rolled_back", "num_turns": 1},
-        {"type": "thread_rolled_back", "num_turns": 4},
+        {"type": "thread_rolled_back", "num_turns": 2},
     ]
     offset = 0
     lines = []
@@ -477,7 +475,7 @@ def test_pre_fork_carrier_detection_counts_all_captured_turns(tmp_path):
             fs_ref="fs",
             trajectory_ref=TrajectoryReference("codex", str(transcript), start, end, 1),
         )
-        for turn_id, (start, end) in enumerate(slices, start=1)
+        for turn_id, (start, end) in enumerate(slices)
     ]
 
     replaced = _edit_send_replaced_turns(
@@ -485,8 +483,8 @@ def test_pre_fork_carrier_detection_counts_all_captured_turns(tmp_path):
     )
     carriers = _turns_carrying_pre_fork_rollback(manifests)
 
-    assert replaced == {3: 4, 4: 5, 2: 5, 1: 5}
-    assert carriers == set()
+    assert replaced == {0: 1, 1: 2}
+    assert carriers == {2}
 
 
 def test_edit_send_no_rollback_is_empty(tmp_path, monkeypatch):
