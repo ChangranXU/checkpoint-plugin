@@ -387,9 +387,7 @@ def _edit_send_replaced_turns(
     return replaced
 
 
-def _turns_carrying_pre_fork_rollback(
-    manifests: list[Any], replaced: dict[int, int]
-) -> set[int]:
+def _turns_carrying_pre_fork_rollback(manifests: list[Any]) -> set[int]:
     """Turns whose `thread_rolled_back` rolled back MORE turns than are captured (ES3).
 
     On a forked resume, codex replays a `thread_rolled_back num_turns=K` at the head of
@@ -402,10 +400,9 @@ def _turns_carrying_pre_fork_rollback(
 
     Returns the set of carrier turn_ids whose rollback reaches into the inherited prefix.
     Empty for the common case (a fully-captured in-session edit-send, already covered by
-    `replaced`).
+    `_edit_send_replaced_turns`).
     """
-    _replaced, carriers = _rollback_relationships(manifests)
-    return carriers
+    return _rollback_relationships(manifests)[1]
 
 
 def _rollback_relationships(manifests: list[Any]) -> tuple[dict[int, int], set[int]]:

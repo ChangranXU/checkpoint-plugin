@@ -483,7 +483,7 @@ def test_pre_fork_carrier_detection_counts_all_captured_turns(tmp_path):
     replaced = _edit_send_replaced_turns(
         CheckpointStore(tmp_path / "session"), manifests
     )
-    carriers = _turns_carrying_pre_fork_rollback(manifests, replaced)
+    carriers = _turns_carrying_pre_fork_rollback(manifests)
 
     assert replaced == {3: 4, 4: 5, 2: 5, 1: 5}
     assert carriers == set()
