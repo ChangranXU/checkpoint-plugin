@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from bisect import bisect_left
 import json
 import os
 import sys
@@ -419,21 +420,20 @@ def _live_rollback_victims(
 ) -> tuple[dict[int, list[int]], set[int]]:
     victims_by_turn: dict[int, list[int]] = {}
     carriers: set[int] = set()
-    live_turn_ids = {m.turn_id for m in manifests}
-    for manifest in sorted(manifests, key=lambda item: item.turn_id):
+    ordered_manifests = sorted(manifests, key=lambda item: item.turn_id)
+    live_turn_ids_sorted = [manifest.turn_id for manifest in ordered_manifests]
+    for manifest in ordered_manifests:
         num_turns = _rolled_back_count(manifest)
         if num_turns <= 0:
             continue
-        live_below = sorted(
-            (tid for tid in live_turn_ids if tid < manifest.turn_id), reverse=True
-        )
-        victims = live_below[:num_turns]
-        if num_turns > len(live_below):
+        live_below_count = bisect_left(live_turn_ids_sorted, manifest.turn_id)
+        victim_start = max(0, live_below_count - num_turns)
+        victims = live_turn_ids_sorted[victim_start:live_below_count][::-1]
+        if num_turns > live_below_count:
             carriers.add(manifest.turn_id)
         if victims:
             victims_by_turn[manifest.turn_id] = victims
-            for tid in victims:
-                live_turn_ids.discard(tid)
+            del live_turn_ids_sorted[victim_start:live_below_count]
     return victims_by_turn, carriers
 
 
