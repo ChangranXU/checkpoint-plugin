@@ -3705,6 +3705,63 @@ def test_resume_subagent_session_refuses_with_parent_redirect(tmp_path, monkeypa
     assert "checkpoint resume parent-1" in message
 
 
+def test_parent_resume_carries_checkpoint_subagent_nodes(tmp_path, monkeypatch):
+    """A parent resume should keep checkpoint-browser subagent lineage visible."""
+    from checkpoint_plugin.ui.session_browser import collect_provider_trees
+
+    plugin_home = tmp_path / "plugin"
+    cwd = tmp_path / "work"
+    copy_cwd = tmp_path / "work-copy"
+    cwd.mkdir()
+    (cwd / "file.txt").write_text("v1", encoding="utf-8")
+    _isolate_provider_env(monkeypatch)
+    monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(plugin_home))
+    monkeypatch.setenv("CHECKPOINT_PROVIDER", "codex")
+
+    parent = CheckpointCoordinator(session_id="parent-1", cwd=cwd)
+    parent.on_session_start()
+    parent.on_turn_end(TurnRecord(user_message="hi"))
+
+    subagent_ids = ["agent-xyz", "agent-uvw"]
+    for agent_id in subagent_ids:
+        sub = CheckpointCoordinator(
+            session_id=f"parent-1--subagent-{agent_id}", cwd=cwd
+        )
+        sub.on_session_start(
+            source="subagent",
+            lineage={"parent_session_id": "parent-1", "agent_id": agent_id},
+        )
+        sub.on_turn_end(TurnRecord(user_message=f"{agent_id} result"))
+
+    parent.on_turn_end(
+        TurnRecord(user_message="using two sub-agent agent-xyz and agent-uvw")
+    )
+    parent.on_turn_end(TurnRecord(user_message="ok"))
+
+    orchestrator = ResumeOrchestrator(cwd=cwd)
+    report = orchestrator.execute(
+        orchestrator.plan("parent-1", 2),
+        lambda _text: ResumeOptions(proceed=True, target_cwd=copy_cwd),
+    )
+
+    providers = collect_provider_trees(plugin_home / "sessions")
+    resumed = next(
+        node for node in providers["codex"] if node.session_id == report.new_session_id
+    )
+
+    assert set(resumed.subagent_children) == {1}
+    assert sorted(
+        child.lineage["agent_id"] for child in resumed.subagent_children[1]
+    ) == [
+        "agent-uvw",
+        "agent-xyz",
+    ]
+    assert {
+        child.lineage["parent_session_id"] for child in resumed.subagent_children[1]
+    } == {report.new_session_id}
+    assert all(child.cwd == str(copy_cwd) for child in resumed.subagent_children[1])
+
+
 def test_parent_resume_rewrites_carried_subagent_sessionid(tmp_path, monkeypatch):
     """H3: when a parent resume carries subagent transcripts, each carried
     record's sessionId is rewritten to the new parent id while uuid/parentUuid

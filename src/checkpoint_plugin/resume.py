@@ -43,7 +43,7 @@ from .integrations._trajectory_slicer import (
     recover_trailing_tail,
 )
 from .path_utils import mirror_path, path_within, rewrite_path_references_text
-from .paths import backups_dir, ensure_home, load_config, session_dir
+from .paths import backups_dir, ensure_home, load_config, session_dir, sessions_dir
 from .store import CheckpointStore, canonical_json
 from .types import CheckpointManifest, ResumePlan, ResumeReport, TrajectoryReference
 
@@ -317,6 +317,13 @@ class ResumeOrchestrator:
                 )
         if trajectory.data:
             target_store._atomic_write(target_store.trajectory_path, trajectory.data)
+        _copy_checkpoint_subagent_sessions(
+            self.home,
+            plan.session_id,
+            plan.turn_id,
+            new_session_id,
+            cwd,
+        )
 
 
 def _promote_manifest_blobs(
@@ -1639,6 +1646,134 @@ def _write_resumed_metadata(
     target_store._atomic_write(
         target_store.session_dir / "metadata.json",
         canonical_json(metadata) + "\n",
+    )
+
+
+def _copy_checkpoint_subagent_sessions(
+    home: Path,
+    source_parent_id: str,
+    through_turn_id: int,
+    new_parent_id: str,
+    cwd: Path,
+) -> None:
+    root = sessions_dir(home)
+    if not root.exists():
+        return
+    for source_dir in sorted(root.iterdir()):
+        if not source_dir.is_dir():
+            continue
+        metadata = read_metadata_json(source_dir / "metadata.json")
+        lineage = metadata.get("lineage")
+        if not isinstance(lineage, dict):
+            continue
+        if lineage.get("parent_session_id") != source_parent_id:
+            continue
+        agent_id = (
+            lineage.get("agent_id")
+            if isinstance(lineage.get("agent_id"), str)
+            else None
+        )
+        parent_turn = _parent_turn_for_subagent(
+            home, source_parent_id, agent_id, metadata
+        )
+        if parent_turn is None or parent_turn > through_turn_id:
+            continue
+        new_session_id = _copied_subagent_session_id(
+            source_dir.name, source_parent_id, new_parent_id
+        )
+        target_dir = session_dir(new_session_id, home)
+        if target_dir.exists():
+            continue
+        shutil.copytree(source_dir, target_dir, ignore=_ignore_unsafe_session_entries)
+        _rewrite_copied_subagent_session(
+            source_dir,
+            target_dir,
+            new_session_id,
+            new_parent_id,
+            cwd,
+        )
+
+
+def _copied_subagent_session_id(
+    source_session_id: str, source_parent_id: str, new_parent_id: str
+) -> str:
+    prefix = f"{source_parent_id}--subagent-"
+    if source_session_id.startswith(prefix):
+        return f"{new_parent_id}--subagent-{source_session_id[len(prefix) :]}"
+    safe_suffix = re.sub(r"[^A-Za-z0-9_.-]+", "-", source_session_id).strip("-")
+    return f"{new_parent_id}--subagent-{safe_suffix or 'copy'}"
+
+
+def _ignore_unsafe_session_entries(directory: str, entries: list[str]) -> set[str]:
+    ignored: set[str] = set()
+    for entry in entries:
+        path = Path(directory) / entry
+        try:
+            if (
+                path.is_symlink()
+                or path.is_socket()
+                or path.is_fifo()
+                or path.is_block_device()
+                or path.is_char_device()
+            ):
+                ignored.add(entry)
+        except OSError:
+            ignored.add(entry)
+    return ignored
+
+
+def _rewrite_copied_subagent_session(
+    source_dir: Path,
+    target_dir: Path,
+    new_session_id: str,
+    new_parent_id: str,
+    cwd: Path,
+) -> None:
+    target_store = CheckpointStore(target_dir)
+    metadata = read_metadata_json(target_dir / "metadata.json")
+    metadata["session_id"] = new_session_id
+    metadata["cwd"] = str(cwd)
+    metadata["source"] = "subagent"
+    lineage = metadata.get("lineage")
+    lineage = dict(lineage) if isinstance(lineage, dict) else {}
+    lineage["parent_session_id"] = new_parent_id
+    metadata["lineage"] = lineage
+    target_store._atomic_write(
+        target_store.session_dir / "metadata.json",
+        canonical_json(metadata) + "\n",
+    )
+    source_store = CheckpointStore(source_dir)
+    for manifest in source_store.list_manifests():
+        target_store.write_manifest(
+            _copied_subagent_manifest(
+                manifest, source_store, target_store, new_session_id, cwd
+            )
+        )
+
+
+def _copied_subagent_manifest(
+    manifest: CheckpointManifest,
+    source_store: CheckpointStore,
+    target_store: CheckpointStore,
+    new_session_id: str,
+    cwd: Path,
+) -> CheckpointManifest:
+    trajectory_ref = manifest.trajectory_ref
+    if trajectory_ref is not None and str(
+        Path(trajectory_ref.transcript_path).expanduser()
+    ) == str(source_store.trajectory_path):
+        trajectory_ref = replace(
+            trajectory_ref, transcript_path=str(target_store.trajectory_path)
+        )
+    try:
+        fs_ref = _rewrite_fs_ref_for_cwd(manifest.fs_ref, target_store, cwd)
+    except (OSError, KeyError, ValueError, json.JSONDecodeError, UnicodeDecodeError):
+        fs_ref = manifest.fs_ref
+    return replace(
+        manifest,
+        session_id=new_session_id,
+        fs_ref=fs_ref,
+        trajectory_ref=trajectory_ref,
     )
 
 
