@@ -21,7 +21,9 @@ def test_rewrite_path_references_matches_complete_path_references():
 
     assert f'exact = "{dest}"' in rewritten
     assert f'child = "{dest}/config.toml"' in rewritten
-    assert f'starts_with_path = "{dest}/first" and second = "{dest}/second"' in rewritten
+    assert (
+        f'starts_with_path = "{dest}/first" and second = "{dest}/second"' in rewritten
+    )
     assert f'suffix = "{source}-backup"' in rewritten
     assert f'dotted = "{source}.bak"' in rewritten
     assert f'embedded = "/prefix{source}/config.toml"' in rewritten

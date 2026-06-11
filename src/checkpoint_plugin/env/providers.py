@@ -74,7 +74,9 @@ OPENCODE_RESUME_POLICY = ProviderResumePolicy(
     data_dir_name="opencode-data",
     path_env_keys=frozenset({"OPENCODE_CONFIG", "OPENCODE_TUI_CONFIG"}),
     runtime_env_extra="opencode_runtime_env",
-    runtime_env_skip_keys=frozenset({"OPENCODE_CONFIG_CONTENT", "OPENCODE_CONFIG_DIR", "OPENCODE_DATA_DIR"}),
+    runtime_env_skip_keys=frozenset(
+        {"OPENCODE_CONFIG_CONTENT", "OPENCODE_CONFIG_DIR", "OPENCODE_DATA_DIR"}
+    ),
     preflight_kind="opencode_import",
 )
 
@@ -103,7 +105,11 @@ def _directory_project_file(path: Path | str) -> str:
 def claude_layout() -> ProviderLayout:
     home = _home()
     claude_home = home / ".claude"
-    managed_root = Path("/Library/Application Support/ClaudeCode") if os.name != "nt" else Path.home()
+    managed_root = (
+        Path("/Library/Application Support/ClaudeCode")
+        if os.name != "nt"
+        else Path.home()
+    )
     return ProviderLayout(
         name="claude",
         home=claude_home,
@@ -191,7 +197,9 @@ def codex_layout() -> ProviderLayout:
 
 def opencode_layout() -> ProviderLayout:
     home = _home()
-    default_opencode_home = (Path(os.environ.get("XDG_CONFIG_HOME", str(home / ".config"))) / "opencode").expanduser()
+    default_opencode_home = (
+        Path(os.environ.get("XDG_CONFIG_HOME", str(home / ".config"))) / "opencode"
+    ).expanduser()
     # OpenCode's OPENCODE_CONFIG_DIR is the actual config directory
     # (Global.Path.config), not the XDG parent. OPENCODE_HOME is kept for
     # backwards-compatible hook installer tests and older plugin setups.
@@ -207,7 +215,9 @@ def opencode_layout() -> ProviderLayout:
     custom_config = os.environ.get("OPENCODE_CONFIG")
     custom_tui_config = os.environ.get("OPENCODE_TUI_CONFIG")
     custom_config_files = [Path(custom_config).expanduser()] if custom_config else []
-    custom_tui_files = [Path(custom_tui_config).expanduser()] if custom_tui_config else []
+    custom_tui_files = (
+        [Path(custom_tui_config).expanduser()] if custom_tui_config else []
+    )
     opencode_config_files = [
         path
         for config_home in config_homes
@@ -245,7 +255,9 @@ def opencode_layout() -> ProviderLayout:
         "opencode-home-singular": home / ".opencode" / "skill",
         "agent-user": home / ".agents" / "skills",
     }
-    if not _truthy_env("OPENCODE_DISABLE_CLAUDE_CODE") and not _truthy_env("OPENCODE_DISABLE_CLAUDE_CODE_SKILLS"):
+    if not _truthy_env("OPENCODE_DISABLE_CLAUDE_CODE") and not _truthy_env(
+        "OPENCODE_DISABLE_CLAUDE_CODE_SKILLS"
+    ):
         skills_dirs["claude-user"] = home / ".claude" / "skills"
     if default_opencode_home != opencode_home:
         skills_dirs["opencode-default"] = default_opencode_home / "skills"
@@ -370,12 +382,23 @@ def resume_policy_for_provider(name: str) -> ProviderResumePolicy | None:
 
 
 def detect_provider(cwd: Path) -> ProviderLayout:
-    env_provider = os.environ.get("CHECKPOINT_PROVIDER") or os.environ.get("CLAUDE_PROVIDER")
+    env_provider = os.environ.get("CHECKPOINT_PROVIDER") or os.environ.get(
+        "CLAUDE_PROVIDER"
+    )
     if env_provider:
         return layout_for_provider(env_provider)
 
     _PROVIDER_ENV_MARKERS = [
-        (["OPENCODE_PROVIDER", "OPENCODE_CONFIG_DIR", "OPENCODE_DB", "OPENCODE_WORKSPACE_ID", "OPENCODE_CLIENT"], opencode_layout),
+        (
+            [
+                "OPENCODE_PROVIDER",
+                "OPENCODE_CONFIG_DIR",
+                "OPENCODE_DB",
+                "OPENCODE_WORKSPACE_ID",
+                "OPENCODE_CLIENT",
+            ],
+            opencode_layout,
+        ),
         (["CLAUDE_SESSION_ID", "CLAUDE_PROJECT_DIR"], claude_layout),
         (["CODEX_HOME", "CODEX_SESSION_ID"], codex_layout),
     ]
@@ -392,7 +415,11 @@ def detect_provider(cwd: Path) -> ProviderLayout:
     ]
 
     for markers, layout_fn in _PROVIDER_FILE_MARKERS:
-        if any((path / marker).exists() for path in (cwd, *cwd.parents) for marker in markers):
+        if any(
+            (path / marker).exists()
+            for path in (cwd, *cwd.parents)
+            for marker in markers
+        ):
             return layout_fn()
 
     return generic_layout()

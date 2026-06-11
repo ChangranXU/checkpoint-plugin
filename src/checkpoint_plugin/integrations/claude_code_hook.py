@@ -55,7 +55,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     payload = _read_payload()
     cwd = Path(os.environ.get("CLAUDE_PROJECT_DIR") or payload.get("cwd") or Path.cwd())
-    parent_session_id = os.environ.get("CLAUDE_SESSION_ID") or str(payload.get("session_id") or "claude-session")
+    parent_session_id = os.environ.get("CLAUDE_SESSION_ID") or str(
+        payload.get("session_id") or "claude-session"
+    )
     _seed_claude_env(parent_session_id, payload)
 
     if args.event == "subagent_end":
@@ -67,7 +69,9 @@ def main(argv: list[str] | None = None) -> int:
         coordinator.on_session_start(
             source=_first_string(payload, "source"),
             session_env=_session_env(payload),
-            source_transcript_path=_first_string(payload, "transcript_path", "transcriptPath"),
+            source_transcript_path=_first_string(
+                payload, "transcript_path", "transcriptPath"
+            ),
         )
         return 0
 
@@ -75,7 +79,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     turn_record = _turn_record(payload)
-    coordinator.on_turn_end(turn_record, _trajectory_ref(payload, provider="claude") or _empty_trajectory_ref("claude"))
+    coordinator.on_turn_end(
+        turn_record,
+        _trajectory_ref(payload, provider="claude") or _empty_trajectory_ref("claude"),
+    )
     return 0
 
 
@@ -109,7 +116,9 @@ def _on_subagent_end(payload: dict[str, Any], cwd: Path, parent_session_id: str)
     # and is recorded as before.
     if transcript_path is None and agent_id is not None and agent_type is None:
         return 0
-    sub_session_id = f"{parent_session_id}--subagent-{agent_id or _stem(transcript_path)}"
+    sub_session_id = (
+        f"{parent_session_id}--subagent-{agent_id or _stem(transcript_path)}"
+    )
     coordinator = CheckpointCoordinator(session_id=sub_session_id, cwd=cwd)
     # SubagentStop omits `model` (SessionStart-only); inherit the parent's pinned
     # session_env so the subagent checkpoint records the same model/effort (G2).
@@ -157,7 +166,9 @@ def _on_subagent_end(payload: dict[str, Any], cwd: Path, parent_session_id: str)
         # past `sidechain_observed_size` means records were missed.
         observed = _sidechain_observed_state(transcript_path, ref.end_offset)
         if observed is not None:
-            lineage["sidechain_observed_size"], lineage["sidechain_observed_mtime"] = observed
+            lineage["sidechain_observed_size"], lineage["sidechain_observed_mtime"] = (
+                observed
+            )
     coordinator.on_session_start(
         source="subagent",
         session_env=sub_env,
@@ -217,8 +228,12 @@ def _session_env(payload: dict[str, Any]) -> dict[str, str]:
 
 
 def _turn_record(payload: dict[str, Any]) -> TurnRecord:
-    user_message = _first_string(payload, "prompt", "user_message", "userMessage", "input")
-    assistant_text = _first_string(payload, "assistant_text", "assistantText", "response", "output")
+    user_message = _first_string(
+        payload, "prompt", "user_message", "userMessage", "input"
+    )
+    assistant_text = _first_string(
+        payload, "assistant_text", "assistantText", "response", "output"
+    )
     tool_calls = payload.get("tool_calls") or payload.get("toolCalls") or []
     if not isinstance(tool_calls, list):
         tool_calls = [tool_calls]
@@ -234,7 +249,9 @@ def _is_stop_event(payload: dict[str, Any]) -> bool:
     return _first_string(payload, "hook_event_name", "hookEventName") == "Stop"
 
 
-def _trajectory_ref(payload: dict[str, Any], provider: str) -> TrajectoryReference | None:
+def _trajectory_ref(
+    payload: dict[str, Any], provider: str
+) -> TrajectoryReference | None:
     transcript_path = _first_string(payload, "transcript_path", "transcriptPath")
     if transcript_path is None:
         return None
@@ -242,7 +259,9 @@ def _trajectory_ref(payload: dict[str, Any], provider: str) -> TrajectoryReferen
     return jsonl_ref_for_turn(provider, Path(transcript_path), turn_id, claude_key)
 
 
-def _subagent_transcript_path(payload: dict[str, Any], agent_id: str | None) -> Path | None:
+def _subagent_transcript_path(
+    payload: dict[str, Any], agent_id: str | None
+) -> Path | None:
     """Resolve the subagent's OWN transcript file (never the parent's).
 
     Claude writes a subagent to a dedicated sidechain file
@@ -272,12 +291,17 @@ def _is_subagent_transcript(path: Path) -> bool:
     return path.parent.name == "subagents" or path.stem.startswith("agent-")
 
 
-def _existing_nested_subagent(parent_transcript: Path, agent_id: str | None) -> Path | None:
+def _existing_nested_subagent(
+    parent_transcript: Path, agent_id: str | None
+) -> Path | None:
     """First existing `subagents/agent-<id>.jsonl` derived from a parent path."""
     if not agent_id:
         return None
     candidates = [
-        parent_transcript.parent / parent_transcript.stem / "subagents" / f"agent-{agent_id}.jsonl",
+        parent_transcript.parent
+        / parent_transcript.stem
+        / "subagents"
+        / f"agent-{agent_id}.jsonl",
         parent_transcript.parent / "subagents" / f"agent-{agent_id}.jsonl",
     ]
     for candidate in candidates:
@@ -286,7 +310,9 @@ def _existing_nested_subagent(parent_transcript: Path, agent_id: str | None) -> 
     return None
 
 
-def _subagent_trajectory_ref(payload: dict[str, Any], transcript_path: Path | None) -> TrajectoryReference | None:
+def _subagent_trajectory_ref(
+    payload: dict[str, Any], transcript_path: Path | None
+) -> TrajectoryReference | None:
     if transcript_path is None:
         return None
     turn_id = payload.get("turn_id") or payload.get("turnId")
@@ -352,7 +378,9 @@ def _stem(path: Path | None) -> str:
     return path.stem if path is not None else "unknown"
 
 
-def _sidechain_observed_state(transcript_path: Path, sliced_end_offset: int) -> tuple[int, str] | None:
+def _sidechain_observed_state(
+    transcript_path: Path, sliced_end_offset: int
+) -> tuple[int, str] | None:
     """The sidechain file's (size, mtime-iso) at capture time, for staleness checks (F12).
 
     A later flush grows the file beyond the captured slice's end; recording the size

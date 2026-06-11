@@ -6,7 +6,6 @@ import json
 import shutil
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -19,7 +18,10 @@ from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.styles import Style
 
 from checkpoint_plugin._utils import non_empty_str
-from checkpoint_plugin.coordinator import reanchor_last_turn_to_eof, resolve_session_title
+from checkpoint_plugin.coordinator import (
+    reanchor_last_turn_to_eof,
+    resolve_session_title,
+)
 from checkpoint_plugin.paths import sessions_dir
 from checkpoint_plugin.resume import ResumeOrchestrator, _parent_turn_for_subagent
 from checkpoint_plugin.store import CheckpointStore
@@ -45,12 +47,18 @@ class SessionNode:
     fork_parent: tuple[str, int | None] | None = None
     subagent_parent: tuple[str, int | None] | None = None
     fork_children: dict[int | None, list["SessionNode"]] = field(default_factory=dict)
-    subagent_children: dict[int | None, list["SessionNode"]] = field(default_factory=dict)
+    subagent_children: dict[int | None, list["SessionNode"]] = field(
+        default_factory=dict
+    )
     phantom_ref: str | None = None
 
     @property
     def provider(self) -> str:
-        return non_empty_str(self.metadata.get("provider")) or _manifest_provider(self.manifests) or "generic"
+        return (
+            non_empty_str(self.metadata.get("provider"))
+            or _manifest_provider(self.manifests)
+            or "generic"
+        )
 
     @property
     def created_ts(self) -> str:
@@ -62,7 +70,11 @@ class SessionNode:
 
     @property
     def title(self) -> str:
-        return non_empty_str(self.metadata.get("session_title")) or non_empty_str(resolve_session_title(self.metadata)) or "-"
+        return (
+            non_empty_str(self.metadata.get("session_title"))
+            or non_empty_str(resolve_session_title(self.metadata))
+            or "-"
+        )
 
     @property
     def source(self) -> str:
@@ -108,7 +120,9 @@ def show_session_browser(
     return _show_tui(providers)
 
 
-def collect_provider_trees(root: Path | None = None, show_all: bool = False) -> dict[str, list[SessionNode]]:
+def collect_provider_trees(
+    root: Path | None = None, show_all: bool = False
+) -> dict[str, list[SessionNode]]:
     root = root or sessions_dir()
     nodes = _load_nodes(root, show_all=show_all)
     _link_nodes(nodes, root)
@@ -136,7 +150,9 @@ def render_session_tree(providers: dict[str, list[SessionNode]]) -> str:
         lines.append(f"{provider} ({len(real_roots)} sessions, {total_turns} turns)")
         groups = _group_by_project(nodes)
         for _, group_label, group_nodes in groups:
-            real_in_group = [n for n in _walk_sessions(group_nodes) if not n.phantom_ref]
+            real_in_group = [
+                n for n in _walk_sessions(group_nodes) if not n.phantom_ref
+            ]
             lines.append(f"  [{group_label}] ({len(real_in_group)} sessions)")
             rows = _rows_for_flat_group(group_nodes)
             for row in rows:
@@ -186,12 +202,25 @@ def _show_tui(providers: dict[str, list[SessionNode]]) -> BrowserAction | None:
         selected_by_provider[current_provider()] = index
         return current_rows[index]
 
-    header = Window(FormattedTextControl(lambda: _header_fragments(provider_names, providers, state)), height=1)
+    header = Window(
+        FormattedTextControl(
+            lambda: _header_fragments(provider_names, providers, state)
+        ),
+        height=1,
+    )
     body = Window(
-        FormattedTextControl(lambda: _body_fragments(rows(), selected_by_provider[current_provider()], state)),
+        FormattedTextControl(
+            lambda: _body_fragments(
+                rows(), selected_by_provider[current_provider()], state
+            )
+        ),
         height=lambda: _body_height(state),
     )
-    detail = Window(FormattedTextControl(lambda: _detail_fragments(selected_row(), state)), height=8, wrap_lines=True)
+    detail = Window(
+        FormattedTextControl(lambda: _detail_fragments(selected_row(), state)),
+        height=8,
+        wrap_lines=True,
+    )
     output = Window(
         FormattedTextControl(lambda: _output_fragments(state)),
         height=lambda: _output_height(state),
@@ -205,7 +234,14 @@ def _show_tui(providers: dict[str, list[SessionNode]]) -> BrowserAction | None:
     status = Window(FormattedTextControl(lambda: _status_fragments(state)), height=1)
     command = VSplit(
         [
-            Window(FormattedTextControl(lambda: [("class:command", "/" if state["mode"] == "command" else "")]), width=1),
+            Window(
+                FormattedTextControl(
+                    lambda: [
+                        ("class:command", "/" if state["mode"] == "command" else "")
+                    ]
+                ),
+                width=1,
+            ),
             Window(BufferControl(buffer=command_buffer), height=1),
         ],
         height=1,
@@ -235,8 +271,14 @@ def _show_tui(providers: dict[str, list[SessionNode]]) -> BrowserAction | None:
         state["tree_scroll"] = 0
         real_roots = [n for n in providers[current_provider()] if not n.phantom_ref]
         node_count = len(real_roots)
-        turn_count = sum(_count_turns(node, skip_phantoms=True) for node in providers[current_provider()])
-        set_status(f"Provider: {current_provider()} ({node_count} sessions, {turn_count} turns)", event)
+        turn_count = sum(
+            _count_turns(node, skip_phantoms=True)
+            for node in providers[current_provider()]
+        )
+        set_status(
+            f"Provider: {current_provider()} ({node_count} sessions, {turn_count} turns)",
+            event,
+        )
 
     def move_selection(delta: int, event) -> None:  # noqa: ANN001
         current_rows = rows()
@@ -244,7 +286,9 @@ def _show_tui(providers: dict[str, list[SessionNode]]) -> BrowserAction | None:
             return
         provider = current_provider()
         old_selection = selected_by_provider[provider]
-        selected_by_provider[provider] = max(0, min(selected_by_provider[provider] + delta, len(current_rows) - 1))
+        selected_by_provider[provider] = max(
+            0, min(selected_by_provider[provider] + delta, len(current_rows) - 1)
+        )
 
         # Only invalidate if selection actually changed
         if old_selection != selected_by_provider[provider]:
@@ -278,15 +322,22 @@ def _show_tui(providers: dict[str, list[SessionNode]]) -> BrowserAction | None:
             return
         if action.command == "resume":
             set_output(*_resume_hint(action.session_id, action.turn_id), event)
-            set_status("Resume command shown. Run it outside the browser to restore.", event)
+            set_status(
+                "Resume command shown. Run it outside the browser to restore.", event
+            )
 
     def open_resume_for_selection(event) -> None:  # noqa: ANN001
         action = selected_turn_action("resume")
         if action is None or action.session_id is None or action.turn_id is None:
-            set_status("Resume is available only for valid parent-session checkpoint turns.", event)
+            set_status(
+                "Resume is available only for valid parent-session checkpoint turns.",
+                event,
+            )
             return
         set_output(*_resume_hint(action.session_id, action.turn_id), event)
-        set_status("Resume command shown. Run it outside the browser to restore.", event)
+        set_status(
+            "Resume command shown. Run it outside the browser to restore.", event
+        )
 
     def selected_turn_action(command: str) -> BrowserAction | None:
         row = selected_row()
@@ -326,11 +377,16 @@ def _show_tui(providers: dict[str, list[SessionNode]]) -> BrowserAction | None:
             command_buffer.text = ""
             state["mode"] = "browse"
             if action is None:
-                set_status("Command unavailable for this row. Select a valid checkpoint turn.", event)
+                set_status(
+                    "Command unavailable for this row. Select a valid checkpoint turn.",
+                    event,
+                )
                 return
             if action.command == "help":
                 set_output("Help", _render_help_text(), event)
-                set_status("Help displayed. Use ? or F1 to toggle inline help panel.", event)
+                set_status(
+                    "Help displayed. Use ? or F1 to toggle inline help panel.", event
+                )
                 return
             if action.command == "quit":
                 event.app.exit(result=None)
@@ -357,14 +413,20 @@ def _show_tui(providers: dict[str, list[SessionNode]]) -> BrowserAction | None:
         if row.manifest is None:
             set_status("Select a checkpoint turn to inspect or resume.", event)
         elif _can_resume_row(row):
-            set_status(f"✓ Turn {row.manifest.turn_id} | Resumable | Press: r=resume d=diff Enter=show", event)
+            set_status(
+                f"✓ Turn {row.manifest.turn_id} | Resumable | Press: r=resume d=diff Enter=show",
+                event,
+            )
         else:
             reason = ""
             if row.node.subagent_parent or row.node.source == "subagent":
                 reason = "subagent"
             elif row.node.marker:
                 reason = "no capture"
-            set_status(f"Turn {row.manifest.turn_id} | Not resumable ({reason}) | Press: d=diff Enter=show", event)
+            set_status(
+                f"Turn {row.manifest.turn_id} | Not resumable ({reason}) | Press: d=diff Enter=show",
+                event,
+            )
 
     @bindings.add("/", filter=browse_mode)
     def _command_mode(event) -> None:  # noqa: ANN001
@@ -380,7 +442,9 @@ def _show_tui(providers: dict[str, list[SessionNode]]) -> BrowserAction | None:
         if state["show_help"]:
             set_status("Help panel shown. Press ? or F1 again to hide.", event)
         else:
-            set_status("↑↓:move  Enter:toggle  r:resume  d:diff  /:cmd  ?:help  q:quit", event)
+            set_status(
+                "↑↓:move  Enter:toggle  r:resume  d:diff  /:cmd  ?:help  q:quit", event
+            )
         invalidate(event)
 
     @bindings.add("escape")
@@ -430,7 +494,9 @@ def _show_tui(providers: dict[str, list[SessionNode]]) -> BrowserAction | None:
         current_rows = rows()
         if current_rows:
             provider = current_provider()
-            selected_by_provider[provider] = max(0, selected_by_provider[provider] - _tree_page_size(state))
+            selected_by_provider[provider] = max(
+                0, selected_by_provider[provider] - _tree_page_size(state)
+            )
             _sync_tree_scroll(state, selected_by_provider[provider], len(current_rows))
         invalidate(event)
 
@@ -476,14 +542,18 @@ def _show_tui(providers: dict[str, list[SessionNode]]) -> BrowserAction | None:
     def _resize_output_up(event) -> None:  # noqa: ANN001
         if state.get("output_visible"):
             state["output_height"] = min(20, int(state.get("output_height", 8)) + 2)
-            state["output_scroll"] = _clamp_output_scroll(state, int(state.get("output_scroll") or 0))
+            state["output_scroll"] = _clamp_output_scroll(
+                state, int(state.get("output_scroll") or 0)
+            )
             set_status(f"Output height: {state['output_height']} lines", event)
 
     @bindings.add("c-down")
     def _resize_output_down(event) -> None:  # noqa: ANN001
         if state.get("output_visible"):
             state["output_height"] = max(4, int(state.get("output_height", 8)) - 2)
-            state["output_scroll"] = _clamp_output_scroll(state, int(state.get("output_scroll") or 0))
+            state["output_scroll"] = _clamp_output_scroll(
+                state, int(state.get("output_scroll") or 0)
+            )
             set_status(f"Output height: {state['output_height']} lines", event)
 
     @bindings.add("c-f")
@@ -526,7 +596,12 @@ def _show_tui(providers: dict[str, list[SessionNode]]) -> BrowserAction | None:
 
     root = HSplit([header, body, detail, help_panel, output, status, command])
     style = _browser_style()
-    return Application(layout=Layout(root, focused_element=body), key_bindings=bindings, style=style, full_screen=True).run()
+    return Application(
+        layout=Layout(root, focused_element=body),
+        key_bindings=bindings,
+        style=style,
+        full_screen=True,
+    ).run()
 
 
 def _browser_style() -> Style:
@@ -601,7 +676,9 @@ def _load_nodes(root: Path, show_all: bool = False) -> dict[str, SessionNode]:
     return nodes
 
 
-def _is_empty_node(manifests: list[CheckpointManifest], metadata: dict[str, Any]) -> bool:
+def _is_empty_node(
+    manifests: list[CheckpointManifest], metadata: dict[str, Any]
+) -> bool:
     """Check if a session node is empty/dirty."""
     # No turns at all
     if not manifests:
@@ -624,7 +701,12 @@ def _link_nodes(nodes: dict[str, SessionNode], root: Path) -> None:
         lineage = node.lineage
         parent_session = non_empty_str(lineage.get("parent_session_id"))
         if parent_session and parent_session in nodes:
-            turn = _safe_parent_turn(root, parent_session, non_empty_str(lineage.get("agent_id")), node.metadata)
+            turn = _safe_parent_turn(
+                root,
+                parent_session,
+                non_empty_str(lineage.get("agent_id")),
+                node.metadata,
+            )
             node.subagent_parent = (parent_session, turn)
             nodes[parent_session].subagent_children.setdefault(turn, []).append(node)
             continue
@@ -640,7 +722,10 @@ def _link_nodes(nodes: dict[str, SessionNode], root: Path) -> None:
     for child, parent_node, fork_turn in cross_cwd:
         _build_phantom_ancestry(child, parent_node, fork_turn, nodes)
     for node in nodes.values():
-        for children in [*node.fork_children.values(), *node.subagent_children.values()]:
+        for children in [
+            *node.fork_children.values(),
+            *node.subagent_children.values(),
+        ]:
             children.sort(key=_session_sort_key, reverse=True)
 
 
@@ -662,7 +747,11 @@ def _fork_parent(
     transcript = non_empty_str(node.metadata.get("forked_from_transcript"))
     if (not parent_session or parent_session not in nodes) and transcript:
         parent_session = path_index.get(str(Path(transcript).expanduser()))
-    if not parent_session or parent_session not in nodes or parent_session == node.session_id:
+    if (
+        not parent_session
+        or parent_session not in nodes
+        or parent_session == node.session_id
+    ):
         return None
     turn = _fork_parent_turn(nodes[parent_session], node, root)
     return parent_session, turn
@@ -693,7 +782,11 @@ def _fork_parent_turn(parent: SessionNode, node: SessionNode, root: Path) -> int
                 continue
             if str(Path(ref.transcript_path).expanduser()) != parent_path:
                 continue
-            end = ref.end_offset if ref.end_offset is not None else manifest.trajectory_end_offset
+            end = (
+                ref.end_offset
+                if ref.end_offset is not None
+                else manifest.trajectory_end_offset
+            )
             if end is not None and end <= offset:
                 candidates.append(manifest.turn_id)
         if candidates:
@@ -706,7 +799,9 @@ def _fork_parent_turn(parent: SessionNode, node: SessionNode, root: Path) -> int
     return None
 
 
-def _codex_fork_parent_offset(node: SessionNode, transcript: str | None, root: Path) -> int | None:
+def _codex_fork_parent_offset(
+    node: SessionNode, transcript: str | None, root: Path
+) -> int | None:
     """Parent-file byte offset of a codex fork's branch point.
 
     Walks the parent transcript and the fork-point trajectory blob in lockstep,
@@ -857,14 +952,20 @@ def _build_phantom_ancestry(
         child.fork_parent = (prev_phantom.session_id, prev_turn)
 
 
-def _safe_parent_turn(root: Path, parent_session_id: str, agent_id: str | None, metadata: dict[str, Any]) -> int | None:
+def _safe_parent_turn(
+    root: Path, parent_session_id: str, agent_id: str | None, metadata: dict[str, Any]
+) -> int | None:
     try:
-        return _parent_turn_for_subagent(root.parent, parent_session_id, agent_id, metadata)
+        return _parent_turn_for_subagent(
+            root.parent, parent_session_id, agent_id, metadata
+        )
     except Exception:
         return None
 
 
-def _rows_for_nodes(nodes: list[SessionNode], expanded: set[str] | None = None) -> list[TreeRow]:
+def _rows_for_nodes(
+    nodes: list[SessionNode], expanded: set[str] | None = None
+) -> list[TreeRow]:
     if expanded is None:
         expanded = {node.session_id for node in _walk_sessions(nodes)}
         for group_key, _, _ in _group_by_project(nodes):
@@ -900,7 +1001,9 @@ def _default_expanded_groups(providers: dict[str, list[SessionNode]]) -> set[str
     return expanded
 
 
-def _rows_for_flat_group(nodes: list[SessionNode], expanded: set[str] | None = None) -> list[TreeRow]:
+def _rows_for_flat_group(
+    nodes: list[SessionNode], expanded: set[str] | None = None
+) -> list[TreeRow]:
     """Render session rows without group headers (for text output where groups are handled externally)."""
     if expanded is None:
         expanded = {node.session_id for node in _walk_sessions(nodes)}
@@ -910,7 +1013,9 @@ def _rows_for_flat_group(nodes: list[SessionNode], expanded: set[str] | None = N
     return rows
 
 
-def _group_by_project(nodes: list[SessionNode]) -> list[tuple[str, str, list[SessionNode]]]:
+def _group_by_project(
+    nodes: list[SessionNode],
+) -> list[tuple[str, str, list[SessionNode]]]:
     """Group session nodes by cwd. Returns (group_key, display_label, nodes) tuples sorted by recency."""
     groups: dict[str, list[SessionNode]] = {}
     for node in nodes:
@@ -924,11 +1029,15 @@ def _group_by_project(nodes: list[SessionNode]) -> list[tuple[str, str, list[Ses
         else:
             label = Path(key).name or key
         result.append((f"__group__{key}", label, group_nodes))
-    result.sort(key=lambda g: max((n.created_ts for n in g[2]), default=""), reverse=True)
+    result.sort(
+        key=lambda g: max((n.created_ts for n in g[2]), default=""), reverse=True
+    )
     return result
 
 
-def _append_session_rows(rows: list[TreeRow], node: SessionNode, depth: int, expanded: set[str]) -> None:
+def _append_session_rows(
+    rows: list[TreeRow], node: SessionNode, depth: int, expanded: set[str]
+) -> None:
     label = _session_label(node)
     is_expanded = node.session_id in expanded
     rows.append(
@@ -950,12 +1059,29 @@ def _append_session_rows(rows: list[TreeRow], node: SessionNode, depth: int, exp
     for child in [*unknown_forks, *unknown_subagents]:
         _append_session_rows(rows, child, depth + 1, expanded)
     for manifest in node.manifests:
-        rows.append(TreeRow("turn", node, manifest, depth + 1, _turn_label(manifest), "class:turn"))
+        rows.append(
+            TreeRow(
+                "turn", node, manifest, depth + 1, _turn_label(manifest), "class:turn"
+            )
+        )
         for child in node.subagent_children.get(manifest.turn_id, []):
-            rows.append(TreeRow("link", child, None, depth + 2, "subagent spawned here", "class:subagent"))
+            rows.append(
+                TreeRow(
+                    "link",
+                    child,
+                    None,
+                    depth + 2,
+                    "subagent spawned here",
+                    "class:subagent",
+                )
+            )
             _append_session_rows(rows, child, depth + 3, expanded)
         for child in node.fork_children.get(manifest.turn_id, []):
-            rows.append(TreeRow("link", child, None, depth + 2, "forked/resumed here", "class:fork"))
+            rows.append(
+                TreeRow(
+                    "link", child, None, depth + 2, "forked/resumed here", "class:fork"
+                )
+            )
             _append_session_rows(rows, child, depth + 3, expanded)
 
 
@@ -964,7 +1090,9 @@ def _walk_sessions(nodes: list[SessionNode]) -> list[SessionNode]:
     for node in nodes:
         result.append(node)
         children = [child for group in node.fork_children.values() for child in group]
-        children.extend(child for group in node.subagent_children.values() for child in group)
+        children.extend(
+            child for group in node.subagent_children.values() for child in group
+        )
         result.extend(_walk_sessions(children))
     return result
 
@@ -983,7 +1111,9 @@ def _header_fragments(
     for index, provider in enumerate(provider_names):
         real_roots = [n for n in providers[provider] if not n.phantom_ref]
         node_count = len(real_roots)
-        turn_count = sum(_count_turns(node, skip_phantoms=True) for node in providers[provider])
+        turn_count = sum(
+            _count_turns(node, skip_phantoms=True) for node in providers[provider]
+        )
         style = "class:tab.selected" if index == selected else "class:tab"
         fragments.append((style, f" {provider} "))
         fragments.append(("class:dim", f"({node_count}/{turn_count}) "))
@@ -992,7 +1122,9 @@ def _header_fragments(
     return fragments
 
 
-def _body_fragments(rows: list[TreeRow], selected: int, state: dict[str, Any]) -> list[tuple[str, str]]:
+def _body_fragments(
+    rows: list[TreeRow], selected: int, state: dict[str, Any]
+) -> list[tuple[str, str]]:
     if not rows:
         return [
             ("class:muted", "\n"),
@@ -1011,7 +1143,9 @@ def _body_fragments(rows: list[TreeRow], selected: int, state: dict[str, Any]) -
     fragments: list[tuple[str, str]] = []
     if start > 0:
         percent = int((start / len(rows)) * 100)
-        fragments.append(("class:muted", f"  ⬆ {start} rows above ({percent}% scrolled) ⬆\n"))
+        fragments.append(
+            ("class:muted", f"  ⬆ {start} rows above ({percent}% scrolled) ⬆\n")
+        )
     selected_row = rows[selected]
     for row in visible:
         is_selected = row is selected_row
@@ -1021,7 +1155,9 @@ def _body_fragments(rows: list[TreeRow], selected: int, state: dict[str, Any]) -
     if start + height < len(rows):
         remaining = len(rows) - start - height
         percent = int(((start + height) / len(rows)) * 100)
-        fragments.append(("class:muted", f"  ⬇ {remaining} rows below ({percent}% scrolled) ⬇\n"))
+        fragments.append(
+            ("class:muted", f"  ⬇ {remaining} rows below ({percent}% scrolled) ⬇\n")
+        )
     return fragments
 
 
@@ -1057,7 +1193,9 @@ def _help_height(state: dict[str, Any]) -> int:
 def _output_height(state: dict[str, Any]) -> int:
     if not state.get("output_visible"):
         return 0
-    return min(int(state.get("output_height", 8)), shutil.get_terminal_size().lines // 3)
+    return min(
+        int(state.get("output_height", 8)), shutil.get_terminal_size().lines // 3
+    )
 
 
 def _output_page_size(state: dict[str, Any]) -> int:
@@ -1081,11 +1219,15 @@ def _sync_tree_scroll(state: dict[str, Any], selected: int, row_count: int) -> N
     state["tree_scroll"] = max(0, min(start, row_count - 1))
 
 
-def _detail_fragments(row: TreeRow | None, state: dict[str, Any]) -> list[tuple[str, str]]:
+def _detail_fragments(
+    row: TreeRow | None, state: dict[str, Any]
+) -> list[tuple[str, str]]:
     if row is None:
         return [("class:muted", "\n" + "─" * 40 + "\nNo selection.\n")]
     if row.kind == "group" and row.group_key:
-        fragments: list[tuple[str, str]] = [("class:detail.label", "\n" + "━" * 40 + "\n")]
+        fragments: list[tuple[str, str]] = [
+            ("class:detail.label", "\n" + "━" * 40 + "\n")
+        ]
         raw_key = row.group_key.removeprefix("__group__")
         if raw_key == "__chat__":
             fragments.append(("class:detail.label", "📁 Project: "))
@@ -1102,7 +1244,9 @@ def _detail_fragments(row: TreeRow | None, state: dict[str, Any]) -> list[tuple[
     display_id = node.phantom_ref or node.session_id
     fragments.append(("class:detail.value", f"{display_id[:16]}…\n"))
     if node.phantom_ref:
-        fragments.append(("class:dim", "   (reference-only copy from original session)\n"))
+        fragments.append(
+            ("class:dim", "   (reference-only copy from original session)\n")
+        )
 
     fragments.append(("class:detail.label", "🔌 Provider: "))
     fragments.append(("class:detail.value", node.provider))
@@ -1123,18 +1267,30 @@ def _detail_fragments(row: TreeRow | None, state: dict[str, Any]) -> list[tuple[
             parts = parent_id.split("__")
             parent_id = parts[2] if len(parts) > 2 else parent_id
         fragments.append(("", "\n"))
-        fragments.append(("class:fork", f"🔀 Fork from {parent_id[:12]}… turn {_turn_text(node.fork_parent[1])}\n"))
+        fragments.append(
+            (
+                "class:fork",
+                f"🔀 Fork from {parent_id[:12]}… turn {_turn_text(node.fork_parent[1])}\n",
+            )
+        )
     if node.subagent_parent:
         agent = non_empty_str(node.lineage.get("agent_id")) or "-"
         fragments.append(("", "\n"))
-        fragments.append(("class:subagent", f"⚡ Subagent: {agent}, parent {node.subagent_parent[0][:12]}… turn {_turn_text(node.subagent_parent[1])}\n"))
+        fragments.append(
+            (
+                "class:subagent",
+                f"⚡ Subagent: {agent}, parent {node.subagent_parent[0][:12]}… turn {_turn_text(node.subagent_parent[1])}\n",
+            )
+        )
 
     if row.manifest is not None:
         manifest = row.manifest
         fragments.append(("class:dim", "\n" + "─" * 40 + "\n"))
         fragments.append(("class:detail.label", f"🔄 Turn {manifest.turn_id}"))
         fragments.append(("class:dim", f"  ┃  {format_timestamp(manifest.created_ts)}"))
-        fragments.append(("class:dim", f"  ┃  prev: {_turn_text(manifest.parent_turn_id)}\n"))
+        fragments.append(
+            ("class:dim", f"  ┃  prev: {_turn_text(manifest.parent_turn_id)}\n")
+        )
 
         can_resume = _can_resume_row(row)
         if can_resume:
@@ -1184,7 +1340,9 @@ def _selected_command_fragments(row: TreeRow) -> list[tuple[str, str]]:
     return fragments
 
 
-def _row_fragments(row: TreeRow, is_selected: bool, all_rows: list[TreeRow]) -> list[tuple[str, str]]:
+def _row_fragments(
+    row: TreeRow, is_selected: bool, all_rows: list[TreeRow]
+) -> list[tuple[str, str]]:
     """Generate formatted text fragments for a tree row using the rendering helper."""
     return render_tree_row(row, is_selected, all_rows)
 
@@ -1214,7 +1372,10 @@ def _help_fragments() -> list[tuple[str, str]]:
         ("class:help.key", "Tab / Shift+Tab"),
         ("class:help.text", "   Expand all / Collapse all\n"),
         ("class:help.key", "r"),
-        ("class:help.text", "                 Show resume command for selected checkpoint\n"),
+        (
+            "class:help.text",
+            "                 Show resume command for selected checkpoint\n",
+        ),
         ("class:help.key", "d"),
         ("class:help.text", "                 Show diff for selected turn\n"),
         ("class:help.key", "/"),
@@ -1388,7 +1549,7 @@ def _show_result(session_id: str, turn_id: int) -> tuple[str, str]:
     if not session_path.exists():
         return (
             f"Show {session_id} turn {turn_id}",
-            f"Error: Session directory not found at {session_path}\n\nThe session may have been deleted or moved."
+            f"Error: Session directory not found at {session_path}\n\nThe session may have been deleted or moved.",
         )
 
     store = CheckpointStore(session_path)
@@ -1404,7 +1565,7 @@ def _show_result(session_id: str, turn_id: int) -> tuple[str, str]:
     except (OSError, KeyError, ValueError, json.JSONDecodeError) as exc:
         return (
             f"Show {session_id} turn {turn_id}",
-            f"Error: {exc}\n\nAvailable turns: {[m.turn_id for m in store.list_manifests()]}"
+            f"Error: {exc}\n\nAvailable turns: {[m.turn_id for m in store.list_manifests()]}",
         )
 
     return (
@@ -1417,7 +1578,9 @@ def _diff_result(session_id: str, turn_id: int) -> tuple[str, str]:
     reanchor_last_turn_to_eof(CheckpointStore(sessions_dir() / session_id))
     orchestrator = ResumeOrchestrator()
     try:
-        return f"Diff {session_id} turn {turn_id}", orchestrator.plan(session_id, turn_id).render()
+        return f"Diff {session_id} turn {turn_id}", orchestrator.plan(
+            session_id, turn_id
+        ).render()
     except RuntimeError as exc:
         return f"Diff {session_id} turn {turn_id}", f"Error: {exc}"
 
@@ -1451,7 +1614,10 @@ def _read_metadata(session_dir: Path) -> dict[str, Any]:
 
 def _session_marker(metadata: dict[str, Any]) -> str:
     lineage = metadata.get("lineage") or {}
-    if isinstance(lineage, dict) and lineage.get("capture_status") == "no_sidechain_file":
+    if (
+        isinstance(lineage, dict)
+        and lineage.get("capture_status") == "no_sidechain_file"
+    ):
         return "[no capture]"
     return ""
 
@@ -1476,8 +1642,18 @@ def _manifest_provider(manifests: list[CheckpointManifest]) -> str | None:
 
 def _count_turns(node: SessionNode, skip_phantoms: bool = False) -> int:
     own = 0 if (skip_phantoms and node.phantom_ref) else len(node.manifests)
-    return own + sum(_count_turns(child, skip_phantoms) for group in node.fork_children.values() for child in group) + sum(
-        _count_turns(child, skip_phantoms) for group in node.subagent_children.values() for child in group
+    return (
+        own
+        + sum(
+            _count_turns(child, skip_phantoms)
+            for group in node.fork_children.values()
+            for child in group
+        )
+        + sum(
+            _count_turns(child, skip_phantoms)
+            for group in node.subagent_children.values()
+            for child in group
+        )
     )
 
 

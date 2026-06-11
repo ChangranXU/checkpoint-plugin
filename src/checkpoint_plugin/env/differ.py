@@ -8,7 +8,11 @@ from typing import Callable
 
 from checkpoint_plugin.types import EnvironmentState
 
-from .hook_filter import is_hook_config_basename, is_hook_config_path, strip_plugin_hooks
+from .hook_filter import (
+    is_hook_config_basename,
+    is_hook_config_path,
+    strip_plugin_hooks,
+)
 
 
 @dataclass(frozen=True)
@@ -85,24 +89,32 @@ def diff_environments(
         skill_status=_diff_maps(current.skill_status, target.skill_status),
         plugin_files=_diff_maps(current.plugin_files, target.plugin_files),
         plugin_status=_diff_maps(current.plugin_status, target.plugin_status),
-        settings=_diff_maps(current.settings, target.settings, normalize=settings_normalize),
+        settings=_diff_maps(
+            current.settings, target.settings, normalize=settings_normalize
+        ),
         project_context=_diff_maps(
             current.project_context, target.project_context, normalize=project_normalize
         ),
     )
 
 
-def render_diff(diff: EnvDiff, current: EnvironmentState, target: EnvironmentState) -> str:
+def render_diff(
+    diff: EnvDiff, current: EnvironmentState, target: EnvironmentState
+) -> str:
     if not diff.has_changes():
         return "Environment: no changes"
 
     lines = ["Environment:"]
     if diff.provider_changed:
-        lines.append(f"  Provider: {current.provider or '-'} -> {target.provider or '-'}")
+        lines.append(
+            f"  Provider: {current.provider or '-'} -> {target.provider or '-'}"
+        )
     if diff.model_changed:
         lines.append(f"  Model: {current.model or '-'} -> {target.model or '-'}")
     if diff.permission_changed:
-        lines.append(f"  Permission: {current.permission_mode or '-'} -> {target.permission_mode or '-'}")
+        lines.append(
+            f"  Permission: {current.permission_mode or '-'} -> {target.permission_mode or '-'}"
+        )
     if diff.effort_changed:
         lines.append(f"  Effort: {current.effort or '-'} -> {target.effort or '-'}")
     if diff.mcp_changed:
@@ -132,7 +144,9 @@ def _diff_maps(
         modified = sorted(key for key in common if current[key] != target[key])
     else:
         modified = sorted(
-            key for key in common if normalize(key, current[key]) != normalize(key, target[key])
+            key
+            for key in common
+            if normalize(key, current[key]) != normalize(key, target[key])
         )
     return CategoryDiff(
         added=sorted(target_keys - current_keys),

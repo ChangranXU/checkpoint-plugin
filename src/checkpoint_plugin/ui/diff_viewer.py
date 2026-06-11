@@ -56,7 +56,9 @@ def show_diff_viewer(
         _show_numbered_viewer(plan, store, entries, output_stream)
 
 
-def diff_entries(plan: ResumePlan, store: CheckpointStore | None = None) -> list[DiffEntry]:
+def diff_entries(
+    plan: ResumePlan, store: CheckpointStore | None = None
+) -> list[DiffEntry]:
     entries = _environment_entries(plan, store)
     diff = diff_filesystems(plan.current_fs, plan.target_fs)
     entries.extend(
@@ -129,7 +131,9 @@ def render_file_diff(plan: ResumePlan, store: CheckpointStore, entry: DiffEntry)
         return f"Error generating diff: {exc}\n\nPath: {entry.path}"
 
 
-def _environment_entries(plan: ResumePlan, store: CheckpointStore | None = None) -> list[DiffEntry]:
+def _environment_entries(
+    plan: ResumePlan, store: CheckpointStore | None = None
+) -> list[DiffEntry]:
     diff = diff_environments(
         plan.current_env,
         plan.target_env,
@@ -138,11 +142,23 @@ def _environment_entries(plan: ResumePlan, store: CheckpointStore | None = None)
     )
     entries: list[DiffEntry] = []
     if diff.provider_changed:
-        entries.append(_value_entry("Provider", plan.current_env.provider, plan.target_env.provider))
+        entries.append(
+            _value_entry(
+                "Provider", plan.current_env.provider, plan.target_env.provider
+            )
+        )
     if diff.model_changed:
-        entries.append(_value_entry("Model", plan.current_env.model, plan.target_env.model))
+        entries.append(
+            _value_entry("Model", plan.current_env.model, plan.target_env.model)
+        )
     if diff.permission_changed:
-        entries.append(_value_entry("Permission", plan.current_env.permission_mode, plan.target_env.permission_mode))
+        entries.append(
+            _value_entry(
+                "Permission",
+                plan.current_env.permission_mode,
+                plan.target_env.permission_mode,
+            )
+        )
     if diff.mcp_changed:
         entries.append(
             DiffEntry(
@@ -154,11 +170,37 @@ def _environment_entries(plan: ResumePlan, store: CheckpointStore | None = None)
                 target_sha=plan.target_env.mcp_config,
             )
         )
-    _extend_blob_entries(entries, "MCP config files", diff.mcp_configs, plan.current_env.mcp_configs, plan.target_env.mcp_configs)
-    _extend_value_entries(entries, "MCP servers", diff.mcp_servers, plan.current_env.mcp_servers, plan.target_env.mcp_servers)
-    _extend_blob_entries(entries, "Memory", diff.memory, plan.current_env.memory_files, plan.target_env.memory_files)
-    _extend_blob_entries(entries, "Skills", diff.skills, plan.current_env.skills, plan.target_env.skills)
-    _extend_value_entries(entries, "Skill status", diff.skill_status, plan.current_env.skill_status, plan.target_env.skill_status)
+    _extend_blob_entries(
+        entries,
+        "MCP config files",
+        diff.mcp_configs,
+        plan.current_env.mcp_configs,
+        plan.target_env.mcp_configs,
+    )
+    _extend_value_entries(
+        entries,
+        "MCP servers",
+        diff.mcp_servers,
+        plan.current_env.mcp_servers,
+        plan.target_env.mcp_servers,
+    )
+    _extend_blob_entries(
+        entries,
+        "Memory",
+        diff.memory,
+        plan.current_env.memory_files,
+        plan.target_env.memory_files,
+    )
+    _extend_blob_entries(
+        entries, "Skills", diff.skills, plan.current_env.skills, plan.target_env.skills
+    )
+    _extend_value_entries(
+        entries,
+        "Skill status",
+        diff.skill_status,
+        plan.current_env.skill_status,
+        plan.target_env.skill_status,
+    )
     _extend_value_entries(
         entries,
         "Plugin status",
@@ -166,7 +208,13 @@ def _environment_entries(plan: ResumePlan, store: CheckpointStore | None = None)
         plan.current_env.plugin_status,
         plan.target_env.plugin_status,
     )
-    _extend_blob_entries(entries, "Settings", diff.settings, plan.current_env.settings, plan.target_env.settings)
+    _extend_blob_entries(
+        entries,
+        "Settings",
+        diff.settings,
+        plan.current_env.settings,
+        plan.target_env.settings,
+    )
     _extend_blob_entries(
         entries,
         "Project context",
@@ -185,11 +233,17 @@ def _extend_blob_entries(
     target: dict[str, str],
 ) -> None:
     for path in diff.modified:
-        entries.append(_blob_entry("M", label, path, current.get(path), target.get(path)))
+        entries.append(
+            _blob_entry("M", label, path, current.get(path), target.get(path))
+        )
     for path in diff.removed:
-        entries.append(_blob_entry("D", label, path, current.get(path), target.get(path)))
+        entries.append(
+            _blob_entry("D", label, path, current.get(path), target.get(path))
+        )
     for path in diff.added:
-        entries.append(_blob_entry("A", label, path, current.get(path), target.get(path)))
+        entries.append(
+            _blob_entry("A", label, path, current.get(path), target.get(path))
+        )
 
 
 def _extend_value_entries(
@@ -200,14 +254,22 @@ def _extend_value_entries(
     target: dict[str, str],
 ) -> None:
     for path in diff.modified:
-        entries.append(_value_entry(f"{label}/{path}", current.get(path), target.get(path)))
+        entries.append(
+            _value_entry(f"{label}/{path}", current.get(path), target.get(path))
+        )
     for path in diff.removed:
-        entries.append(_value_entry(f"{label}/{path}", current.get(path), None, status="D"))
+        entries.append(
+            _value_entry(f"{label}/{path}", current.get(path), None, status="D")
+        )
     for path in diff.added:
-        entries.append(_value_entry(f"{label}/{path}", None, target.get(path), status="A"))
+        entries.append(
+            _value_entry(f"{label}/{path}", None, target.get(path), status="A")
+        )
 
 
-def _blob_entry(status: str, label: str, path: str, current_sha: str | None, target_sha: str | None) -> DiffEntry:
+def _blob_entry(
+    status: str, label: str, path: str, current_sha: str | None, target_sha: str | None
+) -> DiffEntry:
     return DiffEntry(
         "Environment",
         status,
@@ -218,7 +280,9 @@ def _blob_entry(status: str, label: str, path: str, current_sha: str | None, tar
     )
 
 
-def _value_entry(path: str, current: str | None, target: str | None, status: str = "M") -> DiffEntry:
+def _value_entry(
+    path: str, current: str | None, target: str | None, status: str = "M"
+) -> DiffEntry:
     return DiffEntry(
         "Environment",
         status,
@@ -236,7 +300,9 @@ def _show_numbered_viewer(
 ) -> None:
     while True:
         display_lines = _grouped_display_lines(entries)
-        visible_entries = [line.entry for line in display_lines if line.entry is not None]
+        visible_entries = [
+            line.entry for line in display_lines if line.entry is not None
+        ]
         print("\nDetailed resume changes:", file=output_stream)
         for line in display_lines:
             if line.entry is None:
@@ -255,11 +321,21 @@ def _show_numbered_viewer(
         print(render_file_diff(plan, store, selected), file=output_stream)
 
 
-def _show_tui_viewer(plan: ResumePlan, store: CheckpointStore, entries: list[DiffEntry]) -> None:
+def _show_tui_viewer(
+    plan: ResumePlan, store: CheckpointStore, entries: list[DiffEntry]
+) -> None:
     state = {"selected": 0, "mode": "list"}
-    body_control = FormattedTextControl(lambda: _body_fragments(plan, store, entries, state))
+    body_control = FormattedTextControl(
+        lambda: _body_fragments(plan, store, entries, state)
+    )
     body = Window(content=body_control, wrap_lines=False, always_hide_cursor=True)
-    title = Label(lambda: "Detailed resume changes" if state["mode"] == "list" else _diff_title(entries[state["selected"]]))
+    title = Label(
+        lambda: (
+            "Detailed resume changes"
+            if state["mode"] == "list"
+            else _diff_title(entries[state["selected"]])
+        )
+    )
     help_text = Window(
         content=FormattedTextControl(
             lambda: [
@@ -351,7 +427,9 @@ def _grouped_display_lines(entries: list[DiffEntry]) -> list[DisplayLine]:
     return lines
 
 
-def _environment_display_lines(entries: list[DiffEntry], start_index: int) -> tuple[list[DisplayLine], int]:
+def _environment_display_lines(
+    entries: list[DiffEntry], start_index: int
+) -> tuple[list[DisplayLine], int]:
     lines: list[DisplayLine] = []
     index = start_index
     grouped: dict[str, list[DiffEntry]] = {}
@@ -370,7 +448,9 @@ def _environment_display_lines(entries: list[DiffEntry], start_index: int) -> tu
     return lines, index
 
 
-def _formatted_entry_list(entries: list[DiffEntry], selected: int) -> list[tuple[str, str]]:
+def _formatted_entry_list(
+    entries: list[DiffEntry], selected: int
+) -> list[tuple[str, str]]:
     selected_entry = entries[selected]
     result: list[tuple[str, str]] = []
     for line in _grouped_display_lines(entries):
@@ -428,7 +508,9 @@ def _is_binary(data: bytes) -> bool:
     return b"\0" in data
 
 
-def _render_binary_diff(entry: DiffEntry, current: bytes | None, target: bytes | None) -> str:
+def _render_binary_diff(
+    entry: DiffEntry, current: bytes | None, target: bytes | None
+) -> str:
     current_size = len(current) if current is not None else 0
     target_size = len(target) if target is not None else 0
     return (

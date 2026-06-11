@@ -12,13 +12,17 @@ from checkpoint_plugin.types import FilesystemSnapshot
 from .ignore import IgnoreMatcher
 
 
-def snapshot_cwd(cwd: Path, store: CheckpointStore, ignore: IgnoreMatcher) -> FilesystemSnapshot:
+def snapshot_cwd(
+    cwd: Path, store: CheckpointStore, ignore: IgnoreMatcher
+) -> FilesystemSnapshot:
     cwd = Path(cwd).expanduser().resolve()
     files: dict[str, str] = {}
     for path in _walk_files(cwd, ignore):
         rel = path.relative_to(cwd).as_posix()
         files[rel] = store.store_blob(path.read_bytes())
-    return FilesystemSnapshot(cwd=str(cwd), files=dict(sorted(files.items())), git=_git_state(cwd))
+    return FilesystemSnapshot(
+        cwd=str(cwd), files=dict(sorted(files.items())), git=_git_state(cwd)
+    )
 
 
 def filesystem_to_blob(snapshot: FilesystemSnapshot, store: CheckpointStore) -> str:

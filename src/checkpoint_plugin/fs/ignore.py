@@ -65,5 +65,11 @@ def _match_pattern(rel: str, pattern: str) -> bool:
         normalized += "**"
     if normalized.endswith("/**"):
         base = normalized[:-3].rstrip("/")
-        return rel == base or rel.startswith(base + "/") or fnmatch.fnmatch(rel, normalized)
-    return fnmatch.fnmatch(rel, normalized) or fnmatch.fnmatch(Path(rel).name, normalized)
+        return (
+            rel == base
+            or rel.startswith(base + "/")
+            or fnmatch.fnmatch(rel, normalized)
+        )
+    return fnmatch.fnmatch(rel, normalized) or fnmatch.fnmatch(
+        Path(rel).name, normalized
+    )

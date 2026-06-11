@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ._utils import expand_and_resolve
 from .env.collector import collect_environment, environment_to_blob
 from .env.providers import detect_provider
 from .fs.ignore import IgnoreMatcher
@@ -31,10 +32,15 @@ class TurnRecord:
 
 
 class CheckpointCoordinator:
-    def __init__(self, session_id: str | None = None, cwd: Path | None = None, plugin_home: Path | None = None) -> None:
+    def __init__(
+        self,
+        session_id: str | None = None,
+        cwd: Path | None = None,
+        plugin_home: Path | None = None,
+    ) -> None:
         self.home = ensure_home(plugin_home)
         self.session_id = session_id or str(uuid.uuid4())
-        self.cwd = Path(cwd or Path.cwd()).expanduser().resolve()
+        self.cwd = expand_and_resolve(cwd or Path.cwd())
         self.session_dir = session_dir(self.session_id, self.home)
         self.store = CheckpointStore(self.session_dir)
 
@@ -64,7 +70,9 @@ class CheckpointCoordinator:
             "provider": provider.name,
             "cwd": str(self.cwd),
             "start_ts": _now(),
-            "session_title": _session_title(provider.name, provider.home, self.session_id, None),
+            "session_title": _session_title(
+                provider.name, provider.home, self.session_id, None
+            ),
         }
         if source:
             metadata["source"] = source
@@ -86,7 +94,9 @@ class CheckpointCoordinator:
             # `forked_from_id` and anchor on the PARENT (its EOF is the branch point),
             # keeping source="resume" (do NOT relabel to "fork").
             if provider.name == "codex":
-                resumed = _codex_resume_lineage(provider.home, source_transcript_path, self.session_id)
+                resumed = _codex_resume_lineage(
+                    provider.home, source_transcript_path, self.session_id
+                )
                 if resumed is not None:
                     parent_transcript, anchor, forked_from_id = resumed
                     metadata["forked_from_transcript"] = parent_transcript
@@ -138,7 +148,12 @@ class CheckpointCoordinator:
                     metadata["fork_point_trajectory_ref"] = trajectory_sha
         # OpenCode forks: the TS plugin detects them via title pattern and passes
         # source="fork" + lineage.forked_from_session_id. Record the linkage.
-        if provider.name == "opencode" and source == "fork" and lineage and lineage.get("forked_from_session_id"):
+        if (
+            provider.name == "opencode"
+            and source == "fork"
+            and lineage
+            and lineage.get("forked_from_session_id")
+        ):
             metadata["source"] = "fork"
             metadata["forked_from_id"] = lineage["forked_from_session_id"]
         clean_env = {key: value for key, value in (session_env or {}).items() if value}
@@ -149,16 +164,22 @@ class CheckpointCoordinator:
             metadata["lineage"] = clean_lineage
         # SA3: Inherit parent fork lineage for subagents
         if source == "subagent" and lineage and lineage.get("parent_session_id"):
-            parent_metadata = _load_parent_metadata(lineage["parent_session_id"], self.home)
+            parent_metadata = _load_parent_metadata(
+                lineage["parent_session_id"], self.home
+            )
             if parent_metadata and "forked_from_transcript" in parent_metadata:
                 # Inherit fork lineage from parent
-                metadata["forked_from_transcript"] = parent_metadata["forked_from_transcript"]
+                metadata["forked_from_transcript"] = parent_metadata[
+                    "forked_from_transcript"
+                ]
                 if "forked_from_id" in parent_metadata:
                     metadata["forked_from_id"] = parent_metadata["forked_from_id"]
                 if "forked_at_offset" in parent_metadata:
                     metadata["forked_at_offset"] = parent_metadata["forked_at_offset"]
                 if "forked_at_record_count" in parent_metadata:
-                    metadata["forked_at_record_count"] = parent_metadata["forked_at_record_count"]
+                    metadata["forked_at_record_count"] = parent_metadata[
+                        "forked_at_record_count"
+                    ]
         self.store._atomic_write(
             metadata_path,
             canonical_json(metadata) + "\n",
@@ -174,10 +195,14 @@ class CheckpointCoordinator:
             turn_id = latest.turn_id + 1 if latest else 0
             provider = detect_provider(self.cwd)
             if trajectory_ref is None:
-                trajectory_ref = self._write_manual_trajectory_ref(provider.name, turn_id, turn_record)
+                trajectory_ref = self._write_manual_trajectory_ref(
+                    provider.name, turn_id, turn_record
+                )
             self._close_previous_trajectory_ref(latest, trajectory_ref)
             self._refresh_metadata_title(provider.name, provider.home, trajectory_ref)
-            env_state = collect_environment(self.cwd, provider, self.store, trajectory_ref)
+            env_state = collect_environment(
+                self.cwd, provider, self.store, trajectory_ref
+            )
             env_ref = environment_to_blob(env_state, self.store)
             config = load_config(self.home)
             ignore = IgnoreMatcher(self.cwd, config.get("exclude_patterns") or [])
@@ -234,7 +259,10 @@ class CheckpointCoordinator:
         if latest is None or latest.trajectory_ref is None:
             return
         previous_ref = latest.trajectory_ref
-        if not previous_ref.transcript_path or previous_ref.transcript_path != next_ref.transcript_path:
+        if (
+            not previous_ref.transcript_path
+            or previous_ref.transcript_path != next_ref.transcript_path
+        ):
             return
         if previous_ref.end_offset >= next_ref.start_offset:
             return
@@ -399,7 +427,9 @@ def _codex_fork_lineage(
     if not isinstance(record, dict) or record.get("type") != "session_meta":
         return None
     payload = record.get("payload")
-    forked_from_id = payload.get("forked_from_id") if isinstance(payload, dict) else None
+    forked_from_id = (
+        payload.get("forked_from_id") if isinstance(payload, dict) else None
+    )
     if not isinstance(forked_from_id, str) or not forked_from_id:
         return None
     matches = sorted(codex_home.glob(f"sessions/**/rollout-*-{forked_from_id}.jsonl"))
@@ -461,11 +491,17 @@ def _codex_resume_lineage(
         return None
     forked_from_id = _codex_forked_from_id(Path(own_transcript_path).expanduser())
     if forked_from_id:
-        matches = sorted(codex_home.glob(f"sessions/**/rollout-*-{forked_from_id}.jsonl"))
+        matches = sorted(
+            codex_home.glob(f"sessions/**/rollout-*-{forked_from_id}.jsonl")
+        )
         if matches:
             parent = str(matches[0])
             return parent, _fork_anchor(parent), forked_from_id
-        return forked_from_id, None, forked_from_id  # parent file gone; keep the bare id as the ref
+        return (
+            forked_from_id,
+            None,
+            forked_from_id,
+        )  # parent file gone; keep the bare id as the ref
     if _path_is_distinct_ancestor(own_transcript_path, own_session_id):
         return own_transcript_path, _fork_anchor(own_transcript_path), None
     return None
@@ -499,7 +535,9 @@ def _path_is_distinct_ancestor(transcript_path: str, own_session_id: str) -> boo
     return own_session_id not in stem
 
 
-def _ref_with_end_offset(ref: TrajectoryReference, end_offset: int) -> TrajectoryReference:
+def _ref_with_end_offset(
+    ref: TrajectoryReference, end_offset: int
+) -> TrajectoryReference:
     path = Path(ref.transcript_path).expanduser()
     try:
         data = path.read_bytes()
@@ -572,7 +610,9 @@ def _trailing_same_turn_tail(ref: TrajectoryReference) -> bytes:
     return recover_trailing_tail(ref)
 
 
-def _user_message_preview(turn_record: TurnRecord, trajectory_ref: TrajectoryReference) -> str:
+def _user_message_preview(
+    turn_record: TurnRecord, trajectory_ref: TrajectoryReference
+) -> str:
     explicit = turn_record.user_message.strip()
     if explicit:
         return explicit[:200]
@@ -743,10 +783,13 @@ def _opencode_session_title(session_id: str) -> str | None:
     import os
     import sqlite3
 
-    data_home = Path(
-        os.environ.get("OPENCODE_DATA_DIR")
-        or os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share"))
-    ) / "opencode"
+    data_home = (
+        Path(
+            os.environ.get("OPENCODE_DATA_DIR")
+            or os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share"))
+        ).expanduser()
+        / "opencode"
+    )
     db_path = data_home / "opencode.db"
     if not db_path.exists():
         return None
@@ -776,6 +819,7 @@ def resolve_session_title(metadata: dict[str, Any]) -> str | None:
         return None
     if provider == "codex":
         from .env.providers import codex_layout
+
         layout = codex_layout()
         return _codex_session_title(layout.home, session_id)
     if provider == "opencode":

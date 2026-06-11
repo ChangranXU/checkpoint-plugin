@@ -27,14 +27,18 @@ def clean_keep_last(keep_last: int, plugin_home: Path | None = None) -> int:
         store._atomic_write(
             store.index_path,
             "{\n"
-            + ",\n".join(f'  "{m.turn_id}": "turn_{m.turn_id:04d}.json"' for m in remaining)
+            + ",\n".join(
+                f'  "{m.turn_id}": "turn_{m.turn_id:04d}.json"' for m in remaining
+            )
             + ("\n" if remaining else "")
             + "}\n",
         )
     return removed
 
 
-def compact_legacy_blobs(plugin_home: Path | None = None, dry_run: bool = False) -> dict[str, int]:
+def compact_legacy_blobs(
+    plugin_home: Path | None = None, dry_run: bool = False
+) -> dict[str, int]:
     """Move legacy per-session blobs into the global blob store."""
     root = sessions_dir(plugin_home)
     result = {"promoted": 0, "removed": 0, "missing": 0}
@@ -46,7 +50,9 @@ def compact_legacy_blobs(plugin_home: Path | None = None, dry_run: bool = False)
             continue
         store = CheckpointStore(session)
         result["missing"] += _missing_reachable_refs(store)
-        legacy_files = sorted(path for path in store.legacy_blobs_dir.glob("*/*") if path.is_file())
+        legacy_files = sorted(
+            path for path in store.legacy_blobs_dir.glob("*/*") if path.is_file()
+        )
         for legacy_path in legacy_files:
             sha = legacy_path.name
             if not is_sha_ref(sha):
@@ -75,7 +81,10 @@ def compact_legacy_blobs(plugin_home: Path | None = None, dry_run: bool = False)
 def _missing_reachable_refs(store: CheckpointStore) -> int:
     missing = 0
     for sha in _reachable_blob_refs(store):
-        if not store.blob_path(sha).exists() and not store.legacy_blob_path(sha).exists():
+        if (
+            not store.blob_path(sha).exists()
+            and not store.legacy_blob_path(sha).exists()
+        ):
             missing += 1
     return missing
 
@@ -139,7 +148,9 @@ def _read_json(path: Path) -> object:
         return {}
 
 
-def _prune_empty_blob_parents(path: Path, stop: Path, *, remove_stop: bool = True) -> None:
+def _prune_empty_blob_parents(
+    path: Path, stop: Path, *, remove_stop: bool = True
+) -> None:
     while path != stop and path.exists():
         try:
             path.rmdir()
@@ -154,7 +165,9 @@ def _prune_empty_blob_parents(path: Path, stop: Path, *, remove_stop: bool = Tru
         pass
 
 
-def clean_empty_sessions(plugin_home: Path | None = None, dry_run: bool = False) -> dict[str, list[str]]:
+def clean_empty_sessions(
+    plugin_home: Path | None = None, dry_run: bool = False
+) -> dict[str, list[str]]:
     """Remove sessions with no captured turns or only metadata shells.
 
     Returns a dict with 'removed' and 'kept' lists of session IDs.

@@ -1,9 +1,7 @@
 """Test OpenCode integration and hook installation."""
 
 import json
-from pathlib import Path
 
-import pytest
 
 from checkpoint_plugin.integrations.hook_installer import install_hooks, uninstall_hooks
 
@@ -25,8 +23,8 @@ def test_opencode_plugin_installs_typescript_file(tmp_path, monkeypatch):
     # Verify it's a TypeScript file with correct content
     content = result.path.read_text(encoding="utf-8")
     assert "export const CheckpointPlugin" in content
-    assert "event.type === \"session.created\"" in content
-    assert "event.type === \"session.idle\"" in content
+    assert 'event.type === "session.created"' in content
+    assert 'event.type === "session.idle"' in content
     assert "info?.model?.variant" in content
     assert "checkpoint_plugin.integrations.opencode_hook" in content
 
@@ -72,15 +70,17 @@ def test_opencode_hook_handles_session_created_payload(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENCODE_SESSION_ID", "test-session")
 
     # Simulate TypeScript plugin calling Python hook with session_start event
-    payload = json.dumps({
-        "sessionID": "test-session",
-        "directory": str(tmp_path),
-        "agent_type": "primary",
-        "event_metadata": {
-            "timestamp": "2026-06-03T14:00:00Z",
-            "hook_event_name": "SessionStart",
+    payload = json.dumps(
+        {
+            "sessionID": "test-session",
+            "directory": str(tmp_path),
+            "agent_type": "primary",
+            "event_metadata": {
+                "timestamp": "2026-06-03T14:00:00Z",
+                "hook_event_name": "SessionStart",
+            },
         }
-    })
+    )
 
     monkeypatch.setattr("sys.stdin", StringIO(payload))
 
@@ -108,25 +108,32 @@ def test_opencode_hook_handles_session_idle_payload(tmp_path, monkeypatch):
     (session_dir / "manifests").mkdir()
     (session_dir / "blobs").mkdir()
     metadata = session_dir / "metadata.json"
-    metadata.write_text(json.dumps({
-        "session_id": "test-session",
-        "created_at": "2026-06-03T14:00:00Z",
-    }), encoding="utf-8")
+    metadata.write_text(
+        json.dumps(
+            {
+                "session_id": "test-session",
+                "created_at": "2026-06-03T14:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
 
     # Simulate TypeScript plugin calling Python hook with turn_end event
-    payload = json.dumps({
-        "sessionID": "test-session",
-        "directory": str(tmp_path),
-        "messages": [
-            {"role": "user", "content": "Hello"},
-            {"role": "assistant", "content": "Hi there!"},
-        ],
-        "event_metadata": {
-            "timestamp": "2026-06-03T14:01:00Z",
-            "hook_event_name": "Stop",
-            "message_count": 2,
+    payload = json.dumps(
+        {
+            "sessionID": "test-session",
+            "directory": str(tmp_path),
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi there!"},
+            ],
+            "event_metadata": {
+                "timestamp": "2026-06-03T14:01:00Z",
+                "hook_event_name": "Stop",
+                "message_count": 2,
+            },
         }
-    })
+    )
 
     monkeypatch.setattr("sys.stdin", StringIO(payload))
 
@@ -152,17 +159,19 @@ def test_opencode_fork_inherits_session_env(tmp_path, monkeypatch):
     parent_id = "parent-session"
     monkeypatch.setenv("OPENCODE_SESSION_ID", parent_id)
 
-    parent_payload = json.dumps({
-        "sessionID": parent_id,
-        "directory": str(tmp_path),
-        "agent_type": "primary",
-        "model": "big-pickle",
-        "effort": "max",
-        "event_metadata": {
-            "timestamp": "2026-06-03T14:00:00Z",
-            "hook_event_name": "SessionStart",
+    parent_payload = json.dumps(
+        {
+            "sessionID": parent_id,
+            "directory": str(tmp_path),
+            "agent_type": "primary",
+            "model": "big-pickle",
+            "effort": "max",
+            "event_metadata": {
+                "timestamp": "2026-06-03T14:00:00Z",
+                "hook_event_name": "SessionStart",
+            },
         }
-    })
+    )
 
     monkeypatch.setattr("sys.stdin", StringIO(parent_payload))
     exit_code = main(["session_start"])
@@ -178,18 +187,20 @@ def test_opencode_fork_inherits_session_env(tmp_path, monkeypatch):
     fork_id = "fork-session"
     monkeypatch.setenv("OPENCODE_SESSION_ID", fork_id)
 
-    fork_payload = json.dumps({
-        "sessionID": fork_id,
-        "directory": str(tmp_path),
-        "agent_type": "primary",
-        "source": "fork",
-        "forked_from_session_id": parent_id,
-        # Note: NO model field in payload (this is the bug scenario)
-        "event_metadata": {
-            "timestamp": "2026-06-03T14:05:00Z",
-            "hook_event_name": "SessionStart",
+    fork_payload = json.dumps(
+        {
+            "sessionID": fork_id,
+            "directory": str(tmp_path),
+            "agent_type": "primary",
+            "source": "fork",
+            "forked_from_session_id": parent_id,
+            # Note: NO model field in payload (this is the bug scenario)
+            "event_metadata": {
+                "timestamp": "2026-06-03T14:05:00Z",
+                "hook_event_name": "SessionStart",
+            },
         }
-    })
+    )
 
     monkeypatch.setattr("sys.stdin", StringIO(fork_payload))
     exit_code = main(["session_start"])
@@ -198,8 +209,12 @@ def test_opencode_fork_inherits_session_env(tmp_path, monkeypatch):
     # Verify fork inherited model from parent (OC1 fix)
     fork_dir = tmp_path / "sessions" / fork_id
     fork_meta = json.loads((fork_dir / "metadata.json").read_text())
-    assert fork_meta["session_env"]["model"] == "big-pickle", "Fork should inherit model from parent"
-    assert fork_meta["session_env"]["effort"] == "max", "Fork should inherit effort from parent"
+    assert fork_meta["session_env"]["model"] == "big-pickle", (
+        "Fork should inherit model from parent"
+    )
+    assert fork_meta["session_env"]["effort"] == "max", (
+        "Fork should inherit effort from parent"
+    )
     assert fork_meta["session_env"]["agent_type"] == "primary"
 
 
@@ -214,17 +229,19 @@ def test_opencode_subagent_inherits_session_env(tmp_path, monkeypatch):
     parent_id = "parent-session"
     monkeypatch.setenv("OPENCODE_SESSION_ID", parent_id)
 
-    parent_payload = json.dumps({
-        "sessionID": parent_id,
-        "directory": str(tmp_path),
-        "agent_type": "primary",
-        "model": "big-pickle",
-        "permission_mode": "auto",
-        "event_metadata": {
-            "timestamp": "2026-06-03T14:00:00Z",
-            "hook_event_name": "SessionStart",
+    parent_payload = json.dumps(
+        {
+            "sessionID": parent_id,
+            "directory": str(tmp_path),
+            "agent_type": "primary",
+            "model": "big-pickle",
+            "permission_mode": "auto",
+            "event_metadata": {
+                "timestamp": "2026-06-03T14:00:00Z",
+                "hook_event_name": "SessionStart",
+            },
         }
-    })
+    )
 
     monkeypatch.setattr("sys.stdin", StringIO(parent_payload))
     exit_code = main(["session_start"])
@@ -234,17 +251,19 @@ def test_opencode_subagent_inherits_session_env(tmp_path, monkeypatch):
     subagent_id = "subagent-session"
     monkeypatch.setenv("OPENCODE_SESSION_ID", subagent_id)
 
-    subagent_payload = json.dumps({
-        "sessionID": subagent_id,
-        "directory": str(tmp_path),
-        "agent_type": "subagent",
-        "parent_session_id": parent_id,
-        # Note: NO model or permission_mode (simulating real behavior)
-        "event_metadata": {
-            "timestamp": "2026-06-03T14:05:00Z",
-            "hook_event_name": "SessionStart",
+    subagent_payload = json.dumps(
+        {
+            "sessionID": subagent_id,
+            "directory": str(tmp_path),
+            "agent_type": "subagent",
+            "parent_session_id": parent_id,
+            # Note: NO model or permission_mode (simulating real behavior)
+            "event_metadata": {
+                "timestamp": "2026-06-03T14:05:00Z",
+                "hook_event_name": "SessionStart",
+            },
         }
-    })
+    )
 
     monkeypatch.setattr("sys.stdin", StringIO(subagent_payload))
     exit_code = main(["session_start"])
@@ -253,8 +272,12 @@ def test_opencode_subagent_inherits_session_env(tmp_path, monkeypatch):
     # Verify subagent inherited model from parent (OC1 fix)
     subagent_dir = tmp_path / "sessions" / subagent_id
     subagent_meta = json.loads((subagent_dir / "metadata.json").read_text())
-    assert subagent_meta["session_env"]["model"] == "big-pickle", "Subagent should inherit model from parent"
-    assert subagent_meta["session_env"]["permission_mode"] == "auto", "Subagent should inherit permission_mode"
+    assert subagent_meta["session_env"]["model"] == "big-pickle", (
+        "Subagent should inherit model from parent"
+    )
+    assert subagent_meta["session_env"]["permission_mode"] == "auto", (
+        "Subagent should inherit permission_mode"
+    )
     assert subagent_meta["session_env"]["agent_type"] == "subagent"
 
 
@@ -267,23 +290,25 @@ def test_opencode_permission_capture_from_session_info(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENCODE_SESSION_ID", "test-session")
 
     # Simulate hook payload with permission in session_info (typical for subagents)
-    payload = json.dumps({
-        "sessionID": "test-session",
-        "directory": str(tmp_path),
-        "agent_type": "subagent",
-        "model": "big-pickle",
-        "session_info": {
-            "id": "test-session",
-            "title": "Test subagent",
-            "permission": [
-                {"permission": "task", "action": "deny", "pattern": "*"}
-            ],
-        },
-        "event_metadata": {
-            "timestamp": "2026-06-03T14:00:00Z",
-            "hook_event_name": "SessionStart",
+    payload = json.dumps(
+        {
+            "sessionID": "test-session",
+            "directory": str(tmp_path),
+            "agent_type": "subagent",
+            "model": "big-pickle",
+            "session_info": {
+                "id": "test-session",
+                "title": "Test subagent",
+                "permission": [
+                    {"permission": "task", "action": "deny", "pattern": "*"}
+                ],
+            },
+            "event_metadata": {
+                "timestamp": "2026-06-03T14:00:00Z",
+                "hook_event_name": "SessionStart",
+            },
         }
-    })
+    )
 
     monkeypatch.setattr("sys.stdin", StringIO(payload))
     exit_code = main(["session_start"])
@@ -309,26 +334,34 @@ def test_opencode_mcp_status_capture_from_payload(tmp_path, monkeypatch):
     monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(tmp_path))
     monkeypatch.setenv("OPENCODE_SESSION_ID", "test-session")
 
-    payload = json.dumps({
-        "sessionID": "test-session",
-        "directory": str(tmp_path),
-        "agent_type": "primary",
-        "model": "big-pickle",
-        "mcp_status": {"context7": {"status": "disabled"}},
-        "event_metadata": {
-            "timestamp": "2026-06-03T14:00:00Z",
-            "hook_event_name": "SessionStart",
-        },
-    })
+    payload = json.dumps(
+        {
+            "sessionID": "test-session",
+            "directory": str(tmp_path),
+            "agent_type": "primary",
+            "model": "big-pickle",
+            "mcp_status": {"context7": {"status": "disabled"}},
+            "event_metadata": {
+                "timestamp": "2026-06-03T14:00:00Z",
+                "hook_event_name": "SessionStart",
+            },
+        }
+    )
 
     monkeypatch.setattr("sys.stdin", StringIO(payload))
     assert main(["session_start"]) == 0
 
-    metadata = json.loads((tmp_path / "sessions" / "test-session" / "metadata.json").read_text())
-    assert json.loads(metadata["session_env"]["mcp_status"]) == {"context7": {"status": "disabled"}}
+    metadata = json.loads(
+        (tmp_path / "sessions" / "test-session" / "metadata.json").read_text()
+    )
+    assert json.loads(metadata["session_env"]["mcp_status"]) == {
+        "context7": {"status": "disabled"}
+    }
 
 
-def test_opencode_session_env_prefers_resolved_config_over_stale_env(tmp_path, monkeypatch):
+def test_opencode_session_env_prefers_resolved_config_over_stale_env(
+    tmp_path, monkeypatch
+):
     """Resolved OpenCode config plus live MCP status should replace stale env snapshots."""
     from io import StringIO
     from checkpoint_plugin.integrations.opencode_hook import main
@@ -340,31 +373,37 @@ def test_opencode_session_env_prefers_resolved_config_over_stale_env(tmp_path, m
         json.dumps({"mcp": {"context7": {"enabled": False}}}),
     )
 
-    payload = json.dumps({
-        "sessionID": "test-session",
-        "directory": str(tmp_path),
-        "agent_type": "primary",
-        "mcp_status": {"context7": {"status": "disabled"}},
-        "resolved_config": {
-            "mcp": {"context7": {"enabled": True}},
-            "provider": {"x": {"options": {"apiKey": "secret-value"}}},
-        },
-        "event_metadata": {
-            "timestamp": "2026-06-03T14:00:00Z",
-            "hook_event_name": "SessionStart",
-        },
-    })
+    payload = json.dumps(
+        {
+            "sessionID": "test-session",
+            "directory": str(tmp_path),
+            "agent_type": "primary",
+            "mcp_status": {"context7": {"status": "disabled"}},
+            "resolved_config": {
+                "mcp": {"context7": {"enabled": True}},
+                "provider": {"x": {"options": {"apiKey": "secret-value"}}},
+            },
+            "event_metadata": {
+                "timestamp": "2026-06-03T14:00:00Z",
+                "hook_event_name": "SessionStart",
+            },
+        }
+    )
 
     monkeypatch.setattr("sys.stdin", StringIO(payload))
     assert main(["session_start"]) == 0
 
-    metadata = json.loads((tmp_path / "sessions" / "test-session" / "metadata.json").read_text())
+    metadata = json.loads(
+        (tmp_path / "sessions" / "test-session" / "metadata.json").read_text()
+    )
     config_content = json.loads(metadata["session_env"]["opencode_config_content"])
     assert config_content["mcp"]["context7"]["enabled"] is False
     assert config_content["provider"]["x"]["options"]["apiKey"] == "***redacted***"
 
 
-def test_opencode_hook_captures_mode_and_effort_from_payload_context(tmp_path, monkeypatch):
+def test_opencode_hook_captures_mode_and_effort_from_payload_context(
+    tmp_path, monkeypatch
+):
     """Advisory mode/effort fields should use OpenCode payload data when present."""
     from io import StringIO
     from checkpoint_plugin.integrations.opencode_hook import main
@@ -372,29 +411,41 @@ def test_opencode_hook_captures_mode_and_effort_from_payload_context(tmp_path, m
     monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(tmp_path))
     monkeypatch.setenv("OPENCODE_SESSION_ID", "test-session")
 
-    payload = json.dumps({
-        "sessionID": "test-session",
-        "directory": str(tmp_path),
-        "agent_type": "primary",
-        "raw_messages": [
-            {"info": {"role": "user"}},
-            {"info": {"role": "assistant", "mode": "build", "thinkingEffort": "high"}},
-        ],
-        "event_metadata": {
-            "timestamp": "2026-06-03T14:00:00Z",
-            "hook_event_name": "SessionStart",
-        },
-    })
+    payload = json.dumps(
+        {
+            "sessionID": "test-session",
+            "directory": str(tmp_path),
+            "agent_type": "primary",
+            "raw_messages": [
+                {"info": {"role": "user"}},
+                {
+                    "info": {
+                        "role": "assistant",
+                        "mode": "build",
+                        "thinkingEffort": "high",
+                    }
+                },
+            ],
+            "event_metadata": {
+                "timestamp": "2026-06-03T14:00:00Z",
+                "hook_event_name": "SessionStart",
+            },
+        }
+    )
 
     monkeypatch.setattr("sys.stdin", StringIO(payload))
     assert main(["session_start"]) == 0
 
-    metadata = json.loads((tmp_path / "sessions" / "test-session" / "metadata.json").read_text())
+    metadata = json.loads(
+        (tmp_path / "sessions" / "test-session" / "metadata.json").read_text()
+    )
     assert metadata["session_env"]["mode"] == "build"
     assert metadata["session_env"]["effort"] == "high"
 
 
-def test_opencode_turn_end_captures_model_variant_as_effort_per_turn(tmp_path, monkeypatch):
+def test_opencode_turn_end_captures_model_variant_as_effort_per_turn(
+    tmp_path, monkeypatch
+):
     from io import StringIO
     from checkpoint_plugin.env.collector import environment_from_blob
     from checkpoint_plugin.integrations.opencode_hook import main
@@ -408,12 +459,14 @@ def test_opencode_turn_end_captures_model_variant_as_effort_per_turn(tmp_path, m
     monkeypatch.setenv("OPENCODE_MODEL", "stale-model")
     monkeypatch.setenv("OPENCODE_EFFORT", "stale-effort")
 
-    start_payload = json.dumps({
-        "sessionID": "test-session",
-        "directory": str(cwd),
-        "agent_type": "primary",
-        "event_metadata": {"hook_event_name": "SessionStart"},
-    })
+    start_payload = json.dumps(
+        {
+            "sessionID": "test-session",
+            "directory": str(cwd),
+            "agent_type": "primary",
+            "event_metadata": {"hook_event_name": "SessionStart"},
+        }
+    )
     monkeypatch.setattr("sys.stdin", StringIO(start_payload))
     assert main(["session_start"]) == 0
 
@@ -421,19 +474,25 @@ def test_opencode_turn_end_captures_model_variant_as_effort_per_turn(tmp_path, m
         ("use high", "deepseek-v4-flash-free", "high"),
         ("use max", "deepseek-v4-flash-free", "max"),
     ):
-        stop_payload = json.dumps({
-            "sessionID": "test-session",
-            "directory": str(cwd),
-            "model": model,
-            "messages": [
-                {"role": "user", "content": prompt},
-                {"role": "assistant", "content": "ok"},
-            ],
-            "session_info": {
-                "model": {"id": model, "providerID": "opencode", "variant": variant},
-            },
-            "event_metadata": {"hook_event_name": "Stop"},
-        })
+        stop_payload = json.dumps(
+            {
+                "sessionID": "test-session",
+                "directory": str(cwd),
+                "model": model,
+                "messages": [
+                    {"role": "user", "content": prompt},
+                    {"role": "assistant", "content": "ok"},
+                ],
+                "session_info": {
+                    "model": {
+                        "id": model,
+                        "providerID": "opencode",
+                        "variant": variant,
+                    },
+                },
+                "event_metadata": {"hook_event_name": "Stop"},
+            }
+        )
         monkeypatch.setattr("sys.stdin", StringIO(stop_payload))
         assert main(["turn_end"]) == 0
 
@@ -448,7 +507,9 @@ def test_opencode_turn_end_captures_model_variant_as_effort_per_turn(tmp_path, m
     assert store.read_manifest(0).env_ref != store.read_manifest(1).env_ref
 
 
-def test_opencode_hook_captures_session_messages_and_todos_from_sqlite(tmp_path, monkeypatch):
+def test_opencode_hook_captures_session_messages_and_todos_from_sqlite(
+    tmp_path, monkeypatch
+):
     from io import StringIO
     import sqlite3
     from checkpoint_plugin.integrations.opencode_hook import main
@@ -475,7 +536,14 @@ def test_opencode_hook_captures_session_messages_and_todos_from_sqlite(tmp_path,
     )
     conn.execute(
         "INSERT INTO session_message VALUES (?, ?, ?, ?, ?, ?)",
-        ("evt_1", "test-session", "model-switched", 100, 101, json.dumps({"model": {"id": "big-pickle"}})),
+        (
+            "evt_1",
+            "test-session",
+            "model-switched",
+            100,
+            101,
+            json.dumps({"model": {"id": "big-pickle"}}),
+        ),
     )
     conn.execute(
         "INSERT INTO todo VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -488,22 +556,26 @@ def test_opencode_hook_captures_session_messages_and_todos_from_sqlite(tmp_path,
     monkeypatch.setenv("OPENCODE_SESSION_ID", "test-session")
     monkeypatch.setenv("OPENCODE_DATA_DIR", str(data_dir))
 
-    payload = json.dumps({
-        "sessionID": "test-session",
-        "directory": str(cwd),
-        "messages": [
-            {"role": "user", "content": "hi"},
-            {"role": "assistant", "content": "hello"},
-        ],
-        "event_metadata": {
-            "timestamp": "2026-06-03T14:00:00Z",
-            "hook_event_name": "Stop",
-        },
-    })
+    payload = json.dumps(
+        {
+            "sessionID": "test-session",
+            "directory": str(cwd),
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello"},
+            ],
+            "event_metadata": {
+                "timestamp": "2026-06-03T14:00:00Z",
+                "hook_event_name": "Stop",
+            },
+        }
+    )
     monkeypatch.setattr("sys.stdin", StringIO(payload))
     assert main(["turn_end"]) == 0
 
-    trajectory = (plugin_home / "sessions" / "test-session" / "trajectory.jsonl").read_text(encoding="utf-8")
+    trajectory = (
+        plugin_home / "sessions" / "test-session" / "trajectory.jsonl"
+    ).read_text(encoding="utf-8")
     record = json.loads(trajectory.strip())
     hook_payload = record["metadata"]["hook_payload"]
     assert hook_payload["session_messages"][0]["type"] == "model-switched"
@@ -511,7 +583,9 @@ def test_opencode_hook_captures_session_messages_and_todos_from_sqlite(tmp_path,
     assert hook_payload["todos"][0]["content"] == "Capture todo"
 
 
-def test_opencode_turn_end_uses_runtime_mcp_status_in_env_snapshot(tmp_path, monkeypatch):
+def test_opencode_turn_end_uses_runtime_mcp_status_in_env_snapshot(
+    tmp_path, monkeypatch
+):
     """A runtime UI disconnect should override static opencode.json in the checkpoint env."""
     from io import StringIO
     from checkpoint_plugin.env.collector import environment_from_blob
@@ -544,26 +618,30 @@ def test_opencode_turn_end_uses_runtime_mcp_status_in_env_snapshot(tmp_path, mon
         encoding="utf-8",
     )
 
-    start_payload = json.dumps({
-        "sessionID": "test-session",
-        "directory": str(cwd),
-        "agent_type": "primary",
-        "mcp_status": {"context7": {"status": "disabled"}},
-        "event_metadata": {"hook_event_name": "SessionStart"},
-    })
+    start_payload = json.dumps(
+        {
+            "sessionID": "test-session",
+            "directory": str(cwd),
+            "agent_type": "primary",
+            "mcp_status": {"context7": {"status": "disabled"}},
+            "event_metadata": {"hook_event_name": "SessionStart"},
+        }
+    )
     monkeypatch.setattr("sys.stdin", StringIO(start_payload))
     assert main(["session_start"]) == 0
 
-    stop_payload = json.dumps({
-        "sessionID": "test-session",
-        "directory": str(cwd),
-        "messages": [
-            {"role": "user", "content": "hi"},
-            {"role": "assistant", "content": "hello"},
-        ],
-        "mcp_status": {"context7": {"status": "disabled"}},
-        "event_metadata": {"hook_event_name": "Stop"},
-    })
+    stop_payload = json.dumps(
+        {
+            "sessionID": "test-session",
+            "directory": str(cwd),
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello"},
+            ],
+            "mcp_status": {"context7": {"status": "disabled"}},
+            "event_metadata": {"hook_event_name": "Stop"},
+        }
+    )
     monkeypatch.setattr("sys.stdin", StringIO(stop_payload))
     assert main(["turn_end"]) == 0
 

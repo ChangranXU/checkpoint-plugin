@@ -28,9 +28,7 @@ def test_diff_environments_includes_structured_status_changes():
 
 def test_diff_environments_ignores_plugin_hook_only_settings_diff():
     blobs = {
-        "sha-without": (
-            b'{\n  "hooks": {},\n  "model": "sonnet"\n}\n'
-        ),
+        "sha-without": (b'{\n  "hooks": {},\n  "model": "sonnet"\n}\n'),
         "sha-with": (
             b'{\n  "hooks": {\n'
             b'    "Stop": [\n'
@@ -42,8 +40,12 @@ def test_diff_environments_ignores_plugin_hook_only_settings_diff():
     def loader(sha: str) -> bytes:
         return blobs[sha]
 
-    current = EnvironmentState(provider="claude", settings={"settings.json": "sha-with"})
-    target = EnvironmentState(provider="claude", settings={"settings.json": "sha-without"})
+    current = EnvironmentState(
+        provider="claude", settings={"settings.json": "sha-with"}
+    )
+    target = EnvironmentState(
+        provider="claude", settings={"settings.json": "sha-without"}
+    )
 
     diff = diff_environments(
         current, target, blob_loader=loader, ignore_plugin_hooks=True

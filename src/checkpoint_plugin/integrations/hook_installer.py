@@ -45,7 +45,9 @@ def _selected_specs(provider: str) -> list[HookSpec]:
     if normalized == "all":
         return [_claude_spec(), _codex_spec(), _opencode_spec()]
     if normalized not in specs:
-        raise ValueError(f"Unknown provider {provider!r}; expected claude, codex, opencode, or all")
+        raise ValueError(
+            f"Unknown provider {provider!r}; expected claude, codex, opencode, or all"
+        )
     return [specs[normalized]]
 
 
@@ -57,7 +59,9 @@ def _claude_spec() -> HookSpec:
     return HookSpec(
         provider="claude",
         path=_base_home() / ".claude" / "settings.json",
-        commands=frozenset({command_start, command_turn, command_subagent, *_legacy_commands(module)}),
+        commands=frozenset(
+            {command_start, command_turn, command_subagent, *_legacy_commands(module)}
+        ),
         events={
             "SessionStart": [_entry("*", command_start)],
             "Stop": [_entry("*", command_turn)],
@@ -73,14 +77,25 @@ def _codex_spec() -> HookSpec:
     command_subagent = _module_command(module, "subagent_end")
     return HookSpec(
         provider="codex",
-        path=Path(os.environ.get("CODEX_HOME", str(_base_home() / ".codex"))).expanduser() / "hooks.json",
-        commands=frozenset({command_start, command_turn, command_subagent, *_legacy_commands(module)}),
+        path=Path(
+            os.environ.get("CODEX_HOME", str(_base_home() / ".codex"))
+        ).expanduser()
+        / "hooks.json",
+        commands=frozenset(
+            {command_start, command_turn, command_subagent, *_legacy_commands(module)}
+        ),
         events={
             "SessionStart": [
-                _entry("startup|resume|clear|compact", command_start, "Creating checkpoint session metadata")
+                _entry(
+                    "startup|resume|clear|compact",
+                    command_start,
+                    "Creating checkpoint session metadata",
+                )
             ],
             "Stop": [_entry(None, command_turn, "Saving checkpoint")],
-            "SubagentStop": [_entry(None, command_subagent, "Saving subagent checkpoint")],
+            "SubagentStop": [
+                _entry(None, command_subagent, "Saving subagent checkpoint")
+            ],
         },
     )
 
@@ -88,7 +103,9 @@ def _codex_spec() -> HookSpec:
 def _opencode_spec() -> HookSpec:
     # OpenCode uses TypeScript plugins, not JSON hooks like Claude/Codex.
     # The installer copies the plugin file to ~/.config/opencode/plugins/checkpoint.ts
-    config_home = Path(os.environ.get("OPENCODE_HOME", str(_base_home() / ".config" / "opencode"))).expanduser()
+    config_home = Path(
+        os.environ.get("OPENCODE_HOME", str(_base_home() / ".config" / "opencode"))
+    ).expanduser()
     plugin_dir = config_home / "plugins"
     return HookSpec(
         provider="opencode",
@@ -110,7 +127,9 @@ def _legacy_commands(module: str) -> tuple[str, ...]:
     )
 
 
-def _entry(matcher: str | None, command: str, status_message: str | None = None) -> dict[str, Any]:
+def _entry(
+    matcher: str | None, command: str, status_message: str | None = None
+) -> dict[str, Any]:
     hook: dict[str, Any] = {"type": "command", "command": command}
     if status_message is not None:
         hook["statusMessage"] = status_message
@@ -136,7 +155,9 @@ def _apply(spec: HookSpec, install: bool) -> HookInstallResult:
     if install:
         current_commands = _current_commands(spec)
         _remove_commands(hooks, spec.commands - current_commands)
-        _remove_commands_from_unmanaged_events(hooks, frozenset(spec.events), spec.commands)
+        _remove_commands_from_unmanaged_events(
+            hooks, frozenset(spec.events), spec.commands
+        )
         for event, entries in spec.events.items():
             event_entries = hooks.setdefault(event, [])
             if not isinstance(event_entries, list):
@@ -183,7 +204,9 @@ def _write_json(path: Path, data: dict[str, Any]) -> None:
 
 
 def _has_command(entries: list[Any], command: str | None) -> bool:
-    return command is not None and any(command == existing for existing in _iter_commands(entries))
+    return command is not None and any(
+        command == existing for existing in _iter_commands(entries)
+    )
 
 
 def _iter_commands(entries: list[Any]) -> list[str]:
@@ -195,7 +218,11 @@ def _iter_commands(entries: list[Any]) -> list[str]:
         if not isinstance(hooks, list):
             continue
         for hook in hooks:
-            if isinstance(hook, dict) and hook.get("type") == "command" and isinstance(hook.get("command"), str):
+            if (
+                isinstance(hook, dict)
+                and hook.get("type") == "command"
+                and isinstance(hook.get("command"), str)
+            ):
                 commands.append(hook["command"])
     return commands
 
@@ -250,7 +277,11 @@ def _remove_commands_from_unmanaged_events(
     managed_events: frozenset[str],
     commands: frozenset[str],
 ) -> None:
-    unmanaged = {event: entries for event, entries in hooks.items() if event not in managed_events}
+    unmanaged = {
+        event: entries
+        for event, entries in hooks.items()
+        if event not in managed_events
+    }
     _remove_commands(unmanaged, commands)
     for event in list(hooks):
         if event not in managed_events:
@@ -282,7 +313,9 @@ def _apply_opencode_plugin(spec: HookSpec, install: bool) -> HookInstallResult:
         template_path = package_root / "integrations" / "opencode-plugin.example.ts"
 
         if not template_path.exists():
-            raise FileNotFoundError(f"OpenCode plugin template not found at {template_path}")
+            raise FileNotFoundError(
+                f"OpenCode plugin template not found at {template_path}"
+            )
 
         # Check if plugin already exists and is identical
         changed = True
@@ -294,16 +327,22 @@ def _apply_opencode_plugin(spec: HookSpec, install: bool) -> HookInstallResult:
 
         if changed:
             # Copy the template to the target location
-            plugin_path.write_text(template_path.read_text(encoding="utf-8"), encoding="utf-8")
+            plugin_path.write_text(
+                template_path.read_text(encoding="utf-8"), encoding="utf-8"
+            )
 
-        return HookInstallResult(provider=spec.provider, path=plugin_path, changed=changed)
+        return HookInstallResult(
+            provider=spec.provider, path=plugin_path, changed=changed
+        )
     else:
         # Uninstall: remove the plugin file
         changed = plugin_path.exists()
         if changed:
             plugin_path.unlink()
 
-        return HookInstallResult(provider=spec.provider, path=plugin_path, changed=changed)
+        return HookInstallResult(
+            provider=spec.provider, path=plugin_path, changed=changed
+        )
 
 
 def _base_home() -> Path:

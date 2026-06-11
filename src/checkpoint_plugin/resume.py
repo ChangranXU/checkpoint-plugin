@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shlex
@@ -17,7 +18,11 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from ._utils import extract_sha_refs, is_sha_ref, read_metadata_json
-from .env.collector import claude_mcp_statuses_from_trajectory, collect_environment, environment_from_blob
+from .env.collector import (
+    claude_mcp_statuses_from_trajectory,
+    collect_environment,
+    environment_from_blob,
+)
 from .env.differ import diff_environments, render_diff
 from .env.providers import (
     RESUME_RUNTIME_ARGS,
@@ -31,9 +36,14 @@ from .env.restorer import restore_environment
 from .fs.ignore import IgnoreMatcher
 from .fs.restorer import diff_filesystems, render_fs_diff, restore_cwd
 from .fs.snapshot import filesystem_from_blob, snapshot_cwd
-from .integrations._trajectory_slicer import claude_key, codex_key, jsonl_count_records, recover_trailing_tail
+from .integrations._trajectory_slicer import (
+    claude_key,
+    codex_key,
+    jsonl_count_records,
+    recover_trailing_tail,
+)
 from .path_utils import mirror_path, path_within, rewrite_path_references_text
-from .paths import backups_dir, ensure_home, load_config, session_dir
+from .paths import backups_dir, ensure_home, load_config, session_dir, sessions_dir
 from .store import CheckpointStore, canonical_json
 from .types import CheckpointManifest, ResumePlan, ResumeReport, TrajectoryReference
 
@@ -79,7 +89,9 @@ class ResumeOpenSpec:
 
 
 class ResumeOrchestrator:
-    def __init__(self, plugin_home: Path | None = None, cwd: Path | None = None) -> None:
+    def __init__(
+        self, plugin_home: Path | None = None, cwd: Path | None = None
+    ) -> None:
         self.home = ensure_home(plugin_home)
         self.cwd = Path(cwd).expanduser().resolve() if cwd is not None else None
 
@@ -118,19 +130,28 @@ class ResumeOrchestrator:
             ignore_plugin_hooks=ignore_plugin_hooks,
         )
 
-    def execute(self, plan: ResumePlan, confirm: Callable[[str], bool | ResumeOptions]) -> ResumeReport:
+    def execute(
+        self, plan: ResumePlan, confirm: Callable[[str], bool | ResumeOptions]
+    ) -> ResumeReport:
         rendered = plan.render()
         options = _coerce_resume_options(confirm(rendered))
         if not options.proceed:
             raise RuntimeError("Resume cancelled")
         original_store = CheckpointStore(session_dir(plan.session_id, self.home))
-        backup_root = backups_dir(self.home) / f"{_stamp()}-{plan.session_id}-{uuid.uuid4().hex[:8]}"
+        backup_root = (
+            backups_dir(self.home)
+            / f"{_stamp()}-{plan.session_id}-{uuid.uuid4().hex[:8]}"
+        )
         target_cwd = _prepare_resume_cwd(self.cwd, options.target_cwd)
         self.cwd = target_cwd
         source_provider = layout_for_provider(plan.target_env.provider)
         new_session_id = _new_resume_session_id(source_provider.name)
-        runtime = _prepare_resume_runtime(source_provider, self.home, new_session_id, plan.target_env)
-        runtime_env = _environment_for_runtime(plan.target_env, runtime.path_map, target_cwd)
+        runtime = _prepare_resume_runtime(
+            source_provider, self.home, new_session_id, plan.target_env
+        )
+        runtime_env = _environment_for_runtime(
+            plan.target_env, runtime.path_map, target_cwd
+        )
         runtime = replace(
             runtime,
             env=_runtime_process_env(
@@ -149,7 +170,9 @@ class ResumeOrchestrator:
             ignore_plugin_hooks=plan.ignore_plugin_hooks,
             preserve_redacted_values=True,
         )
-        _materialize_runtime_config(runtime.provider.name, runtime.provider.home, runtime_env)
+        _materialize_runtime_config(
+            runtime.provider.name, runtime.provider.home, runtime_env
+        )
         config = load_config(self.home)
         ignore = IgnoreMatcher(target_cwd, config.get("exclude_patterns") or [])
         fs_report = restore_cwd(
@@ -162,7 +185,11 @@ class ResumeOrchestrator:
         if not target_cwd.is_dir():
             raise RuntimeError(f"Resume workspace was not created: {target_cwd}")
         trajectory = _trajectory_prefix(original_store, plan)
-        source_meta = _codex_source_session_meta(plan) if runtime.provider.name == "codex" else None
+        source_meta = (
+            _codex_source_session_meta(plan)
+            if runtime.provider.name == "codex"
+            else None
+        )
         # P6-14: an inherited fork prefix is present when the earliest captured turn
         # anchors past byte 0 (records before it are pre-fork inherited history).
         has_inherited_prefix = _has_inherited_prefix(trajectory.spans, trajectory.data)
@@ -193,7 +220,8 @@ class ResumeOrchestrator:
             _append_codex_session_index(
                 runtime.provider.home,
                 new_session_id,
-                _source_session_title(original_store) or _derive_session_title(original_store, plan),
+                _source_session_title(original_store)
+                or _derive_session_title(original_store, plan),
             )
         resume_open = _resume_open_spec(
             runtime.provider.name,
@@ -218,10 +246,14 @@ class ResumeOrchestrator:
             backup_dir=str(backup_root),
             env=env_report,
             fs=fs_report,
-            provider_session_path=str(provider_session_path) if provider_session_path is not None else None,
+            provider_session_path=str(provider_session_path)
+            if provider_session_path is not None
+            else None,
             target_cwd=str(target_cwd),
             env_state_dir=str(runtime.root),
-            resume_command=_resume_command(runtime.provider.name, new_session_id) if resume_open is not None else None,
+            resume_command=_resume_command(runtime.provider.name, new_session_id)
+            if resume_open is not None
+            else None,
         )
 
     def _copy_session_prefix(
@@ -237,7 +269,15 @@ class ResumeOrchestrator:
     ) -> None:
         target_dir = session_dir(new_session_id, self.home)
         target_store = CheckpointStore(target_dir)
-        _write_resumed_metadata(store, target_store, plan, new_session_id, provider_session_path, cwd, runtime)
+        _write_resumed_metadata(
+            store,
+            target_store,
+            plan,
+            new_session_id,
+            provider_session_path,
+            cwd,
+            runtime,
+        )
         if resume_open is not None:
             _write_resume_open_spec(target_store, resume_open, runtime)
         # P4-3/P6-2: realign spans to the REWRITTEN provider file so resumed
@@ -266,18 +306,36 @@ class ResumeOrchestrator:
             if manifest.turn_id <= plan.turn_id:
                 _promote_manifest_blobs(store, manifest)
                 target_store.write_manifest(
-                    _resumed_manifest(manifest, new_session_id, manifest_session_path, realigned, target_store, cwd)
+                    _resumed_manifest(
+                        manifest,
+                        new_session_id,
+                        manifest_session_path,
+                        realigned,
+                        target_store,
+                        cwd,
+                    )
                 )
         if trajectory.data:
             target_store._atomic_write(target_store.trajectory_path, trajectory.data)
+        _copy_checkpoint_subagent_sessions(
+            self.home,
+            plan.session_id,
+            plan.turn_id,
+            new_session_id,
+            cwd,
+        )
 
 
-def _promote_manifest_blobs(store: CheckpointStore, manifest: CheckpointManifest) -> None:
+def _promote_manifest_blobs(
+    store: CheckpointStore, manifest: CheckpointManifest
+) -> None:
     for sha in _manifest_blob_refs(store, manifest):
         store.promote_legacy_blob(sha)
 
 
-def _manifest_blob_refs(store: CheckpointStore, manifest: CheckpointManifest) -> set[str]:
+def _manifest_blob_refs(
+    store: CheckpointStore, manifest: CheckpointManifest
+) -> set[str]:
     refs = {ref for ref in (manifest.env_ref, manifest.fs_ref) if is_sha_ref(ref)}
     metadata = _read_session_metadata(store)
     fork_point_ref = metadata.get("fork_point_trajectory_ref")
@@ -316,9 +374,13 @@ def _refuse_subagent_resume(store: CheckpointStore, home: Path) -> None:
     parent_session_id = lineage.get("parent_session_id")
     if not isinstance(parent_session_id, str) or not parent_session_id:
         return
-    agent_id = lineage.get("agent_id") if isinstance(lineage.get("agent_id"), str) else None
+    agent_id = (
+        lineage.get("agent_id") if isinstance(lineage.get("agent_id"), str) else None
+    )
     turn_id = _parent_turn_for_subagent(home, parent_session_id, agent_id, metadata)
-    target = f"{parent_session_id} {turn_id}" if turn_id is not None else parent_session_id
+    target = (
+        f"{parent_session_id} {turn_id}" if turn_id is not None else parent_session_id
+    )
     raise RuntimeError(
         "Cannot resume a subagent standalone; a subagent has no faithful "
         "standalone session. Resume its parent instead: "
@@ -432,15 +494,23 @@ def _prepare_resume_cwd(current_cwd: Path | None, target_cwd: Path | None) -> Pa
             raise RuntimeError(f"Target folder is not empty: {target_cwd}")
     else:
         target_cwd.parent.mkdir(parents=True, exist_ok=True)
+
     def _ignore_special_files(directory: str, entries: list[str]) -> set[str]:
         ignored = set()
         for entry in entries:
             path = Path(directory) / entry
-            if path.is_socket() or path.is_fifo() or path.is_block_device() or path.is_char_device():
+            if (
+                path.is_socket()
+                or path.is_fifo()
+                or path.is_block_device()
+                or path.is_char_device()
+            ):
                 ignored.add(entry)
         return ignored
 
-    shutil.copytree(current_cwd, target_cwd, dirs_exist_ok=True, ignore=_ignore_special_files)
+    shutil.copytree(
+        current_cwd, target_cwd, dirs_exist_ok=True, ignore=_ignore_special_files
+    )
     return target_cwd
 
 
@@ -462,9 +532,15 @@ def _prepare_resume_runtime(
     runtime_provider = _provider_layout_with_path_map(source_provider, path_map)
     runtime_provider.home.mkdir(parents=True, exist_ok=True)
     _copy_runtime_seed_files(source_provider, runtime_provider, path_map)
-    _link_runtime_secret_files(source_provider.name, source_provider.home, runtime_provider.home)
-    env = _runtime_process_env(source_provider.name, runtime_provider.home, root, target_env, path_map)
-    return ResumeRuntime(root=root, provider=runtime_provider, env=env, path_map=path_map)
+    _link_runtime_secret_files(
+        source_provider.name, source_provider.home, runtime_provider.home
+    )
+    env = _runtime_process_env(
+        source_provider.name, runtime_provider.home, root, target_env, path_map
+    )
+    return ResumeRuntime(
+        root=root, provider=runtime_provider, env=env, path_map=path_map
+    )
 
 
 def _runtime_path_map(
@@ -547,16 +623,27 @@ def _provider_layout_paths(provider: ProviderLayout) -> list[Path | None]:
     return paths
 
 
-def _provider_layout_with_path_map(provider: ProviderLayout, path_map: dict[str, str]) -> ProviderLayout:
+def _provider_layout_with_path_map(
+    provider: ProviderLayout, path_map: dict[str, str]
+) -> ProviderLayout:
     return replace(
         provider,
         home=_mapped_path(provider.home, path_map),
         memory_dir=_mapped_optional_path(provider.memory_dir, path_map),
         mcp_config=_mapped_optional_path(provider.mcp_config, path_map),
-        mcp_config_files=[_mapped_path(path, path_map) for path in provider.mcp_config_files],
-        settings_files=[_mapped_path(path, path_map) for path in provider.settings_files],
-        skills_dirs={name: _mapped_path(path, path_map) for name, path in provider.skills_dirs.items()},
-        project_files=[_mapped_project_file(item, path_map) for item in provider.project_files],
+        mcp_config_files=[
+            _mapped_path(path, path_map) for path in provider.mcp_config_files
+        ],
+        settings_files=[
+            _mapped_path(path, path_map) for path in provider.settings_files
+        ],
+        skills_dirs={
+            name: _mapped_path(path, path_map)
+            for name, path in provider.skills_dirs.items()
+        },
+        project_files=[
+            _mapped_project_file(item, path_map) for item in provider.project_files
+        ],
     )
 
 
@@ -592,16 +679,22 @@ def _mapped_path(path: Path, path_map: dict[str, str]) -> Path:
     return path
 
 
-def _environment_for_runtime(env: object, path_map: dict[str, str], target_cwd: Path) -> object:
+def _environment_for_runtime(
+    env: object, path_map: dict[str, str], target_cwd: Path
+) -> object:
     extra = dict(getattr(env, "extra", {}) or {})
     source_cwd = _string_value(extra.get("cwd"))
     runtime_map = dict(path_map)
     if source_cwd:
         runtime_map[str(Path(source_cwd).expanduser())] = str(target_cwd)
-        runtime_map = dict(sorted(runtime_map.items(), key=lambda item: len(item[0]), reverse=True))
+        runtime_map = dict(
+            sorted(runtime_map.items(), key=lambda item: len(item[0]), reverse=True)
+        )
 
     settings = _rewrite_path_keyed_map(getattr(env, "settings", {}) or {}, runtime_map)
-    project_context = _rewrite_path_keyed_map(getattr(env, "project_context", {}) or {}, runtime_map)
+    project_context = _rewrite_path_keyed_map(
+        getattr(env, "project_context", {}) or {}, runtime_map
+    )
     provider_home = extra.get("provider_home")
     if provider_home:
         extra["provider_home"] = str(_mapped_path(Path(str(provider_home)), path_map))
@@ -614,7 +707,9 @@ def _environment_for_runtime(env: object, path_map: dict[str, str], target_cwd: 
         for name, root in plugin_file_roots.items():
             if not isinstance(name, str) or not isinstance(root, str) or not root:
                 continue
-            rewritten_roots[name] = str(_mapped_path(Path(root).expanduser(), runtime_map))
+            rewritten_roots[name] = str(
+                _mapped_path(Path(root).expanduser(), runtime_map)
+            )
         extra["plugin_file_roots"] = rewritten_roots
 
     extra["cwd"] = str(target_cwd)
@@ -622,36 +717,59 @@ def _environment_for_runtime(env: object, path_map: dict[str, str], target_cwd: 
 
     runtime_env = extra.get("opencode_runtime_env")
     if isinstance(runtime_env, dict):
-        extra["opencode_runtime_env"] = _rewrite_opencode_runtime_env(runtime_env, runtime_map)
+        extra["opencode_runtime_env"] = _rewrite_opencode_runtime_env(
+            runtime_env, runtime_map
+        )
 
     config_content = extra.get("opencode_config_content")
     if isinstance(config_content, str) and config_content:
-        extra["opencode_config_content"] = rewrite_path_references_text(config_content, runtime_map)
+        extra["opencode_config_content"] = rewrite_path_references_text(
+            config_content, runtime_map
+        )
 
     config_roots = extra.get("opencode_config_skill_roots")
     if isinstance(config_roots, list):
         extra["opencode_config_skill_roots"] = [
-            str(_mapped_path(Path(root).expanduser(), runtime_map)) if isinstance(root, str) else root
+            str(_mapped_path(Path(root).expanduser(), runtime_map))
+            if isinstance(root, str)
+            else root
             for root in config_roots
         ]
 
     return replace(env, settings=settings, project_context=project_context, extra=extra)
 
 
-def _rewrite_path_keyed_map(values: dict[str, str], path_map: dict[str, str]) -> dict[str, str]:
+def _rewrite_path_keyed_map(
+    values: dict[str, str], path_map: dict[str, str]
+) -> dict[str, str]:
     rewritten: dict[str, str] = {}
     for key, value in values.items():
         path = Path(key)
-        new_key = str(_mapped_path(path.expanduser(), path_map)) if path.is_absolute() else key
+        new_key = (
+            str(_mapped_path(path.expanduser(), path_map))
+            if path.is_absolute()
+            else key
+        )
         rewritten[new_key] = value
     return rewritten
 
 
-def _rewrite_opencode_runtime_env(values: dict[object, object], path_map: dict[str, str]) -> dict[str, str]:
-    path_keys = {"OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "OPENCODE_TUI_CONFIG", "OPENCODE_DATA_DIR"}
+def _rewrite_opencode_runtime_env(
+    values: dict[object, object], path_map: dict[str, str]
+) -> dict[str, str]:
+    path_keys = {
+        "OPENCODE_CONFIG",
+        "OPENCODE_CONFIG_DIR",
+        "OPENCODE_TUI_CONFIG",
+        "OPENCODE_DATA_DIR",
+    }
     rewritten: dict[str, str] = {}
     for key, value in values.items():
-        if not isinstance(key, str) or not _safe_env_name(key) or key == "OPENCODE_CONFIG_CONTENT":
+        if (
+            not isinstance(key, str)
+            or not _safe_env_name(key)
+            or key == "OPENCODE_CONFIG_CONTENT"
+        ):
             continue
         text = str(value)
         if key in path_keys:
@@ -695,13 +813,19 @@ def _validate_resume_command_from_policy(
     try:
         runtime_index = policy.command_template.index(RESUME_RUNTIME_ARGS)
     except ValueError:
-        expected = _substitute_resume_command_template(policy.command_template, session_id)
+        expected = _substitute_resume_command_template(
+            policy.command_template, session_id
+        )
         if command != expected:
             raise RuntimeError(f"Invalid resume-open state field 'command': {path}")
         return
 
-    prefix = _substitute_resume_command_template(policy.command_template[:runtime_index], session_id)
-    suffix = _substitute_resume_command_template(policy.command_template[runtime_index + 1 :], session_id)
+    prefix = _substitute_resume_command_template(
+        policy.command_template[:runtime_index], session_id
+    )
+    suffix = _substitute_resume_command_template(
+        policy.command_template[runtime_index + 1 :], session_id
+    )
     if command[: len(prefix)] != prefix:
         raise RuntimeError(f"Invalid resume-open state field 'command': {path}")
     if suffix and command[-len(suffix) :] != suffix:
@@ -712,7 +836,9 @@ def _validate_resume_command_from_policy(
     _validate_provider_runtime_args(command[len(prefix) : runtime_end], policy, path)
 
 
-def _substitute_resume_command_template(template: tuple[str, ...], session_id: str) -> list[str]:
+def _substitute_resume_command_template(
+    template: tuple[str, ...], session_id: str
+) -> list[str]:
     values: list[str] = []
     for token in template:
         if token == RESUME_SESSION_ID:
@@ -724,7 +850,9 @@ def _substitute_resume_command_template(template: tuple[str, ...], session_id: s
     return values
 
 
-def _validate_provider_runtime_args(args: list[str], policy: ProviderResumePolicy, path: Path) -> None:
+def _validate_provider_runtime_args(
+    args: list[str], policy: ProviderResumePolicy, path: Path
+) -> None:
     value_options = {option for _field, option in policy.runtime_arg_fields}
     json_config_options: dict[str, set[str]] = {}
     for _field, option, config_key in policy.runtime_json_config_arg_fields:
@@ -733,11 +861,21 @@ def _validate_provider_runtime_args(args: list[str], policy: ProviderResumePolic
     index = 0
     while index < len(args):
         option = args[index]
-        if option in value_options and index + 1 < len(args) and not args[index + 1].startswith("-"):
+        assigned_option, assigned_separator, _assigned_value = option.partition("=")
+        if assigned_separator and assigned_option in value_options:
+            index += 1
+            continue
+        if (
+            option in value_options
+            and index + 1 < len(args)
+            and not args[index + 1].startswith("-")
+        ):
             index += 2
             continue
         if option in json_config_options and index + 1 < len(args):
-            if _valid_json_config_assignment(args[index + 1], json_config_options[option]):
+            if _valid_json_config_assignment(
+                args[index + 1], json_config_options[option]
+            ):
                 index += 2
                 continue
         raise RuntimeError(f"Invalid resume-open state field 'command': {path}")
@@ -790,7 +928,9 @@ def _runtime_process_env(
     return env
 
 
-def _materialize_runtime_config(provider_name: str, runtime_home: Path, target_env: object) -> None:
+def _materialize_runtime_config(
+    provider_name: str, runtime_home: Path, target_env: object
+) -> None:
     if provider_name == "claude":
         _materialize_claude_runtime_config(runtime_home, target_env)
         return
@@ -809,7 +949,9 @@ def _materialize_runtime_config(provider_name: str, runtime_home: Path, target_e
         return
     wanted = cleaned
     runtime_home.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(wanted, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    target.write_text(
+        json.dumps(wanted, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
 
 
 def _materialize_claude_runtime_config(runtime_home: Path, target_env: object) -> None:
@@ -827,7 +969,9 @@ def _materialize_claude_runtime_config(runtime_home: Path, target_env: object) -
     projects[str(cwd)] = project
     current["projects"] = projects
     runtime_home.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(current, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    target.write_text(
+        json.dumps(current, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
 
 
 def _has_mcp_server_statuses(target_env: object) -> bool:
@@ -882,7 +1026,9 @@ def _copy_file(source: Path, dest: Path) -> None:
     shutil.copy2(source, dest)
 
 
-def _link_runtime_secret_files(provider_name: str, source_home: Path, runtime_home: Path) -> None:
+def _link_runtime_secret_files(
+    provider_name: str, source_home: Path, runtime_home: Path
+) -> None:
     pairs: list[tuple[Path, Path]] = [
         (source_home / "auth.json", runtime_home / "auth.json"),
         (source_home / "credentials.json", runtime_home / "credentials.json"),
@@ -890,7 +1036,9 @@ def _link_runtime_secret_files(provider_name: str, source_home: Path, runtime_ho
         (source_home / ".env", runtime_home / ".env"),
     ]
     if provider_name == "claude":
-        pairs.append((source_home.parent / ".claude.json", runtime_home / ".claude.json"))
+        pairs.append(
+            (source_home.parent / ".claude.json", runtime_home / ".claude.json")
+        )
     for source, dest in pairs:
         if _regular_file_no_symlink(source) and not dest.exists():
             _link_or_copy_file(source, dest)
@@ -1003,9 +1151,14 @@ def _trajectory_prefix(store: CheckpointStore, plan: ResumePlan) -> TrajectoryPr
             continue
         is_latest = manifest.turn_id == plan.turn_id
         try:
-            chunk = _read_trajectory_slice_for_manifest(store, manifest, extend_to_eof=is_latest)
+            chunk = _read_trajectory_slice_for_manifest(
+                store, manifest, extend_to_eof=is_latest
+            )
         except (OSError, ValueError) as exc:
-            print(f"Warning: trajectory unavailable for turn {manifest.turn_id}: {exc}", file=sys.stderr)
+            print(
+                f"Warning: trajectory unavailable for turn {manifest.turn_id}: {exc}",
+                file=sys.stderr,
+            )
             continue
         if not chunk:
             continue
@@ -1018,7 +1171,9 @@ def _trajectory_prefix(store: CheckpointStore, plan: ResumePlan) -> TrajectoryPr
                 turn_keys[manifest.turn_id] = chunk_key
         offset = end_offset
     if chunks:
-        return TrajectoryPrefix(b"".join(chunks), spans, turn_keys, inherited_record_count)
+        return TrajectoryPrefix(
+            b"".join(chunks), spans, turn_keys, inherited_record_count
+        )
     legacy = store.slice_trajectory(_trajectory_resume_offset(plan))
     if plan.target_manifest.trajectory_offset < len(legacy):
         spans[plan.turn_id] = (
@@ -1082,7 +1237,9 @@ def _first_record_key(chunk: bytes, key_extractor) -> object:
     return None
 
 
-def _inherited_fork_prefix(manifests: list[CheckpointManifest], store: CheckpointStore) -> bytes:
+def _inherited_fork_prefix(
+    manifests: list[CheckpointManifest], store: CheckpointStore
+) -> bytes:
     """Bytes of inherited history preceding the first captured turn (F3).
 
     When the earliest turn's slice begins past byte 0, the records before it are
@@ -1120,7 +1277,7 @@ def _inherited_fork_prefix(manifests: list[CheckpointManifest], store: Checkpoin
                     f"Warning: Fork lineage truncation detected - parent file {path.name} "
                     f"is {file_size} bytes but fork point was at {ref.start_offset} bytes. "
                     f"Attempting recovery from stored fork-point blob...",
-                    file=sys.stderr
+                    file=sys.stderr,
                 )
             else:
                 handle.seek(0)
@@ -1140,29 +1297,29 @@ def _inherited_fork_prefix(manifests: list[CheckpointManifest], store: Checkpoin
 
                 # Extract the prefix up to start_offset
                 if len(fork_point_data) >= ref.start_offset:
-                    prefix = fork_point_data[:ref.start_offset]
+                    prefix = fork_point_data[: ref.start_offset]
                     print(
                         f"Note: Successfully recovered {len(prefix)} bytes of fork lineage "
                         f"from stored fork-point blob (ref: {fork_point_ref[:12]}...)",
-                        file=sys.stderr
+                        file=sys.stderr,
                     )
                 else:
                     print(
                         f"Warning: Fork-point blob is {len(fork_point_data)} bytes, "
                         f"shorter than expected offset {ref.start_offset}",
-                        file=sys.stderr
+                        file=sys.stderr,
                     )
             except (FileNotFoundError, OSError) as exc:
                 print(
                     f"Warning: Could not load fork-point trajectory blob {fork_point_ref}: {exc}",
-                    file=sys.stderr
+                    file=sys.stderr,
                 )
         elif truncation_detected:
             print(
                 "Warning: No fork_point_trajectory_ref found in metadata. "
                 "Fork lineage cannot be recovered (session may have been captured "
                 "before recovery feature was added).",
-                file=sys.stderr
+                file=sys.stderr,
             )
 
     # start_offset is a line boundary; guard against a partial trailing line.
@@ -1347,7 +1504,9 @@ def _target_env_with_claude_runtime(
     if ref is None or ref.provider != "claude":
         return target_env
     try:
-        trajectory = _read_trajectory_slice_for_manifest(store, manifest, extend_to_eof=True)
+        trajectory = _read_trajectory_slice_for_manifest(
+            store, manifest, extend_to_eof=True
+        )
     except (OSError, ValueError):
         return target_env
     statuses = claude_mcp_statuses_from_trajectory(trajectory)
@@ -1405,7 +1564,9 @@ def _codex_turn_context_effort(payload: dict[str, object]) -> str | None:
     if isinstance(collaboration_mode, dict):
         settings = collaboration_mode.get("settings")
         if isinstance(settings, dict):
-            return _first_payload_string(settings, "reasoning_effort", "thinking_effort", "thinkingEffort")
+            return _first_payload_string(
+                settings, "reasoning_effort", "thinking_effort", "thinkingEffort"
+            )
     return None
 
 
@@ -1476,7 +1637,11 @@ def _write_resumed_metadata(
         metadata["session_env"] = target_session_env
     else:
         metadata.pop("session_env", None)
-    for stale_key in ("forked_from_transcript", "forked_at_offset", "forked_at_record_count"):
+    for stale_key in (
+        "forked_from_transcript",
+        "forked_at_offset",
+        "forked_at_record_count",
+    ):
         metadata.pop(stale_key, None)
     target_store._atomic_write(
         target_store.session_dir / "metadata.json",
@@ -1484,7 +1649,137 @@ def _write_resumed_metadata(
     )
 
 
-def _write_resume_open_spec(target_store: CheckpointStore, spec: ResumeOpenSpec, runtime: ResumeRuntime) -> None:
+def _copy_checkpoint_subagent_sessions(
+    home: Path,
+    source_parent_id: str,
+    through_turn_id: int,
+    new_parent_id: str,
+    cwd: Path,
+) -> None:
+    root = sessions_dir(home)
+    if not root.exists():
+        return
+    for source_dir in sorted(root.iterdir()):
+        if not source_dir.is_dir():
+            continue
+        metadata = read_metadata_json(source_dir / "metadata.json")
+        lineage = metadata.get("lineage")
+        if not isinstance(lineage, dict):
+            continue
+        if lineage.get("parent_session_id") != source_parent_id:
+            continue
+        agent_id = (
+            lineage.get("agent_id")
+            if isinstance(lineage.get("agent_id"), str)
+            else None
+        )
+        parent_turn = _parent_turn_for_subagent(
+            home, source_parent_id, agent_id, metadata
+        )
+        if parent_turn is None or parent_turn > through_turn_id:
+            continue
+        new_session_id = _copied_subagent_session_id(
+            source_dir.name, source_parent_id, new_parent_id
+        )
+        target_dir = session_dir(new_session_id, home)
+        if target_dir.exists():
+            continue
+        shutil.copytree(source_dir, target_dir, ignore=_ignore_unsafe_session_entries)
+        _rewrite_copied_subagent_session(
+            source_dir,
+            target_dir,
+            new_session_id,
+            new_parent_id,
+            cwd,
+        )
+
+
+def _copied_subagent_session_id(
+    source_session_id: str, source_parent_id: str, new_parent_id: str
+) -> str:
+    prefix = f"{source_parent_id}--subagent-"
+    if source_session_id.startswith(prefix):
+        return f"{new_parent_id}--subagent-{source_session_id[len(prefix) :]}"
+    safe_suffix = re.sub(r"[^A-Za-z0-9_.-]+", "-", source_session_id).strip("-")
+    return f"{new_parent_id}--subagent-{safe_suffix or 'copy'}"
+
+
+def _ignore_unsafe_session_entries(directory: str, entries: list[str]) -> set[str]:
+    ignored: set[str] = set()
+    for entry in entries:
+        path = Path(directory) / entry
+        try:
+            if (
+                path.is_symlink()
+                or path.is_socket()
+                or path.is_fifo()
+                or path.is_block_device()
+                or path.is_char_device()
+            ):
+                ignored.add(entry)
+        except OSError:
+            ignored.add(entry)
+    return ignored
+
+
+def _rewrite_copied_subagent_session(
+    source_dir: Path,
+    target_dir: Path,
+    new_session_id: str,
+    new_parent_id: str,
+    cwd: Path,
+) -> None:
+    target_store = CheckpointStore(target_dir)
+    metadata = read_metadata_json(target_dir / "metadata.json")
+    metadata["session_id"] = new_session_id
+    metadata["cwd"] = str(cwd)
+    metadata["source"] = "subagent"
+    lineage = metadata.get("lineage")
+    lineage = dict(lineage) if isinstance(lineage, dict) else {}
+    lineage["parent_session_id"] = new_parent_id
+    metadata["lineage"] = lineage
+    target_store._atomic_write(
+        target_store.session_dir / "metadata.json",
+        canonical_json(metadata) + "\n",
+    )
+    source_store = CheckpointStore(source_dir)
+    for manifest in source_store.list_manifests():
+        target_store.write_manifest(
+            _copied_subagent_manifest(
+                manifest, source_store, target_store, new_session_id, cwd
+            )
+        )
+
+
+def _copied_subagent_manifest(
+    manifest: CheckpointManifest,
+    source_store: CheckpointStore,
+    target_store: CheckpointStore,
+    new_session_id: str,
+    cwd: Path,
+) -> CheckpointManifest:
+    trajectory_ref = manifest.trajectory_ref
+    if trajectory_ref is not None and str(
+        Path(trajectory_ref.transcript_path).expanduser()
+    ) == str(source_store.trajectory_path):
+        trajectory_ref = replace(
+            trajectory_ref, transcript_path=str(target_store.trajectory_path)
+        )
+    try:
+        fs_ref = _rewrite_fs_ref_for_cwd(manifest.fs_ref, target_store, cwd)
+    except (OSError, KeyError, ValueError, json.JSONDecodeError, UnicodeDecodeError):
+        fs_ref = manifest.fs_ref
+    return replace(
+        manifest,
+        session_id=new_session_id,
+        fs_ref=fs_ref,
+        trajectory_ref=trajectory_ref,
+    )
+
+
+def _write_resume_open_spec(
+    target_store: CheckpointStore, spec: ResumeOpenSpec, runtime: ResumeRuntime
+) -> None:
     data = {
         "provider": spec.provider,
         "session_id": spec.session_id,
@@ -1495,10 +1790,14 @@ def _write_resume_open_spec(target_store: CheckpointStore, spec: ResumeOpenSpec,
         "preflight": spec.preflight,
         "command": spec.command,
     }
-    target_store._atomic_write(target_store.session_dir / "resume-open.json", canonical_json(data) + "\n")
+    target_store._atomic_write(
+        target_store.session_dir / "resume-open.json", canonical_json(data) + "\n"
+    )
 
 
-def load_resume_open_spec(session_id: str, plugin_home: Path | None = None) -> ResumeOpenSpec:
+def load_resume_open_spec(
+    session_id: str, plugin_home: Path | None = None
+) -> ResumeOpenSpec:
     _require_resume_session_id(session_id, "session id", Path("resume-open"))
     path = session_dir(session_id, plugin_home) / "resume-open.json"
     if not path.exists():
@@ -1509,9 +1808,13 @@ def load_resume_open_spec(session_id: str, plugin_home: Path | None = None) -> R
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"Invalid resume-open state for session {session_id}: {path}") from exc
+        raise RuntimeError(
+            f"Invalid resume-open state for session {session_id}: {path}"
+        ) from exc
     if not isinstance(data, dict):
-        raise RuntimeError(f"Invalid resume-open state for session {session_id}: {path}")
+        raise RuntimeError(
+            f"Invalid resume-open state for session {session_id}: {path}"
+        )
     provider = _required_string(data, "provider", path)
     spec_session_id = _required_string(data, "session_id", path)
     if spec_session_id != session_id:
@@ -1523,8 +1826,13 @@ def load_resume_open_spec(session_id: str, plugin_home: Path | None = None) -> R
         _required_string_list(data.get("command"), "command", path),
         path,
     )
-    preflight = [_required_string_list(item, "preflight", path) for item in _list_value(data.get("preflight"))]
-    preflight = _validated_resume_open_preflight(provider, spec_session_id, preflight, path)
+    preflight = [
+        _required_string_list(item, "preflight", path)
+        for item in _list_value(data.get("preflight"))
+    ]
+    preflight = _validated_resume_open_preflight(
+        provider, spec_session_id, preflight, path
+    )
     env = _validated_resume_open_env(provider, data.get("env"), data, path)
     return ResumeOpenSpec(
         provider=provider,
@@ -1555,14 +1863,18 @@ def execute_resume_open(
         try:
             run(command, cwd=str(cwd), env=env, check=True)
         except (subprocess.CalledProcessError, FileNotFoundError) as exc:
-            raise RuntimeError(f"Resume preflight failed: {_shell_join(command)}") from exc
+            raise RuntimeError(
+                f"Resume preflight failed: {_shell_join(command)}"
+            ) from exc
     if not exec_provider:
         return 0
     try:
         os.chdir(cwd)
         (execvpe or os.execvpe)(spec.command[0], spec.command, env)
     except OSError as exc:
-        raise RuntimeError(f"Failed to open resumed session: {_shell_join(spec.command)}") from exc
+        raise RuntimeError(
+            f"Failed to open resumed session: {_shell_join(spec.command)}"
+        ) from exc
     return 0
 
 
@@ -1581,7 +1893,9 @@ def _resume_open_spec(
         return None
     preflight = _resume_open_preflight(policy, provider_session_path, new_session_id)
     command = _build_resume_command_from_policy(policy, new_session_id, target_env)
-    return ResumeOpenSpec(provider_name, new_session_id, cwd, dict(env), preflight, command)
+    return ResumeOpenSpec(
+        provider_name, new_session_id, cwd, dict(env), preflight, command
+    )
 
 
 def _resume_open_preflight(
@@ -1594,7 +1908,14 @@ def _resume_open_preflight(
     import_path = str(provider_session_path)
     return [
         ["opencode", "import", import_path],
-        [sys.executable, "-m", "checkpoint_plugin.cli", "opencode-restore-metadata", import_path, session_id],
+        [
+            sys.executable,
+            "-m",
+            "checkpoint_plugin.cli",
+            "opencode-restore-metadata",
+            import_path,
+            session_id,
+        ],
     ]
 
 
@@ -1620,7 +1941,11 @@ def _valid_resume_session_id(value: str) -> bool:
 
 
 def _required_string_list(value: object, key: str, path: Path) -> list[str]:
-    if not isinstance(value, list) or not value or not all(isinstance(item, str) and item for item in value):
+    if (
+        not isinstance(value, list)
+        or not value
+        or not all(isinstance(item, str) and item for item in value)
+    ):
         raise RuntimeError(f"Invalid resume-open state field {key!r}: {path}")
     return list(value)
 
@@ -1632,7 +1957,11 @@ def _list_value(value: object) -> list[object]:
 def _string_dict(value: object) -> dict[str, str]:
     if not isinstance(value, dict):
         return {}
-    return {key: str(item) for key, item in value.items() if isinstance(key, str) and _safe_env_name(key)}
+    return {
+        key: str(item)
+        for key, item in value.items()
+        if isinstance(key, str) and _safe_env_name(key)
+    }
 
 
 def _validated_resume_open_env(
@@ -1679,7 +2008,9 @@ def _validated_resume_open_command(
     path: Path,
 ) -> list[str]:
     _require_resume_session_id(session_id, "session_id", path)
-    _validate_resume_command_from_policy(_resume_policy(provider, path), session_id, command, path)
+    _validate_resume_command_from_policy(
+        _resume_policy(provider, path), session_id, command, path
+    )
     return command
 
 
@@ -1704,7 +2035,14 @@ def _validated_resume_open_preflight(
     import_path = import_command[2]
     if not _valid_opencode_import_path(import_path, session_id):
         raise RuntimeError(f"Invalid resume-open state field 'preflight': {path}")
-    expected_metadata = [sys.executable, "-m", "checkpoint_plugin.cli", "opencode-restore-metadata", import_path, session_id]
+    expected_metadata = [
+        sys.executable,
+        "-m",
+        "checkpoint_plugin.cli",
+        "opencode-restore-metadata",
+        import_path,
+        session_id,
+    ]
     if metadata_command != expected_metadata:
         raise RuntimeError(f"Invalid resume-open state field 'preflight': {path}")
     return preflight
@@ -1712,7 +2050,11 @@ def _validated_resume_open_preflight(
 
 def _valid_opencode_import_path(value: str, session_id: str) -> bool:
     path = Path(value).expanduser()
-    return path.is_absolute() and path.name == f"{session_id}.json" and path.parent.name == "imports"
+    return (
+        path.is_absolute()
+        and path.name == f"{session_id}.json"
+        and path.parent.name == "imports"
+    )
 
 
 def _session_env_from_environment(env: object) -> dict[str, str]:
@@ -1723,7 +2065,9 @@ def _session_env_from_environment(env: object) -> dict[str, str]:
         "effort": getattr(env, "effort", None),
         "agent_type": getattr(env, "agent_type", None),
     }
-    return {key: value for key, value in fields.items() if isinstance(value, str) and value}
+    return {
+        key: value for key, value in fields.items() if isinstance(value, str) and value
+    }
 
 
 def _resumed_manifest(
@@ -1739,7 +2083,11 @@ def _resumed_manifest(
     if trajectory_ref is not None and provider_session_path is not None:
         start_offset, end_offset, record_count = trajectory.spans.get(
             manifest.turn_id,
-            (manifest.trajectory_offset, manifest.trajectory_end_offset or trajectory_ref.end_offset, trajectory_ref.record_count),
+            (
+                manifest.trajectory_offset,
+                manifest.trajectory_end_offset or trajectory_ref.end_offset,
+                trajectory_ref.record_count,
+            ),
         )
         trajectory_ref = TrajectoryReference(
             provider=trajectory_ref.provider,
@@ -1757,7 +2105,12 @@ def _resumed_manifest(
             trajectory_end_offset=end_offset,
             trajectory_ref=trajectory_ref,
         )
-    return replace(manifest, session_id=new_session_id, fs_ref=fs_ref, trajectory_ref=trajectory_ref)
+    return replace(
+        manifest,
+        session_id=new_session_id,
+        fs_ref=fs_ref,
+        trajectory_ref=trajectory_ref,
+    )
 
 
 def _rewrite_fs_ref_for_cwd(fs_ref: str, store: CheckpointStore, cwd: Path) -> str:
@@ -1785,17 +2138,36 @@ def _write_provider_session(
         return None
     if provider_name == "codex":
         return _write_codex_session(
-            provider_home, cwd, new_session_id, trajectory, model, effort, permission_mode, mode,
-            source_meta, inherited_record_count,
+            provider_home,
+            cwd,
+            new_session_id,
+            trajectory,
+            model,
+            effort,
+            permission_mode,
+            mode,
+            source_meta,
+            inherited_record_count,
         )
     if provider_name == "claude":
         return _write_claude_session(
-            provider_home, cwd, new_session_id, trajectory, model, permission_mode, mode,
-            has_inherited_prefix, source_session_id, inherited_record_count,
+            provider_home,
+            cwd,
+            new_session_id,
+            trajectory,
+            model,
+            permission_mode,
+            mode,
+            has_inherited_prefix,
+            source_session_id,
+            inherited_record_count,
         )
     if provider_name == "opencode":
         return _write_opencode_session(
-            provider_home, cwd, new_session_id, trajectory,
+            provider_home,
+            cwd,
+            new_session_id,
+            trajectory,
         )
     return None
 
@@ -1824,7 +2196,9 @@ def _write_opencode_session(
         meta = record.get("metadata", {})
         hook_payload = meta.get("hook_payload", {}) if isinstance(meta, dict) else {}
         if not session_messages:
-            session_messages = _opencode_hook_list(hook_payload, "session_messages", "sessionMessages")
+            session_messages = _opencode_hook_list(
+                hook_payload, "session_messages", "sessionMessages"
+            )
         if not todos:
             todos = _opencode_hook_list(hook_payload, "todos")
         if all_raw_messages is None and hook_payload.get("raw_messages"):
@@ -1848,7 +2222,7 @@ def _write_opencode_session(
     # Use time-ordered IDs so lexicographic ID comparison matches chronological
     # order. OpenCode's continuation logic relies on `id > latest.id` comparisons.
     # Format: timestamp (48-bit from uuid7) + sequential counter for strict ordering.
-    base_timestamp = _uuid7().replace('-', '')[:12]  # First 48 bits of uuid7
+    base_timestamp = _uuid7().replace("-", "")[:12]  # First 48 bits of uuid7
     msg_id_map: dict[str, str] = {}
     export_messages = []
     for msg_idx, msg in enumerate(all_raw_messages):
@@ -1868,17 +2242,21 @@ def _write_opencode_session(
         for part_idx, part in enumerate(msg_parts):
             if isinstance(part, dict):
                 new_part_id = f"prt_{base_timestamp}{msg_idx:06x}{part_idx:06x}"
-                rewritten_parts.append({
-                    **part,
-                    "id": new_part_id,
-                    "messageID": new_msg_id,
-                    "sessionID": new_session_id,
-                })
+                rewritten_parts.append(
+                    {
+                        **part,
+                        "id": new_part_id,
+                        "messageID": new_msg_id,
+                        "sessionID": new_session_id,
+                    }
+                )
             else:
                 rewritten_parts.append(part)
         export_messages.append({"info": rewritten_info, "parts": rewritten_parts})
     export_data = {"info": export_info, "messages": export_messages}
-    rewritten_session_messages = _rewrite_opencode_session_messages(session_messages, new_session_id)
+    rewritten_session_messages = _rewrite_opencode_session_messages(
+        session_messages, new_session_id
+    )
     if rewritten_session_messages:
         export_data["session_messages"] = rewritten_session_messages
     rewritten_todos = _rewrite_opencode_todos(todos, new_session_id)
@@ -1902,7 +2280,9 @@ def _opencode_hook_list(hook_payload: object, *keys: str) -> list[dict]:
     return []
 
 
-def _rewrite_opencode_session_messages(messages: list[dict], new_session_id: str) -> list[dict]:
+def _rewrite_opencode_session_messages(
+    messages: list[dict], new_session_id: str
+) -> list[dict]:
     base_timestamp = _uuid7().replace("-", "")[:12]
     rewritten = []
     for idx, message in enumerate(messages):
@@ -1910,8 +2290,12 @@ def _rewrite_opencode_session_messages(messages: list[dict], new_session_id: str
         if not isinstance(msg_type, str) or not msg_type:
             continue
         time_info = message.get("time") if isinstance(message.get("time"), dict) else {}
-        created = _int_or_now(time_info.get("created") if isinstance(time_info, dict) else None)
-        updated = _int_or_default(time_info.get("updated") if isinstance(time_info, dict) else None, created)
+        created = _int_or_now(
+            time_info.get("created") if isinstance(time_info, dict) else None
+        )
+        updated = _int_or_default(
+            time_info.get("updated") if isinstance(time_info, dict) else None, created
+        )
         rewritten.append(
             {
                 **message,
@@ -1930,11 +2314,17 @@ def _rewrite_opencode_todos(todos: list[dict], new_session_id: str) -> list[dict
         content = todo.get("content")
         status = todo.get("status")
         priority = todo.get("priority")
-        if not all(isinstance(value, str) and value for value in (content, status, priority)):
+        if not all(
+            isinstance(value, str) and value for value in (content, status, priority)
+        ):
             continue
         time_info = todo.get("time") if isinstance(todo.get("time"), dict) else {}
-        created = _int_or_now(time_info.get("created") if isinstance(time_info, dict) else None)
-        updated = _int_or_default(time_info.get("updated") if isinstance(time_info, dict) else None, created)
+        created = _int_or_now(
+            time_info.get("created") if isinstance(time_info, dict) else None
+        )
+        updated = _int_or_default(
+            time_info.get("updated") if isinstance(time_info, dict) else None, created
+        )
         rewritten.append(
             {
                 **todo,
@@ -1956,12 +2346,16 @@ def _int_or_now(value: object) -> int:
 def _int_or_default(value: object, default: int) -> int:
     if isinstance(value, bool):
         return default
-    if isinstance(value, (int, float)):
+    if isinstance(value, int):
+        return int(value)
+    if isinstance(value, float) and math.isfinite(value):
         return int(value)
     return default
 
 
-def _opencode_export_info(info: dict, new_session_id: str, cwd: Path, now_ms: int) -> dict:
+def _opencode_export_info(
+    info: dict, new_session_id: str, cwd: Path, now_ms: int
+) -> dict:
     """Build an OpenCode Session.Info object for `opencode import`.
 
     Start from captured session_info so runtime session fields (permission,
@@ -1982,7 +2376,12 @@ def _opencode_export_info(info: dict, new_session_id: str, cwd: Path, now_ms: in
             "cost": base.get("cost", 0),
             "tokens": base.get(
                 "tokens",
-                {"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}},
+                {
+                    "input": 0,
+                    "output": 0,
+                    "reasoning": 0,
+                    "cache": {"read": 0, "write": 0},
+                },
             ),
             "time": {"created": source_time.get("created", now_ms), "updated": now_ms},
         }
@@ -2012,13 +2411,11 @@ def _rewrite_opencode_message_cwd(info: dict, cwd: Path) -> None:
         path_info["cwd"] = str(cwd)
 
 
-def _reconstruct_opencode_messages(
-    records: list[dict], session_id: str
-) -> list[dict]:
+def _reconstruct_opencode_messages(records: list[dict], session_id: str) -> list[dict]:
     """Build minimal OpenCode message structures from turn records (fallback)."""
     messages: list[dict] = []
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-    base_timestamp = _uuid7().replace('-', '')[:12]
+    base_timestamp = _uuid7().replace("-", "")[:12]
     last_user_id: str | None = None
     msg_counter = 0
     for i, record in enumerate(records):
@@ -2038,7 +2435,15 @@ def _reconstruct_opencode_messages(
                     "time": {"created": ts},
                     "agent": "build",
                 },
-                "parts": [{"id": f"prt_resume_{base_timestamp}{msg_counter:012x}", "messageID": user_id, "sessionID": session_id, "type": "text", "text": user_text}],
+                "parts": [
+                    {
+                        "id": f"prt_resume_{base_timestamp}{msg_counter:012x}",
+                        "messageID": user_id,
+                        "sessionID": session_id,
+                        "type": "text",
+                        "text": user_text,
+                    }
+                ],
             }
             messages.append(user_msg)
             last_user_id = user_id
@@ -2063,7 +2468,15 @@ def _reconstruct_opencode_messages(
                     "time": {"created": ts + 500, "completed": ts + 1000},
                     "finish": "stop",
                 },
-                "parts": [{"id": f"prt_resume_{base_timestamp}{msg_counter:012x}", "messageID": asst_id, "sessionID": session_id, "type": "text", "text": assistant_text}],
+                "parts": [
+                    {
+                        "id": f"prt_resume_{base_timestamp}{msg_counter:012x}",
+                        "messageID": asst_id,
+                        "sessionID": session_id,
+                        "type": "text",
+                        "text": assistant_text,
+                    }
+                ],
             }
             messages.append(asst_msg)
     return messages
@@ -2193,13 +2606,30 @@ def _write_codex_session(
     # and, near UTC-midnight, files the rollout in the wrong date directory (so it
     # sorts incorrectly in the picker). Build the path/filename from local time.
     now = datetime.now().astimezone()
-    session_dir_path = codex_home / "sessions" / now.strftime("%Y") / now.strftime("%m") / now.strftime("%d")
-    path = session_dir_path / f"rollout-{now.strftime('%Y-%m-%dT%H-%M-%S')}-{new_session_id}.jsonl"
+    session_dir_path = (
+        codex_home
+        / "sessions"
+        / now.strftime("%Y")
+        / now.strftime("%m")
+        / now.strftime("%d")
+    )
+    path = (
+        session_dir_path
+        / f"rollout-{now.strftime('%Y-%m-%dT%H-%M-%S')}-{new_session_id}.jsonl"
+    )
     _write_bytes_atomic(
         path,
         _rewrite_codex_trajectory(
-            trajectory, new_session_id, cwd, model, permission_mode, mode, source_meta,
-            inherited_record_count, is_resume=True, effort=effort,
+            trajectory,
+            new_session_id,
+            cwd,
+            model,
+            permission_mode,
+            mode,
+            source_meta,
+            inherited_record_count,
+            is_resume=True,
+            effort=effort,
         ),
     )
     return path
@@ -2217,11 +2647,21 @@ def _write_claude_session(
     source_session_id: str | None = None,
     inherited_record_count: int = 0,
 ) -> Path:
-    path = claude_home / "projects" / _claude_project_dir_name(cwd) / f"{new_session_id}.jsonl"
+    path = (
+        claude_home
+        / "projects"
+        / _claude_project_dir_name(cwd)
+        / f"{new_session_id}.jsonl"
+    )
     _write_bytes_atomic(
         path,
         _rewrite_claude_trajectory(
-            trajectory, new_session_id, cwd, model, permission_mode, mode,
+            trajectory,
+            new_session_id,
+            cwd,
+            model,
+            permission_mode,
+            mode,
             has_inherited_prefix=has_inherited_prefix,
             source_session_id=source_session_id,
             inherited_record_count=inherited_record_count,
@@ -2259,7 +2699,18 @@ def _rewrite_codex_trajectory(
     # a67e (record-ts=fork moment on all metas; payload-ts=each meta's creation).
     # RF2: is_resume=True suppresses forked_from_id in HEAD meta (native resume behavior).
     if records and records[0].get("type") == "session_meta":
-        lines.append(_json_line(_codex_head_meta(new_session_id, cwd, source_meta, original_session_id, now, is_resume)))
+        lines.append(
+            _json_line(
+                _codex_head_meta(
+                    new_session_id,
+                    cwd,
+                    source_meta,
+                    original_session_id,
+                    now,
+                    is_resume,
+                )
+            )
+        )
     else:
         # No source meta to inline: emit the single synthetic head (legacy shape).
         lines.append(_json_line(_codex_session_meta(new_session_id, cwd, source_meta)))
@@ -2282,7 +2733,9 @@ def _rewrite_codex_trajectory(
             _apply_preserved_meta_fields(payload, source_meta)
             _mark_codex_session_visible(payload)
             payload["cwd"] = str(cwd)
-            record["timestamp"] = record_now  # F9: record-ts = resume moment (TS1: bursted)
+            record["timestamp"] = (
+                record_now  # F9: record-ts = resume moment (TS1: bursted)
+            )
             # payload["timestamp"] (the meta's original creation time) is preserved.
             lines.append(_json_line(record))
             continue
@@ -2310,7 +2763,9 @@ def _rewrite_codex_trajectory(
                 # already holds the exact permission profile, so we preserve it
                 # verbatim and only re-pin a string profile if the original was
                 # itself a string (legacy/simple form).
-                if permission_mode and isinstance(payload.get("permission_profile"), str):
+                if permission_mode and isinstance(
+                    payload.get("permission_profile"), str
+                ):
                     payload["permission_profile"] = permission_mode
             # SA2: inject mode (collaboration_mode_kind) into task_started events
             if record.get("type") == "task_started" and mode:
@@ -2362,7 +2817,9 @@ def _codex_source_cwd(
     return None
 
 
-def _rewrite_codex_record_cwd(record: dict[str, object], source_cwd: str, target_cwd: str) -> None:
+def _rewrite_codex_record_cwd(
+    record: dict[str, object], source_cwd: str, target_cwd: str
+) -> None:
     """Replace the source cwd with the resume cwd in the LIVE-STATE fields of one
     codex record (F5), leaving historical content untouched (ER2).
 
@@ -2389,7 +2846,9 @@ def _rewrite_codex_record_cwd(record: dict[str, object], source_cwd: str, target
         # session_meta.cwd is re-pinned by the caller already; rewrite any residual
         # cwd embedded in the payload (defensive — keeps the meta self-consistent).
         if isinstance(payload, dict) and isinstance(payload.get("cwd"), str):
-            payload["cwd"] = _rewrite_cwd_in_string(payload["cwd"], source_cwd, target_cwd)
+            payload["cwd"] = _rewrite_cwd_in_string(
+                payload["cwd"], source_cwd, target_cwd
+            )
         return
     if record_type == "turn_context" and isinstance(payload, dict):
         # The whole turn_context payload is live state: cwd + structured
@@ -2416,7 +2875,11 @@ def _rewrite_cwd_in_value(value: object, source_cwd: str, target_cwd: str) -> ob
         # so key order is preserved while both keys and values are path-rewritten.
         rebuilt: dict[object, object] = {}
         for key, item in list(value.items()):
-            new_key = _rewrite_cwd_in_string(key, source_cwd, target_cwd) if isinstance(key, str) else key
+            new_key = (
+                _rewrite_cwd_in_string(key, source_cwd, target_cwd)
+                if isinstance(key, str)
+                else key
+            )
             rebuilt[new_key] = _rewrite_cwd_in_value(item, source_cwd, target_cwd)
         value.clear()
         value.update(rebuilt)
@@ -2445,7 +2908,7 @@ def _rewrite_cwd_in_string(text: str, source_cwd: str, target_cwd: str) -> str:
     if text == source_cwd:
         return target_cwd
     if text.startswith(source_cwd + "/"):
-        return target_cwd + text[len(source_cwd):]
+        return target_cwd + text[len(source_cwd) :]
     # Embedded in free text: rewrite occurrences at a path boundary.
     result: list[str] = []
     i = 0
@@ -2642,7 +3105,11 @@ def _drop_dangling_trailing_pointers(
         if isinstance(record.get("uuid"), str):
             break  # a real message record; stop trimming
         pointer = next(
-            (record[key] for key in _CLAUDE_POINTER_KEYS if isinstance(record.get(key), str)),
+            (
+                record[key]
+                for key in _CLAUDE_POINTER_KEYS
+                if isinstance(record.get(key), str)
+            ),
             None,
         )
         if pointer is None:
@@ -2700,11 +3167,16 @@ def _rewrite_claude_trajectory(
         # file-history-snapshot, ai-title, last-prompt) — NOT every keyless record:
         # `system` records carry uuids and are kept, and any other keyless content is
         # left intact rather than guessed away.
-        records = [r for r in records if r.get("type") not in _CLAUDE_STRIPPED_FORK_TYPES]
+        records = [
+            r for r in records if r.get("type") not in _CLAUDE_STRIPPED_FORK_TYPES
+        ]
     else:
         # Legacy path (no source id): keep the old synthetic-permission-mode behavior.
         records = _ensure_permission_mode_record(
-            records, permission_mode, new_session_id, has_inherited_prefix=has_inherited_prefix
+            records,
+            permission_mode,
+            new_session_id,
+            has_inherited_prefix=has_inherited_prefix,
         )
     # Build the old->new uuid map. For a fork-shaped resume the inherited records keep
     # their uuids byte-identical (identity map) so forkedFrom.messageUuid resolves into
@@ -2744,7 +3216,11 @@ def _rewrite_claude_trajectory(
             if "model" in record:
                 record["model"] = model
             message = record.get("message")
-            if record.get("type") == "assistant" and isinstance(message, dict) and "model" in message:
+            if (
+                record.get("type") == "assistant"
+                and isinstance(message, dict)
+                and "model" in message
+            ):
                 message["model"] = model
         if permission_mode and record.get("type") == "permission-mode":
             record["permissionMode"] = permission_mode
@@ -2776,24 +3252,37 @@ def _rewrite_claude_trajectory(
         # The legacy (non-fork, remap) path keeps following the remapped source DAG.
         if isinstance(record.get("parentUuid"), str):
             if is_fork_shaped:
-                record["parentUuid"] = last_uuid if last_uuid is not None else str(record["parentUuid"])
+                record["parentUuid"] = (
+                    last_uuid if last_uuid is not None else str(record["parentUuid"])
+                )
             else:
-                record["parentUuid"] = uuid_map.get(str(record["parentUuid"]), last_uuid)
-        elif "parentUuid" in record and record.get("type") not in {"summary", "permission-mode"}:
+                record["parentUuid"] = uuid_map.get(
+                    str(record["parentUuid"]), last_uuid
+                )
+        elif "parentUuid" in record and record.get("type") not in {
+            "summary",
+            "permission-mode",
+        }:
             record["parentUuid"] = last_uuid
         # Advance the spine pointer. Native chains through ALL content record types
         # (user/assistant/system/attachment), so re-pointing only across user/assistant
         # would mis-parent an interior system/attachment record (verified: native idx8
         # `system` parents the previous `system`, not the last assistant). Exclude only
         # the summary/permission-mode meta records, preserving the summary-skip rule.
-        if isinstance(record.get("uuid"), str) and record.get("type") not in {"summary", "permission-mode"}:
+        if isinstance(record.get("uuid"), str) and record.get("type") not in {
+            "summary",
+            "permission-mode",
+        }:
             last_uuid = str(record["uuid"])
         # F1: stamp forkedFrom on every inherited record, pointing messageUuid at the
         # record's OWN (preserved) uuid so it resolves INTO the parent session — the
         # native invariant. record["uuid"] is byte-identical to the source here.
         own_uuid = record.get("uuid")
         if is_fork_shaped and isinstance(own_uuid, str) and "forkedFrom" not in record:
-            record["forkedFrom"] = {"sessionId": source_session_id, "messageUuid": own_uuid}
+            record["forkedFrom"] = {
+                "sessionId": source_session_id,
+                "messageUuid": own_uuid,
+            }
         # RF1: A forkedFrom carried over from a prior generation (resume-of-fork or
         # resume-of-resume) must point sessionId at the IMMEDIATE parent, not the
         # grandparent. Native resume rewrites ALL forkedFrom.sessionId to the source.
@@ -2913,7 +3402,9 @@ def _json_line(record: dict[str, object]) -> bytes:
     # no spaces). Python's default `(', ', ': ')` injected a space after every comma
     # and colon — another 100%-vs-0% fingerprint (and it shifted every downstream
     # manifest byte offset vs a native file). Emit compact to match native bytes.
-    return (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+    return (
+        json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
+    ).encode("utf-8")
 
 
 def _write_bytes_atomic(path: Path, data: bytes) -> None:
@@ -2965,7 +3456,9 @@ def _bump_zulu_ms(zulu: str, millis: int) -> str:
     if millis <= 0:
         return zulu
     try:
-        base = datetime.strptime(zulu, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
+        base = datetime.strptime(zulu, "%Y-%m-%dT%H:%M:%S.%fZ").replace(
+            tzinfo=timezone.utc
+        )
     except ValueError:
         return zulu
     bumped = base + timedelta(milliseconds=millis)
@@ -3004,12 +3497,17 @@ def _resume_command(
     return None
 
 
-def _provider_runtime_args(policy: ProviderResumePolicy, target_env: object | None) -> list[str]:
+def _provider_runtime_args(
+    policy: ProviderResumePolicy, target_env: object | None
+) -> list[str]:
     args: list[str] = []
     for field_name, option in policy.runtime_arg_fields:
         value = _string_attr(target_env, field_name)
         if value:
-            args.extend([option, value])
+            if value.startswith("-"):
+                args.append(f"{option}={value}")
+            else:
+                args.extend([option, value])
     for field_name, option, config_key in policy.runtime_json_config_arg_fields:
         value = _string_attr(target_env, field_name)
         if value:
@@ -3051,7 +3549,9 @@ def restore_opencode_metadata(import_path: Path, session_id: str) -> tuple[int, 
 
         conn = sqlite3.connect(str(db_path))
         try:
-            session_message_count = _restore_opencode_session_messages(conn, session_id, session_messages)
+            session_message_count = _restore_opencode_session_messages(
+                conn, session_id, session_messages
+            )
             todo_count = _restore_opencode_todos(conn, session_id, todos)
             conn.commit()
             return (session_message_count, todo_count)
@@ -3069,25 +3569,43 @@ def _opencode_db_path() -> Path:
     return data_home.expanduser() / "opencode" / "opencode.db"
 
 
-def _restore_opencode_session_messages(conn: object, session_id: str, messages: list[dict]) -> int:
+def _restore_opencode_session_messages(
+    conn: object, session_id: str, messages: list[dict]
+) -> int:
     if not messages or not _sqlite_table_exists(conn, "session_message"):
         return 0
     count = 0
     for message in messages:
         msg_id = message.get("id")
         msg_type = message.get("type")
-        if not isinstance(msg_id, str) or not msg_id or not isinstance(msg_type, str) or not msg_type:
+        if (
+            not isinstance(msg_id, str)
+            or not msg_id
+            or not isinstance(msg_type, str)
+            or not msg_type
+        ):
             continue
         time_info = message.get("time") if isinstance(message.get("time"), dict) else {}
-        created = _int_or_now(time_info.get("created") if isinstance(time_info, dict) else None)
-        updated = _int_or_default(time_info.get("updated") if isinstance(time_info, dict) else None, created)
+        created = _int_or_now(
+            time_info.get("created") if isinstance(time_info, dict) else None
+        )
+        updated = _int_or_default(
+            time_info.get("updated") if isinstance(time_info, dict) else None, created
+        )
         conn.execute(
             "INSERT INTO session_message (id, session_id, type, time_created, time_updated, data) "
             "VALUES (?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(id) DO UPDATE SET "
             "session_id = excluded.session_id, type = excluded.type, "
             "time_created = excluded.time_created, time_updated = excluded.time_updated, data = excluded.data",
-            (msg_id, session_id, msg_type, created, updated, _opencode_json_text(message.get("data", {}))),
+            (
+                msg_id,
+                session_id,
+                msg_type,
+                created,
+                updated,
+                _opencode_json_text(message.get("data", {})),
+            ),
         )
         count += 1
     return count
@@ -3101,11 +3619,17 @@ def _restore_opencode_todos(conn: object, session_id: str, todos: list[dict]) ->
         content = todo.get("content")
         status = todo.get("status")
         priority = todo.get("priority")
-        if not all(isinstance(value, str) and value for value in (content, status, priority)):
+        if not all(
+            isinstance(value, str) and value for value in (content, status, priority)
+        ):
             continue
         time_info = todo.get("time") if isinstance(todo.get("time"), dict) else {}
-        created = _int_or_now(time_info.get("created") if isinstance(time_info, dict) else None)
-        updated = _int_or_default(time_info.get("updated") if isinstance(time_info, dict) else None, created)
+        created = _int_or_now(
+            time_info.get("created") if isinstance(time_info, dict) else None
+        )
+        updated = _int_or_default(
+            time_info.get("updated") if isinstance(time_info, dict) else None, created
+        )
         position = _int_or_default(todo.get("position"), idx)
         conn.execute(
             "INSERT INTO todo (session_id, content, status, priority, position, time_created, time_updated) "
@@ -3157,7 +3681,9 @@ def _opencode_runtime_env(target_env: object | None) -> dict[str, str]:
     return result
 
 
-def _opencode_config_content(target_env: object | None, *, keep_redacted: bool = False) -> str:
+def _opencode_config_content(
+    target_env: object | None, *, keep_redacted: bool = False
+) -> str:
     base = _opencode_config_content_base(target_env, keep_redacted=keep_redacted)
     mcp = _opencode_mcp_overlay(target_env)
     if not base and not mcp:
@@ -3172,7 +3698,9 @@ _REDACTED_CONFIG_VALUE = object()
 _MISSING_CONFIG_VALUE = object()
 
 
-def _opencode_config_content_base(target_env: object | None, *, keep_redacted: bool = False) -> object:
+def _opencode_config_content_base(
+    target_env: object | None, *, keep_redacted: bool = False
+) -> object:
     extra = getattr(target_env, "extra", None)
     if not isinstance(extra, dict):
         return {}
@@ -3197,7 +3725,11 @@ def _without_redacted_values(value: object) -> object:
                 result[str(key)] = cleaned
         return result
     if isinstance(value, list):
-        return [item for item in (_without_redacted_values(item) for item in value) if item is not _REDACTED_CONFIG_VALUE]
+        return [
+            item
+            for item in (_without_redacted_values(item) for item in value)
+            if item is not _REDACTED_CONFIG_VALUE
+        ]
     return value
 
 
@@ -3216,14 +3748,18 @@ def _preserve_redacted_config_values(current: object, wanted: object) -> object:
     if isinstance(wanted, dict):
         current_dict = current if isinstance(current, dict) else {}
         return {
-            str(key): _preserve_redacted_config_values(current_dict.get(str(key), _MISSING_CONFIG_VALUE), value)
+            str(key): _preserve_redacted_config_values(
+                current_dict.get(str(key), _MISSING_CONFIG_VALUE), value
+            )
             for key, value in wanted.items()
         }
     if isinstance(wanted, list):
         current_list = current if isinstance(current, list) else []
         return [
             _preserve_redacted_config_values(
-                current_list[index] if index < len(current_list) else _MISSING_CONFIG_VALUE,
+                current_list[index]
+                if index < len(current_list)
+                else _MISSING_CONFIG_VALUE,
                 value,
             )
             for index, value in enumerate(wanted)
@@ -3250,7 +3786,9 @@ def _json_object(value: object) -> dict[str, object]:
     return value if isinstance(value, dict) else {}
 
 
-def _deep_merge_dicts(base: dict[str, object], overlay: dict[str, object]) -> dict[str, object]:
+def _deep_merge_dicts(
+    base: dict[str, object], overlay: dict[str, object]
+) -> dict[str, object]:
     result = dict(base)
     for key, value in overlay.items():
         existing = result.get(key)
@@ -3287,8 +3825,16 @@ def _carry_provider_session_state(
         provider_home / "file-history" / old_session_id,
         target_home / "file-history" / new_session_id,
     )
-    _hardlink_todos_to(provider_home / "todos", target_home / "todos", old_session_id, new_session_id)
-    _carry_claude_subagents(provider_home, old_session_id, new_session_id, cwd, dest_provider_home=target_home)
+    _hardlink_todos_to(
+        provider_home / "todos", target_home / "todos", old_session_id, new_session_id
+    )
+    _carry_claude_subagents(
+        provider_home,
+        old_session_id,
+        new_session_id,
+        cwd,
+        dest_provider_home=target_home,
+    )
 
 
 def _carry_claude_subagents(
@@ -3322,7 +3868,9 @@ def _carry_claude_subagents(
             continue
         src = project_dir / old_session_id / "subagents"
         if src.exists() and src.is_dir():
-            _carry_subagent_tree(src, dst_project_dir / new_session_id / "subagents", new_session_id, cwd)
+            _carry_subagent_tree(
+                src, dst_project_dir / new_session_id / "subagents", new_session_id, cwd
+            )
 
 
 def _carry_subagent_tree(src: Path, dst: Path, new_session_id: str, cwd: Path) -> None:
@@ -3361,7 +3909,9 @@ def _carry_subagent_tree(src: Path, dst: Path, new_session_id: str, cwd: Path) -
                     record["sessionId"] = new_session_id
                 if "cwd" in record:
                     record["cwd"] = str(cwd)
-            _write_bytes_atomic(target, b"".join(_json_line(record) for record in records))
+            _write_bytes_atomic(
+                target, b"".join(_json_line(record) for record in records)
+            )
             continue
         try:
             os.link(entry, target)
@@ -3390,7 +3940,9 @@ def _hardlink_tree(src: Path, dst: Path) -> None:
             shutil.copy2(entry, target)
 
 
-def _hardlink_todos_to(src_todos_dir: Path, dst_todos_dir: Path, old_session_id: str, new_session_id: str) -> None:
+def _hardlink_todos_to(
+    src_todos_dir: Path, dst_todos_dir: Path, old_session_id: str, new_session_id: str
+) -> None:
     if not src_todos_dir.exists() or not src_todos_dir.is_dir():
         return
     dst_todos_dir.mkdir(parents=True, exist_ok=True)

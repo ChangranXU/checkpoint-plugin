@@ -134,7 +134,9 @@ class CheckpointManifest:
             fs_ref=str(data["fs_ref"]),
             trajectory_offset=int(data.get("trajectory_offset", 0)),
             trajectory_end_offset=(
-                int(data["trajectory_end_offset"]) if data.get("trajectory_end_offset") is not None else None
+                int(data["trajectory_end_offset"])
+                if data.get("trajectory_end_offset") is not None
+                else None
             ),
             trajectory_ref=(
                 TrajectoryReference.from_json(trajectory_ref)

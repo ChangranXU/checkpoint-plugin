@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from bisect import bisect_left
 import json
 import os
 import sys
@@ -11,12 +12,22 @@ from pathlib import Path
 from typing import Any
 
 from ._utils import read_metadata_json
-from .coordinator import CheckpointCoordinator, TurnRecord, reanchor_last_turn_to_eof, resolve_session_title
+from .coordinator import (
+    CheckpointCoordinator,
+    TurnRecord,
+    reanchor_last_turn_to_eof,
+    resolve_session_title,
+)
 from .env.collector import environment_from_blob
 from .fs.snapshot import filesystem_from_blob
 from .integrations.hook_installer import install_hooks, uninstall_hooks
 from .paths import config_path, load_config, sessions_dir, write_config
-from .resume import ResumeOptions, ResumeOrchestrator, execute_resume_open, restore_opencode_metadata
+from .resume import (
+    ResumeOptions,
+    ResumeOrchestrator,
+    execute_resume_open,
+    restore_opencode_metadata,
+)
 from .retention import clean_empty_sessions, clean_keep_last, compact_legacy_blobs
 from .store import CheckpointStore
 from .types import ResumePlan
@@ -41,7 +52,6 @@ def _colorize(text: str, style: str, *, stream: Any = sys.stdout) -> str:
     return f"{prefix}{text}\033[0m" if prefix else text
 
 
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="checkpoint")
     sub = parser.add_subparsers(dest="command")
@@ -52,12 +62,20 @@ def main(argv: list[str] | None = None) -> int:
 
     list_cmd = sub.add_parser("list", help="List sessions or turns")
     list_cmd.add_argument("--session")
-    list_cmd.add_argument("--all", action="store_true", help="Show all sessions including empty ones")
+    list_cmd.add_argument(
+        "--all", action="store_true", help="Show all sessions including empty ones"
+    )
 
     show = sub.add_parser("show", help="Show a checkpoint or session metadata")
     show.add_argument("session")
-    show.add_argument("turn", type=int, nargs="?", help="Turn number (omit to show session overview)")
-    show.add_argument("--metadata-only", action="store_true", help="Show only session metadata, no turn details")
+    show.add_argument(
+        "turn", type=int, nargs="?", help="Turn number (omit to show session overview)"
+    )
+    show.add_argument(
+        "--metadata-only",
+        action="store_true",
+        help="Show only session metadata, no turn details",
+    )
 
     diff = sub.add_parser("diff", help="Diff current state against a checkpoint")
     diff.add_argument("session")
@@ -73,21 +91,37 @@ def main(argv: list[str] | None = None) -> int:
     resume_open.add_argument("session")
 
     clean = sub.add_parser("clean", help="Apply retention or remove empty sessions")
-    clean.add_argument("--keep-last", type=int, help="Keep only last N turns per session")
-    clean.add_argument("--empty", action="store_true", help="Remove sessions with no captured turns")
-    clean.add_argument("--blobs", action="store_true", help="Compact legacy per-session blobs into global storage")
-    clean.add_argument("--dry-run", action="store_true", help="Show what would be removed without removing")
+    clean.add_argument(
+        "--keep-last", type=int, help="Keep only last N turns per session"
+    )
+    clean.add_argument(
+        "--empty", action="store_true", help="Remove sessions with no captured turns"
+    )
+    clean.add_argument(
+        "--blobs",
+        action="store_true",
+        help="Compact legacy per-session blobs into global storage",
+    )
+    clean.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be removed without removing",
+    )
 
     hooks = sub.add_parser("hooks", help="Install or uninstall agent lifecycle hooks")
     hooks.add_argument("action", choices=["install", "uninstall"])
-    hooks.add_argument("provider", nargs="?", default="all", help="claude, codex, opencode, or all")
+    hooks.add_argument(
+        "provider", nargs="?", default="all", help="claude, codex, opencode, or all"
+    )
 
     config = sub.add_parser("config", help="Read/write plugin config")
     config.add_argument("action", choices=["get", "set"])
     config.add_argument("key")
     config.add_argument("value", nargs="?")
 
-    opencode_restore = sub.add_parser("opencode-restore-metadata", help=argparse.SUPPRESS)
+    opencode_restore = sub.add_parser(
+        "opencode-restore-metadata", help=argparse.SUPPRESS
+    )
     opencode_restore.add_argument("file")
     opencode_restore.add_argument("session")
 
@@ -101,13 +135,17 @@ def _dispatch(args: argparse.Namespace) -> int:
     if args.command == "save":
         coordinator = CheckpointCoordinator(session_id=args.session)
         coordinator.on_session_start()
-        manifest = coordinator.on_turn_end(TurnRecord(user_message=args.note, metadata={"source": "cli"}))
+        manifest = coordinator.on_turn_end(
+            TurnRecord(user_message=args.note, metadata={"source": "cli"})
+        )
         print(f"Saved checkpoint {manifest.session_id} turn {manifest.turn_id}")
         return 0
     if args.command == "list":
         return _cmd_list(args.session, show_all=getattr(args, "all", False))
     if args.command == "show":
-        return _cmd_show(args.session, args.turn, metadata_only=getattr(args, "metadata_only", False))
+        return _cmd_show(
+            args.session, args.turn, metadata_only=getattr(args, "metadata_only", False)
+        )
     if args.command == "diff":
         # F13: a terminal/forked session never restarts under its own id, so its
         # last stored turn may trail EOF. Reanchor on read so the diff reflects the
@@ -127,7 +165,9 @@ def _dispatch(args: argparse.Namespace) -> int:
         # F2: warn when resuming a turn that an edit-send superseded — the target
         # reconstructs the pre-edit world, which is valid but easy to pick by
         # mistake. Surfaced as a note; the resume still proceeds.
-        replaced_by = _edit_send_replaced_turns(store, store.list_manifests()).get(args.turn)
+        replaced_by = _edit_send_replaced_turns(store, store.list_manifests()).get(
+            args.turn
+        )
         if replaced_by is not None:
             print(
                 _colorize(
@@ -138,7 +178,11 @@ def _dispatch(args: argparse.Namespace) -> int:
             )
         try:
             plan = orchestrator.plan(args.session, args.turn)
-            confirm = _auto_confirm if args.yes else lambda text: _interactive_resume_confirm(text, plan, store)
+            confirm = (
+                _auto_confirm
+                if args.yes
+                else lambda text: _interactive_resume_confirm(text, plan, store)
+            )
             report = orchestrator.execute(plan, confirm)
         except RuntimeError as exc:
             print(str(exc), file=sys.stderr)
@@ -193,16 +237,22 @@ def _dispatch(args: argparse.Namespace) -> int:
             print(f"Removed {removed} old manifest(s)")
             return 0
         else:
-            print("Error: must specify --empty, --keep-last, or --blobs", file=sys.stderr)
+            print(
+                "Error: must specify --empty, --keep-last, or --blobs", file=sys.stderr
+            )
             return 1
     if args.command == "hooks":
         return _cmd_hooks(args.action, args.provider)
     if args.command == "config":
         return _cmd_config(args.action, args.key, args.value)
     if args.command == "opencode-restore-metadata":
-        session_messages, todos = restore_opencode_metadata(Path(args.file), args.session)
+        session_messages, todos = restore_opencode_metadata(
+            Path(args.file), args.session
+        )
         if session_messages or todos:
-            print(f"Restored OpenCode metadata: {session_messages} session event(s), {todos} todo item(s)")
+            print(
+                f"Restored OpenCode metadata: {session_messages} session event(s), {todos} todo item(s)"
+            )
         return 0
     raise AssertionError(args.command)
 
@@ -231,7 +281,13 @@ def _dispatch_browser_action(action: BrowserAction) -> int:
         return 0
     if action.command == "resume":
         return _dispatch(
-            argparse.Namespace(command="resume", session=action.session_id, turn=action.turn_id, yes=False, target=None)
+            argparse.Namespace(
+                command="resume",
+                session=action.session_id,
+                turn=action.turn_id,
+                yes=False,
+                target=None,
+            )
         )
     return 0
 
@@ -294,12 +350,13 @@ def _cmd_list(session: str | None, show_all: bool = False) -> int:
     # a co-located reader sees immediately), so the settle timeout is not relied upon.
     reanchor_last_turn_to_eof(store)
     manifests = store.list_manifests()
-    replaced = _edit_send_replaced_turns(store, manifests)
-    carries_pre_fork = _turns_carrying_pre_fork_rollback(manifests, replaced)
+    replaced, carries_pre_fork = _rollback_relationships(manifests)
     for manifest in manifests:
         preview = manifest.user_message_preview.replace("\n", " ")
         if manifest.turn_id in replaced:
-            marker = _colorize("  [replaced by turn {}]".format(replaced[manifest.turn_id]), "yellow")
+            marker = _colorize(
+                "  [replaced by turn {}]".format(replaced[manifest.turn_id]), "yellow"
+            )
         elif manifest.turn_id in carries_pre_fork:
             # ES3: this turn's slice carries a thread_rolled_back whose victim turns
             # live in the uncaptured inherited prefix (a forked resume), so they have
@@ -311,7 +368,9 @@ def _cmd_list(session: str | None, show_all: bool = False) -> int:
     return 0
 
 
-def _edit_send_replaced_turns(store: CheckpointStore, manifests: list[Any]) -> dict[int, int]:
+def _edit_send_replaced_turns(
+    store: CheckpointStore, manifests: list[Any]
+) -> dict[int, int]:
     """Map each edit-send-replaced turn_id to the turn_id that replaced it (F2).
 
     When a user edits an already-sent message and resends ("edit-send"), codex
@@ -325,45 +384,57 @@ def _edit_send_replaced_turns(store: CheckpointStore, manifests: list[Any]) -> d
     Returns {replaced_turn_id: replacing_turn_id}. Empty when no rollback is found
     (the common case) or for non-codex sessions (claude edit-send has no marker).
     """
-    replaced: dict[int, int] = {}
-    by_turn = {m.turn_id: m for m in manifests}
-    for manifest in manifests:
-        num_turns = _rolled_back_count(manifest)
-        if num_turns <= 0:
-            continue
-        # The K turns with ids strictly below this one, nearest first, are dead.
-        dead = sorted((tid for tid in by_turn if tid < manifest.turn_id), reverse=True)[:num_turns]
-        for tid in dead:
-            replaced[tid] = manifest.turn_id
+    replaced, _carriers = _rollback_relationships(manifests)
     return replaced
 
 
-def _turns_carrying_pre_fork_rollback(
-    manifests: list[Any], replaced: dict[int, int]
-) -> set[int]:
-    """Turns whose `thread_rolled_back` rolled back MORE turns than are captured (ES3).
+def _turns_carrying_pre_fork_rollback(manifests: list[Any]) -> set[int]:
+    """Turns whose `thread_rolled_back` rolled back more turns than are live (ES3).
 
     On a forked resume, codex replays a `thread_rolled_back num_turns=K` at the head of
     a captured turn whose K victims were edit-sent away BEFORE the fork — so they live
     in the uncaptured inherited prefix, not in any manifest row. `_edit_send_replaced_turns`
-    can only mark victims that exist as captured turns (ids below the marker turn); when
-    K exceeds that count, the surplus victims are invisible. We flag the carrier turn so
-    `list` can note the inherited relationship rather than silently dropping it.
+    can only mark victims that exist as still-live captured turns (ids below the marker
+    turn); when K exceeds that count, the surplus victims are invisible. We flag the
+    carrier turn so `list` can note the inherited relationship rather than silently
+    dropping it.
 
     Returns the set of carrier turn_ids whose rollback reaches into the inherited prefix.
     Empty for the common case (a fully-captured in-session edit-send, already covered by
-    `replaced`).
+    `_edit_send_replaced_turns`).
     """
+    return _rollback_relationships(manifests)[1]
+
+
+def _rollback_relationships(manifests: list[Any]) -> tuple[dict[int, int], set[int]]:
+    replaced: dict[int, int] = {}
+    victims_by_turn, carriers = _live_rollback_victims(manifests)
+    for replacing_turn_id, victims in victims_by_turn.items():
+        for tid in victims:
+            replaced[tid] = replacing_turn_id
+    return replaced, carriers
+
+
+def _live_rollback_victims(
+    manifests: list[Any],
+) -> tuple[dict[int, list[int]], set[int]]:
+    victims_by_turn: dict[int, list[int]] = {}
     carriers: set[int] = set()
-    ids = sorted(m.turn_id for m in manifests)
-    for manifest in manifests:
+    ordered_manifests = sorted(manifests, key=lambda item: item.turn_id)
+    live_turn_ids_sorted = [manifest.turn_id for manifest in ordered_manifests]
+    for manifest in ordered_manifests:
         num_turns = _rolled_back_count(manifest)
         if num_turns <= 0:
             continue
-        captured_below = sum(1 for tid in ids if tid < manifest.turn_id)
-        if num_turns > captured_below:
+        live_below_count = bisect_left(live_turn_ids_sorted, manifest.turn_id)
+        victim_start = max(0, live_below_count - num_turns)
+        victims = live_turn_ids_sorted[victim_start:live_below_count][::-1]
+        if num_turns > live_below_count:
             carriers.add(manifest.turn_id)
-    return carriers
+        if victims:
+            victims_by_turn[manifest.turn_id] = victims
+            del live_turn_ids_sorted[victim_start:live_below_count]
+    return victims_by_turn, carriers
 
 
 def _rolled_back_count(manifest: Any) -> int:
@@ -435,13 +506,15 @@ def _cmd_show(session: str, turn: int | None, metadata_only: bool = False) -> in
     if not manifests:
         print("  (no turns captured)")
     else:
-        replaced = _edit_send_replaced_turns(store, manifests)
-        carries_pre_fork = _turns_carrying_pre_fork_rollback(manifests, replaced)
+        replaced, carries_pre_fork = _rollback_relationships(manifests)
         for manifest in manifests:
             preview = manifest.user_message_preview.replace("\n", " ")[:80]
             marker = ""
             if manifest.turn_id in replaced:
-                marker = _colorize(" [replaced by turn {}]".format(replaced[manifest.turn_id]), "yellow")
+                marker = _colorize(
+                    " [replaced by turn {}]".format(replaced[manifest.turn_id]),
+                    "yellow",
+                )
             elif manifest.turn_id in carries_pre_fork:
                 marker = _colorize(" [carries pre-fork rolled-back turn(s)]", "yellow")
             print(f"  {manifest.turn_id:04d}  {manifest.created_ts}  {preview}{marker}")
@@ -495,7 +568,11 @@ def _cmd_config(action: str, key: str, value: str | None) -> int:
 
 def _cmd_hooks(action: str, provider: str) -> int:
     try:
-        results = install_hooks(provider) if action == "install" else uninstall_hooks(provider)
+        results = (
+            install_hooks(provider)
+            if action == "install"
+            else uninstall_hooks(provider)
+        )
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -505,7 +582,9 @@ def _cmd_hooks(action: str, provider: str) -> int:
     return 0
 
 
-def _interactive_resume_confirm(text: str, plan: ResumePlan, store: CheckpointStore) -> bool | ResumeOptions:
+def _interactive_resume_confirm(
+    text: str, plan: ResumePlan, store: CheckpointStore
+) -> bool | ResumeOptions:
     print(text)
     while True:
         answer = input("Proceed? [y/N/d] ")
@@ -522,7 +601,9 @@ def _interactive_resume_options(plan: ResumePlan) -> ResumeOptions:
     if answer.lower() not in {"c", "copy"}:
         return ResumeOptions(proceed=True)
     default_path = _default_copy_path(Path(plan.target_fs.cwd), plan.turn_id)
-    raw_path = input(f"Copy folder (Enter for default, or type an absolute path) [{default_path}]: ").strip()
+    raw_path = input(
+        f"Copy folder (Enter for default, or type an absolute path) [{default_path}]: "
+    ).strip()
     if not raw_path:
         return ResumeOptions(proceed=True, target_cwd=default_path)
     target_cwd = Path(raw_path).expanduser()

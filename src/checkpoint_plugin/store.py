@@ -122,7 +122,9 @@ class CheckpointStore:
     def write_manifest(self, manifest: CheckpointManifest) -> None:
         content = canonical_json(manifest.to_json()) + "\n"
         self._atomic_write(self._manifest_path(manifest.turn_id), content)
-        index = {str(m.turn_id): f"turn_{m.turn_id:04d}.json" for m in self.list_manifests()}
+        index = {
+            str(m.turn_id): f"turn_{m.turn_id:04d}.json" for m in self.list_manifests()
+        }
         index[str(manifest.turn_id)] = f"turn_{manifest.turn_id:04d}.json"
         ordered = dict(sorted(index.items(), key=lambda item: int(item[0])))
         self._atomic_write(
@@ -144,7 +146,11 @@ class CheckpointStore:
         for turn_text, rel_path in raw.items():
             path = self.manifest_dir / rel_path
             if path.exists():
-                manifests.append(CheckpointManifest.from_json(json.loads(path.read_text(encoding="utf-8"))))
+                manifests.append(
+                    CheckpointManifest.from_json(
+                        json.loads(path.read_text(encoding="utf-8"))
+                    )
+                )
             else:
                 manifests.append(self.read_manifest(int(turn_text)))
         return sorted(manifests, key=lambda item: item.turn_id)
@@ -159,7 +165,9 @@ class CheckpointStore:
     def append_trajectory(self, record: dict[str, Any]) -> tuple[int, int]:
         """Deprecated compatibility path for pre-reference checkpoints."""
         self.trajectory_path.parent.mkdir(parents=True, exist_ok=True)
-        start_offset = self.trajectory_path.stat().st_size if self.trajectory_path.exists() else 0
+        start_offset = (
+            self.trajectory_path.stat().st_size if self.trajectory_path.exists() else 0
+        )
         line = canonical_json(record) + "\n"
         encoded = line.encode("utf-8")
         with self.trajectory_path.open("ab") as handle:
@@ -337,7 +345,9 @@ def _env_groups(manifests: list[CheckpointManifest]) -> list[list[CheckpointMani
     return groups
 
 
-def _env_snapshot_json(group: list[CheckpointManifest], store: CheckpointStore) -> dict[str, Any]:
+def _env_snapshot_json(
+    group: list[CheckpointManifest], store: CheckpointStore
+) -> dict[str, Any]:
     first = group[0]
     turns = [
         {
@@ -361,5 +371,8 @@ def _load_env_snapshot(env_ref: str, store: CheckpointStore) -> Any:
     try:
         return store.load_json_blob(env_ref)
     except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError) as exc:
-        print(f"Warning: environment snapshot unavailable for {env_ref}: {exc}", file=sys.stderr)
+        print(
+            f"Warning: environment snapshot unavailable for {env_ref}: {exc}",
+            file=sys.stderr,
+        )
         return {"unavailable": True, "error": str(exc)}

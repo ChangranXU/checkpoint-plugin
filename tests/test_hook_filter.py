@@ -12,7 +12,9 @@ def _bytes(payload: dict) -> bytes:
     return (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
-def _plugin_hook(event_module: str = "claude_code_hook", name: str = "session_start") -> dict:
+def _plugin_hook(
+    event_module: str = "claude_code_hook", name: str = "session_start"
+) -> dict:
     return {
         "type": "command",
         "command": f"/usr/bin/python3 -m checkpoint_plugin.integrations.{event_module} {name}",
@@ -109,21 +111,17 @@ def test_strip_plugin_hooks_passthrough_when_no_hooks_key():
 
 def test_merge_plugin_hooks_injects_current_plugin_entries():
     current = _bytes(
-        {
-            "hooks": {
-                "Stop": [{"hooks": [_plugin_hook("claude_code_hook", "turn_end")]}]
-            }
-        }
+        {"hooks": {"Stop": [{"hooks": [_plugin_hook("claude_code_hook", "turn_end")]}]}}
     )
-    target = _bytes({"hooks": {"Stop": [{"hooks": [_user_hook("./run.sh")]}]}, "model": "old"})
+    target = _bytes(
+        {"hooks": {"Stop": [{"hooks": [_user_hook("./run.sh")]}]}, "model": "old"}
+    )
 
     merged = merge_plugin_hooks(current, target)
     parsed = json.loads(merged)
     assert parsed["model"] == "old"
     commands = sorted(
-        hook["command"]
-        for entry in parsed["hooks"]["Stop"]
-        for hook in entry["hooks"]
+        hook["command"] for entry in parsed["hooks"]["Stop"] for hook in entry["hooks"]
     )
     assert any("checkpoint_plugin.integrations" in c for c in commands)
     assert "./run.sh" in commands

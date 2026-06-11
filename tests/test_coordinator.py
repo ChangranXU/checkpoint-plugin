@@ -15,7 +15,9 @@ def test_full_turn_cycle(tmp_path, monkeypatch):
 
     coordinator = CheckpointCoordinator(session_id="s1", cwd=cwd)
     coordinator.on_session_start()
-    manifest = coordinator.on_turn_end(TurnRecord(user_message="hello", assistant_text="hi"))
+    manifest = coordinator.on_turn_end(
+        TurnRecord(user_message="hello", assistant_text="hi")
+    )
 
     assert manifest.turn_id == 0
     assert manifest.trajectory_ref is not None
@@ -86,7 +88,9 @@ def test_claude_session_title_is_read_from_transcript_slug(tmp_path, monkeypatch
     )
 
     metadata = json.loads((home / "sessions" / "s1" / "metadata.json").read_text())
-    assert metadata["session_title"] == "complete-environment-configuration-documentation"
+    assert (
+        metadata["session_title"] == "complete-environment-configuration-documentation"
+    )
 
 
 def test_claude_session_title_prefers_ai_title_over_slug(tmp_path, monkeypatch):
@@ -156,9 +160,7 @@ def test_opencode_session_title_is_read_from_sqlite(tmp_path, monkeypatch):
     data_dir.mkdir(parents=True)
     db_path = data_dir / "opencode.db"
     conn = sqlite3.connect(str(db_path))
-    conn.execute(
-        "CREATE TABLE project (id TEXT PRIMARY KEY)"
-    )
+    conn.execute("CREATE TABLE project (id TEXT PRIMARY KEY)")
     conn.execute("INSERT INTO project VALUES ('proj1')")
     conn.execute(
         "CREATE TABLE session ("
@@ -177,11 +179,45 @@ def test_opencode_session_title_is_read_from_sqlite(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENCODE_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("CHECKPOINT_PROVIDER", "opencode")
 
-    coordinator = CheckpointCoordinator(session_id="ses_abc123", cwd=cwd, plugin_home=home)
+    coordinator = CheckpointCoordinator(
+        session_id="ses_abc123", cwd=cwd, plugin_home=home
+    )
     coordinator.on_session_start()
 
-    metadata = json.loads((home / "sessions" / "ses_abc123" / "metadata.json").read_text())
+    metadata = json.loads(
+        (home / "sessions" / "ses_abc123" / "metadata.json").read_text()
+    )
     assert metadata["session_title"] == "Greeting"
+
+
+def test_opencode_session_title_expands_data_dir_tilde(tmp_path, monkeypatch):
+    import sqlite3
+    from checkpoint_plugin.coordinator import resolve_session_title
+
+    home = tmp_path / "home"
+    data_dir = home / "my_data" / "opencode"
+    data_dir.mkdir(parents=True)
+    db_path = data_dir / "opencode.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE project (id TEXT PRIMARY KEY)")
+    conn.execute("INSERT INTO project VALUES ('proj1')")
+    conn.execute(
+        "CREATE TABLE session ("
+        "id TEXT PRIMARY KEY, project_id TEXT NOT NULL, slug TEXT NOT NULL, "
+        "directory TEXT NOT NULL, title TEXT NOT NULL, version TEXT NOT NULL, "
+        "time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, "
+        "FOREIGN KEY (project_id) REFERENCES project(id))"
+    )
+    conn.execute(
+        "INSERT INTO session VALUES ('ses_tilde', 'proj1', 'slug', '/tmp', 'Tilde Title', '1.0', 1000, 2000)"
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("OPENCODE_DATA_DIR", "~/my_data")
+
+    metadata = {"provider": "opencode", "session_id": "ses_tilde"}
+    assert resolve_session_title(metadata) == "Tilde Title"
 
 
 def test_resolve_session_title_codex_lazy(tmp_path, monkeypatch):
@@ -237,7 +273,9 @@ def test_resolve_session_title_opencode_lazy(tmp_path, monkeypatch):
     transcript = tmp_path / "provider.jsonl"
     cwd.mkdir()
     (cwd / "AGENTS.md").write_text("agent", encoding="utf-8")
-    transcript.write_text('{"turn_id":"provider-turn-1","message":"hi"}\n', encoding="utf-8")
+    transcript.write_text(
+        '{"turn_id":"provider-turn-1","message":"hi"}\n', encoding="utf-8"
+    )
 
     coordinator = CheckpointCoordinator(session_id="s1", cwd=cwd, plugin_home=home)
     ref = TrajectoryReference(
@@ -314,7 +352,9 @@ def test_next_turn_closes_previous_reference_range(tmp_path):
     )
     coordinator.on_turn_end(
         TurnRecord(assistant_text="two"),
-        TrajectoryReference("codex", str(transcript), second_start, transcript.stat().st_size, 1),
+        TrajectoryReference(
+            "codex", str(transcript), second_start, transcript.stat().st_size, 1
+        ),
     )
 
     refreshed = CheckpointStore(home / "sessions" / "s1").read_manifest(0)
@@ -351,7 +391,9 @@ def test_concurrent_turn_end_writes_are_serialized(tmp_path):
 
 
 def _write_turn(home, cwd, session_id, user_message):
-    coordinator = CheckpointCoordinator(session_id=session_id, cwd=cwd, plugin_home=home)
+    coordinator = CheckpointCoordinator(
+        session_id=session_id, cwd=cwd, plugin_home=home
+    )
     coordinator.on_turn_end(TurnRecord(user_message=user_message))
 
 
@@ -363,11 +405,19 @@ def test_resolve_fork_ancestor_transcript_avoids_self_reference(tmp_path):
     proj = tmp_path
     own = proj / "SELF.jsonl"
     ancestor = proj / "ANCESTOR.jsonl"
-    ancestor.write_text(json.dumps({"type": "user", "sessionId": "ANCESTOR"}) + "\n", encoding="utf-8")
+    ancestor.write_text(
+        json.dumps({"type": "user", "sessionId": "ANCESTOR"}) + "\n", encoding="utf-8"
+    )
     own.write_text(
         "\n".join(
             [
-                json.dumps({"type": "user", "sessionId": "SELF", "forkedFrom": {"sessionId": "ANCESTOR", "messageUuid": "m1"}}),
+                json.dumps(
+                    {
+                        "type": "user",
+                        "sessionId": "SELF",
+                        "forkedFrom": {"sessionId": "ANCESTOR", "messageUuid": "m1"},
+                    }
+                ),
             ]
         )
         + "\n",
@@ -380,14 +430,21 @@ def test_resolve_fork_ancestor_transcript_avoids_self_reference(tmp_path):
 
     # No forkedFrom / ancestor missing -> None (drop the self-pointer rather than lie).
     lonely = proj / "LONE.jsonl"
-    lonely.write_text(json.dumps({"type": "user", "sessionId": "LONE"}) + "\n", encoding="utf-8")
+    lonely.write_text(
+        json.dumps({"type": "user", "sessionId": "LONE"}) + "\n", encoding="utf-8"
+    )
     assert _resolve_fork_ancestor_transcript("claude", str(lonely), "LONE") is None
 
     # codex path is the real parent rollout already -> returned verbatim.
-    assert _resolve_fork_ancestor_transcript("codex", "/prior/rollout.jsonl", "FORKED") == "/prior/rollout.jsonl"
+    assert (
+        _resolve_fork_ancestor_transcript("codex", "/prior/rollout.jsonl", "FORKED")
+        == "/prior/rollout.jsonl"
+    )
 
 
-def test_last_turn_end_offset_reanchored_to_eof_on_next_session_start(tmp_path, monkeypatch):
+def test_last_turn_end_offset_reanchored_to_eof_on_next_session_start(
+    tmp_path, monkeypatch
+):
     """F13: the last turn's end_offset trails EOF when the provider flushes a
     trailing same-turn record after the Stop hook reads the file. There is no
     finalize hook, so the next session_start re-anchors it to the (now fully
@@ -398,19 +455,43 @@ def test_last_turn_end_offset_reanchored_to_eof_on_next_session_start(tmp_path, 
     monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(home))
     transcript = tmp_path / "t.jsonl"
     transcript.write_text(
-        json.dumps({"type": "user", "promptId": "p0", "uuid": "u0", "message": {"role": "user", "content": "hi"}}) + "\n"
-        + json.dumps({"type": "assistant", "uuid": "a0", "promptId": "p0", "message": {"role": "assistant", "content": "x"}}) + "\n",
+        json.dumps(
+            {
+                "type": "user",
+                "promptId": "p0",
+                "uuid": "u0",
+                "message": {"role": "user", "content": "hi"},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "assistant",
+                "uuid": "a0",
+                "promptId": "p0",
+                "message": {"role": "assistant", "content": "x"},
+            }
+        )
+        + "\n",
         encoding="utf-8",
     )
     c = CheckpointCoordinator(session_id="sx", cwd=cwd)
     c.on_session_start()
     captured = transcript.stat().st_size
-    c.on_turn_end(TurnRecord(user_message="hi"), TrajectoryReference("claude", str(transcript), 0, captured, 2))
+    c.on_turn_end(
+        TurnRecord(user_message="hi"),
+        TrajectoryReference("claude", str(transcript), 0, captured, 2),
+    )
     assert c.store.read_manifest(0).trajectory_ref.end_offset == captured
 
     # Provider flushes a trailing same-turn record AFTER the Stop hook.
     with transcript.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps({"type": "system", "subtype": "stop_hook_summary", "promptId": "p0"}) + "\n")
+        handle.write(
+            json.dumps(
+                {"type": "system", "subtype": "stop_hook_summary", "promptId": "p0"}
+            )
+            + "\n"
+        )
     grown = transcript.stat().st_size
 
     CheckpointCoordinator(session_id="sx", cwd=cwd).on_session_start()
@@ -426,23 +507,46 @@ def test_reanchor_does_not_absorb_a_new_turn_tail(tmp_path, monkeypatch):
     monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(home))
     transcript = tmp_path / "t.jsonl"
     transcript.write_text(
-        json.dumps({"type": "user", "promptId": "p0", "uuid": "u0", "message": {"role": "user", "content": "hi"}}) + "\n",
+        json.dumps(
+            {
+                "type": "user",
+                "promptId": "p0",
+                "uuid": "u0",
+                "message": {"role": "user", "content": "hi"},
+            }
+        )
+        + "\n",
         encoding="utf-8",
     )
     c = CheckpointCoordinator(session_id="sy", cwd=cwd)
     c.on_session_start()
     captured = transcript.stat().st_size
-    c.on_turn_end(TurnRecord(user_message="hi"), TrajectoryReference("claude", str(transcript), 0, captured, 1))
+    c.on_turn_end(
+        TurnRecord(user_message="hi"),
+        TrajectoryReference("claude", str(transcript), 0, captured, 1),
+    )
 
     # A NEW turn (distinct promptId) lands in the tail.
     with transcript.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps({"type": "user", "promptId": "p1", "uuid": "u1", "message": {"role": "user", "content": "next"}}) + "\n")
+        handle.write(
+            json.dumps(
+                {
+                    "type": "user",
+                    "promptId": "p1",
+                    "uuid": "u1",
+                    "message": {"role": "user", "content": "next"},
+                }
+            )
+            + "\n"
+        )
 
     CheckpointCoordinator(session_id="sy", cwd=cwd).on_session_start()
     assert c.store.read_manifest(0).trajectory_ref.end_offset == captured
 
 
-def test_reanchor_last_turn_to_eof_runs_on_read_for_terminal_session(tmp_path, monkeypatch):
+def test_reanchor_last_turn_to_eof_runs_on_read_for_terminal_session(
+    tmp_path, monkeypatch
+):
     """F13: a terminal/forked session never restarts under its own id, so its last
     stored turn trails EOF for non-resume consumers (show/diff/rewind). The
     module-level reanchor lets a read-path consumer trigger the same lazy fix."""
@@ -454,18 +558,42 @@ def test_reanchor_last_turn_to_eof_runs_on_read_for_terminal_session(tmp_path, m
     monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(home))
     transcript = tmp_path / "t.jsonl"
     transcript.write_text(
-        json.dumps({"type": "user", "promptId": "p0", "uuid": "u0", "message": {"role": "user", "content": "hi"}}) + "\n"
-        + json.dumps({"type": "assistant", "uuid": "a0", "promptId": "p0", "message": {"role": "assistant", "content": "x"}}) + "\n",
+        json.dumps(
+            {
+                "type": "user",
+                "promptId": "p0",
+                "uuid": "u0",
+                "message": {"role": "user", "content": "hi"},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "assistant",
+                "uuid": "a0",
+                "promptId": "p0",
+                "message": {"role": "assistant", "content": "x"},
+            }
+        )
+        + "\n",
         encoding="utf-8",
     )
     c = CheckpointCoordinator(session_id="terminal", cwd=cwd)
     c.on_session_start()
     captured = transcript.stat().st_size
-    c.on_turn_end(TurnRecord(user_message="hi"), TrajectoryReference("claude", str(transcript), 0, captured, 2))
+    c.on_turn_end(
+        TurnRecord(user_message="hi"),
+        TrajectoryReference("claude", str(transcript), 0, captured, 2),
+    )
 
     # Provider flushes a trailing same-turn record; the session never restarts.
     with transcript.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps({"type": "system", "subtype": "stop_hook_summary", "promptId": "p0"}) + "\n")
+        handle.write(
+            json.dumps(
+                {"type": "system", "subtype": "stop_hook_summary", "promptId": "p0"}
+            )
+            + "\n"
+        )
     grown = transcript.stat().st_size
 
     # A read-path consumer reanchors on demand.
@@ -490,8 +618,14 @@ def test_reanchor_respects_session_boundary_for_subagent_slice(tmp_path, monkeyp
     transcript = tmp_path / "rollout.jsonl"
     # Multi-turn subagent body (turns t1, t2) — distinct keys within one slice.
     transcript.write_text(
-        json.dumps({"type": "response_item", "turn_id": "t1", "payload": {"type": "message"}}) + "\n"
-        + json.dumps({"type": "response_item", "turn_id": "t2", "payload": {"type": "message"}}) + "\n",
+        json.dumps(
+            {"type": "response_item", "turn_id": "t1", "payload": {"type": "message"}}
+        )
+        + "\n"
+        + json.dumps(
+            {"type": "response_item", "turn_id": "t2", "payload": {"type": "message"}}
+        )
+        + "\n",
         encoding="utf-8",
     )
     c = CheckpointCoordinator(session_id="sub", cwd=cwd)
@@ -499,12 +633,23 @@ def test_reanchor_respects_session_boundary_for_subagent_slice(tmp_path, monkeyp
     captured = transcript.stat().st_size
     c.on_turn_end(
         TurnRecord(user_message="sub work"),
-        TrajectoryReference("codex", str(transcript), 0, captured, 2, boundary_mode="session_boundary"),
+        TrajectoryReference(
+            "codex", str(transcript), 0, captured, 2, boundary_mode="session_boundary"
+        ),
     )
 
     # Codex flushes the turn-closing record bearing the LAST turn's id (t2).
     with transcript.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps({"type": "event_msg", "payload": {"type": "task_complete"}, "turn_id": "t2"}) + "\n")
+        handle.write(
+            json.dumps(
+                {
+                    "type": "event_msg",
+                    "payload": {"type": "task_complete"},
+                    "turn_id": "t2",
+                }
+            )
+            + "\n"
+        )
     grown = transcript.stat().st_size
 
     assert reanchor_last_turn_to_eof(c.store) is True

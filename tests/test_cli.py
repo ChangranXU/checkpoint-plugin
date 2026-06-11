@@ -9,6 +9,7 @@ from checkpoint_plugin.cli import (
     _edit_send_replaced_turns,
     _rolled_back_count,
     _supports_color,
+    _turns_carrying_pre_fork_rollback,
 )
 from checkpoint_plugin.store import CheckpointStore
 from checkpoint_plugin.types import CheckpointManifest, TrajectoryReference
@@ -98,17 +99,24 @@ def test_clean_blobs_compacts_legacy_session_blobs(tmp_path, monkeypatch, capsys
     monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(home))
 
     assert main(["clean", "--blobs", "--dry-run"]) == 0
-    assert "Would compact 1 legacy blob(s); promoted 1; missing 0" in capsys.readouterr().out
+    assert (
+        "Would compact 1 legacy blob(s); promoted 1; missing 0"
+        in capsys.readouterr().out
+    )
     assert legacy_path.exists()
     assert not store.blob_path(sha).exists()
 
     assert main(["clean", "--blobs"]) == 0
-    assert "Compacted 1 legacy blob(s); promoted 1; missing 0" in capsys.readouterr().out
+    assert (
+        "Compacted 1 legacy blob(s); promoted 1; missing 0" in capsys.readouterr().out
+    )
     assert not legacy_path.exists()
     assert store.blob_path(sha).read_bytes() == b"legacy"
 
 
-def test_clean_blobs_keeps_legacy_blob_when_promotion_hash_mismatches(tmp_path, monkeypatch, capsys):
+def test_clean_blobs_keeps_legacy_blob_when_promotion_hash_mismatches(
+    tmp_path, monkeypatch, capsys
+):
     home = tmp_path / "plugin"
     store = CheckpointStore(home / "sessions" / "s1")
     sha = hashlib.sha256(b"expected").hexdigest()
@@ -119,12 +127,16 @@ def test_clean_blobs_keeps_legacy_blob_when_promotion_hash_mismatches(tmp_path, 
 
     assert main(["clean", "--blobs"]) == 0
 
-    assert "Compacted 0 legacy blob(s); promoted 0; missing 1" in capsys.readouterr().out
+    assert (
+        "Compacted 0 legacy blob(s); promoted 0; missing 1" in capsys.readouterr().out
+    )
     assert legacy_path.read_bytes() == b"wrong"
     assert not store.blob_path(sha).exists()
 
 
-def test_clean_blobs_dry_run_reports_hash_mismatch_without_removal(tmp_path, monkeypatch, capsys):
+def test_clean_blobs_dry_run_reports_hash_mismatch_without_removal(
+    tmp_path, monkeypatch, capsys
+):
     home = tmp_path / "plugin"
     store = CheckpointStore(home / "sessions" / "s1")
     sha = hashlib.sha256(b"expected").hexdigest()
@@ -135,7 +147,10 @@ def test_clean_blobs_dry_run_reports_hash_mismatch_without_removal(tmp_path, mon
 
     assert main(["clean", "--blobs", "--dry-run"]) == 0
 
-    assert "Would compact 0 legacy blob(s); promoted 0; missing 1" in capsys.readouterr().out
+    assert (
+        "Would compact 0 legacy blob(s); promoted 0; missing 1"
+        in capsys.readouterr().out
+    )
     assert legacy_path.read_bytes() == b"wrong"
     assert not store.blob_path(sha).exists()
 
@@ -163,10 +178,15 @@ def test_clean_blobs_reports_missing_reachable_refs(tmp_path, monkeypatch, capsy
 
     assert main(["clean", "--blobs", "--dry-run"]) == 0
 
-    assert "Would compact 0 legacy blob(s); promoted 0; missing 3" in capsys.readouterr().out
+    assert (
+        "Would compact 0 legacy blob(s); promoted 0; missing 3"
+        in capsys.readouterr().out
+    )
 
 
-def test_clean_empty_prunes_only_unreferenced_global_blobs(tmp_path, monkeypatch, capsys):
+def test_clean_empty_prunes_only_unreferenced_global_blobs(
+    tmp_path, monkeypatch, capsys
+):
     home = tmp_path / "plugin"
     empty_store = CheckpointStore(home / "sessions" / "empty")
     kept_store = CheckpointStore(home / "sessions" / "kept")
@@ -224,7 +244,9 @@ def test_clean_empty_prunes_only_unreferenced_global_blobs(tmp_path, monkeypatch
     assert kept_store.blob_path(kept_fs).exists()
 
 
-def test_clean_empty_ignores_malformed_blob_refs_when_pruning(tmp_path, monkeypatch, capsys):
+def test_clean_empty_ignores_malformed_blob_refs_when_pruning(
+    tmp_path, monkeypatch, capsys
+):
     home = tmp_path / "plugin"
     victim = tmp_path / "victim.txt"
     victim.write_text("keep me\n", encoding="utf-8")
@@ -251,14 +273,25 @@ def test_clean_empty_ignores_malformed_blob_refs_when_pruning(tmp_path, monkeypa
     assert victim.read_text(encoding="utf-8") == "keep me\n"
 
 
-def _seed_turn(coordinator, transcript, user_message, end_offset, *, boundary_mode="per_turn_key"):
+def _seed_turn(
+    coordinator, transcript, user_message, end_offset, *, boundary_mode="per_turn_key"
+):
     from checkpoint_plugin.coordinator import TurnRecord
     from checkpoint_plugin.types import TrajectoryReference
 
-    record_count = sum(1 for line in transcript.read_bytes()[:end_offset].splitlines() if line.strip())
+    record_count = sum(
+        1 for line in transcript.read_bytes()[:end_offset].splitlines() if line.strip()
+    )
     coordinator.on_turn_end(
         TurnRecord(user_message=user_message),
-        TrajectoryReference("codex", str(transcript), 0, end_offset, record_count, boundary_mode=boundary_mode),
+        TrajectoryReference(
+            "codex",
+            str(transcript),
+            0,
+            end_offset,
+            record_count,
+            boundary_mode=boundary_mode,
+        ),
     )
 
 
@@ -279,7 +312,10 @@ def test_list_session_reanchors_last_turn_to_eof(tmp_path, monkeypatch, capsys):
 
     transcript = tmp_path / "rollout.jsonl"
     transcript.write_text(
-        json.dumps({"type": "response_item", "turn_id": "t1", "payload": {"type": "message"}}) + "\n",
+        json.dumps(
+            {"type": "response_item", "turn_id": "t1", "payload": {"type": "message"}}
+        )
+        + "\n",
         encoding="utf-8",
     )
     c = CheckpointCoordinator(session_id="codexsess", cwd=cwd)
@@ -290,7 +326,16 @@ def test_list_session_reanchors_last_turn_to_eof(tmp_path, monkeypatch, capsys):
 
     # Provider flushes the turn-closing record AFTER the hook captured the slice.
     with transcript.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps({"type": "event_msg", "payload": {"type": "task_complete"}, "turn_id": "t1"}) + "\n")
+        handle.write(
+            json.dumps(
+                {
+                    "type": "event_msg",
+                    "payload": {"type": "task_complete"},
+                    "turn_id": "t1",
+                }
+            )
+            + "\n"
+        )
     grown = transcript.stat().st_size
     assert grown > captured
 
@@ -303,9 +348,29 @@ def test_list_session_reanchors_last_turn_to_eof(tmp_path, monkeypatch, capsys):
 def _rolled_back_transcript(path):
     """A codex rollout with an edit-send: turn t2 rolls back turn t1 (version 1)."""
     path.write_text(
-        json.dumps({"type": "event_msg", "payload": {"type": "user_message", "message": "version 1"}, "turn_id": "t1"}) + "\n"
-        + json.dumps({"type": "event_msg", "payload": {"type": "thread_rolled_back", "num_turns": 1}}) + "\n"
-        + json.dumps({"type": "event_msg", "payload": {"type": "user_message", "message": "version 2"}, "turn_id": "t2"}) + "\n",
+        json.dumps(
+            {
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "version 1"},
+                "turn_id": "t1",
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "event_msg",
+                "payload": {"type": "thread_rolled_back", "num_turns": 1},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "version 2"},
+                "turn_id": "t2",
+            }
+        )
+        + "\n",
         encoding="utf-8",
     )
 
@@ -328,14 +393,98 @@ def test_edit_send_replaced_turns_detects_rollback(tmp_path, monkeypatch):
     first_nl = data.index(b"\n") + 1
     c = CheckpointCoordinator(session_id="es", cwd=cwd)
     c.on_session_start()
-    c.on_turn_end(TurnRecord(user_message="version 1"), TrajectoryReference("codex", str(transcript), 0, first_nl, 1))
-    c.on_turn_end(TurnRecord(user_message="version 2"), TrajectoryReference("codex", str(transcript), first_nl, len(data), 2))
+    c.on_turn_end(
+        TurnRecord(user_message="version 1"),
+        TrajectoryReference("codex", str(transcript), 0, first_nl, 1),
+    )
+    c.on_turn_end(
+        TurnRecord(user_message="version 2"),
+        TrajectoryReference("codex", str(transcript), first_nl, len(data), 2),
+    )
 
     manifests = c.store.list_manifests()
     replaced = _edit_send_replaced_turns(c.store, manifests)
     assert replaced == {0: 1}
     assert _rolled_back_count(manifests[1]) == 1
     assert _rolled_back_count(manifests[0]) == 0
+
+
+def test_edit_send_replaced_turns_skips_already_replaced_turns(tmp_path):
+    """A chained edit-send rollback counts only still-live prior turns."""
+    transcript = tmp_path / "rollout.jsonl"
+    slices = []
+    payloads = [
+        {"type": "user_message", "message": "turn 1"},
+        {"type": "user_message", "message": "turn 2"},
+        {"type": "user_message", "message": "turn 3"},
+        {"type": "thread_rolled_back", "num_turns": 1},
+        {"type": "thread_rolled_back", "num_turns": 2},
+    ]
+    offset = 0
+    lines = []
+    for payload in payloads:
+        line = json.dumps({"type": "event_msg", "payload": payload}) + "\n"
+        encoded_len = len(line.encode("utf-8"))
+        slices.append((offset, offset + encoded_len))
+        lines.append(line)
+        offset += encoded_len
+    transcript.write_text("".join(lines), encoding="utf-8")
+    manifests = [
+        CheckpointManifest(
+            turn_id=turn_id,
+            session_id="chained",
+            created_ts=f"2026-06-10T00:00:0{turn_id}Z",
+            env_ref="env",
+            fs_ref="fs",
+            trajectory_ref=TrajectoryReference("codex", str(transcript), start, end, 1),
+        )
+        for turn_id, (start, end) in enumerate(slices, start=1)
+    ]
+
+    replaced = _edit_send_replaced_turns(
+        CheckpointStore(tmp_path / "session"), manifests
+    )
+
+    assert replaced == {3: 4, 4: 5, 2: 5}
+
+
+def test_pre_fork_carrier_detection_counts_only_live_captured_turns(tmp_path):
+    """A rollback reaching past already-replaced captured turns is a carrier."""
+    transcript = tmp_path / "rollout.jsonl"
+    slices = []
+    payloads = [
+        {"type": "user_message", "message": "turn 0"},
+        {"type": "thread_rolled_back", "num_turns": 1},
+        {"type": "thread_rolled_back", "num_turns": 2},
+    ]
+    offset = 0
+    lines = []
+    for payload in payloads:
+        line = json.dumps({"type": "event_msg", "payload": payload}) + "\n"
+        encoded_len = len(line.encode("utf-8"))
+        slices.append((offset, offset + encoded_len))
+        lines.append(line)
+        offset += encoded_len
+    transcript.write_text("".join(lines), encoding="utf-8")
+    manifests = [
+        CheckpointManifest(
+            turn_id=turn_id,
+            session_id="captured",
+            created_ts=f"2026-06-10T00:00:0{turn_id}Z",
+            env_ref="env",
+            fs_ref="fs",
+            trajectory_ref=TrajectoryReference("codex", str(transcript), start, end, 1),
+        )
+        for turn_id, (start, end) in enumerate(slices)
+    ]
+
+    replaced = _edit_send_replaced_turns(
+        CheckpointStore(tmp_path / "session"), manifests
+    )
+    carriers = _turns_carrying_pre_fork_rollback(manifests)
+
+    assert replaced == {0: 1, 1: 2}
+    assert carriers == {2}
 
 
 def test_edit_send_no_rollback_is_empty(tmp_path, monkeypatch):
@@ -349,12 +498,22 @@ def test_edit_send_no_rollback_is_empty(tmp_path, monkeypatch):
     monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(home))
     transcript = tmp_path / "rollout.jsonl"
     transcript.write_text(
-        json.dumps({"type": "event_msg", "payload": {"type": "user_message", "message": "hi"}, "turn_id": "t1"}) + "\n",
+        json.dumps(
+            {
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "hi"},
+                "turn_id": "t1",
+            }
+        )
+        + "\n",
         encoding="utf-8",
     )
     c = CheckpointCoordinator(session_id="noroll", cwd=cwd)
     c.on_session_start()
-    c.on_turn_end(TurnRecord(user_message="hi"), TrajectoryReference("codex", str(transcript), 0, transcript.stat().st_size, 1))
+    c.on_turn_end(
+        TurnRecord(user_message="hi"),
+        TrajectoryReference("codex", str(transcript), 0, transcript.stat().st_size, 1),
+    )
     assert _edit_send_replaced_turns(c.store, c.store.list_manifests()) == {}
 
 
@@ -374,8 +533,14 @@ def test_list_marks_replaced_turn(tmp_path, monkeypatch, capsys):
     first_nl = data.index(b"\n") + 1
     c = CheckpointCoordinator(session_id="esl", cwd=cwd)
     c.on_session_start()
-    c.on_turn_end(TurnRecord(user_message="version 1"), TrajectoryReference("codex", str(transcript), 0, first_nl, 1))
-    c.on_turn_end(TurnRecord(user_message="version 2"), TrajectoryReference("codex", str(transcript), first_nl, len(data), 2))
+    c.on_turn_end(
+        TurnRecord(user_message="version 1"),
+        TrajectoryReference("codex", str(transcript), 0, first_nl, 1),
+    )
+    c.on_turn_end(
+        TurnRecord(user_message="version 2"),
+        TrajectoryReference("codex", str(transcript), first_nl, len(data), 2),
+    )
 
     assert main(["list", "--session", "esl"]) == 0
     out = capsys.readouterr().out
@@ -389,10 +554,15 @@ def test_list_marks_replaced_turn(tmp_path, monkeypatch, capsys):
 def _write_session(home, session_id, metadata, turns):
     session = home / "sessions" / session_id
     session.mkdir(parents=True)
-    (session / "metadata.json").write_text(json.dumps({"session_id": session_id, **metadata}), encoding="utf-8")
+    (session / "metadata.json").write_text(
+        json.dumps({"session_id": session_id, **metadata}), encoding="utf-8"
+    )
     store = CheckpointStore(session)
     transcript = session / f"{session_id}.jsonl"
-    transcript.write_text("".join(json.dumps({"turn": index}) + "\n" for index, _ in enumerate(turns)), encoding="utf-8")
+    transcript.write_text(
+        "".join(json.dumps({"turn": index}) + "\n" for index, _ in enumerate(turns)),
+        encoding="utf-8",
+    )
     offset = 0
     for turn_id, (created_ts, preview) in enumerate(turns):
         line = json.dumps({"turn": turn_id}) + "\n"
@@ -404,7 +574,9 @@ def _write_session(home, session_id, metadata, turns):
                 created_ts=created_ts,
                 env_ref="env",
                 fs_ref="fs",
-                trajectory_ref=TrajectoryReference("codex", str(transcript), offset, end, 1),
+                trajectory_ref=TrajectoryReference(
+                    "codex", str(transcript), offset, end, 1
+                ),
                 user_message_preview=preview,
                 parent_turn_id=turn_id - 1 if turn_id else None,
             )
@@ -413,7 +585,9 @@ def _write_session(home, session_id, metadata, turns):
     return session
 
 
-def test_session_browser_collects_metadata_without_reanchoring_latest_turn(tmp_path, monkeypatch):
+def test_session_browser_collects_metadata_without_reanchoring_latest_turn(
+    tmp_path, monkeypatch
+):
     home = tmp_path / "plugin"
     monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(home))
     session = _write_session(
@@ -425,14 +599,19 @@ def test_session_browser_collects_metadata_without_reanchoring_latest_turn(tmp_p
     transcript = session / "lazy.jsonl"
     original_end = CheckpointStore(session).read_manifest(0).trajectory_ref.end_offset
     transcript.write_text(
-        transcript.read_text(encoding="utf-8") + json.dumps({"turn": 0, "tail": True}) + "\n",
+        transcript.read_text(encoding="utf-8")
+        + json.dumps({"turn": 0, "tail": True})
+        + "\n",
         encoding="utf-8",
     )
 
     providers = collect_provider_trees(home / "sessions")
 
     assert providers["codex"][0].session_id == "lazy"
-    assert CheckpointStore(session).read_manifest(0).trajectory_ref.end_offset == original_end
+    assert (
+        CheckpointStore(session).read_manifest(0).trajectory_ref.end_offset
+        == original_end
+    )
 
 
 def test_session_browser_groups_by_provider_and_nests_lineage(tmp_path, monkeypatch):
@@ -504,7 +683,9 @@ def test_session_browser_groups_by_provider_and_nests_lineage(tmp_path, monkeypa
     assert "subagent" in rendered and "[subagent]" in rendered
 
 
-def test_session_browser_defaults_to_recent_sessions_with_turn_lists_collapsed(tmp_path, monkeypatch):
+def test_session_browser_defaults_to_recent_sessions_with_turn_lists_collapsed(
+    tmp_path, monkeypatch
+):
     home = tmp_path / "plugin"
     monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(home))
     _write_session(
@@ -527,7 +708,10 @@ def test_session_browser_defaults_to_recent_sessions_with_turn_lists_collapsed(t
     expanded = session_browser._default_expanded_groups(providers)
     rows = _rows_for_nodes(providers["codex"], expanded)
 
-    assert [row.node.session_id for row in rows if row.kind == "session"] == ["newer", "older"]
+    assert [row.node.session_id for row in rows if row.kind == "session"] == [
+        "newer",
+        "older",
+    ]
     assert [row.kind for row in rows] == ["group", "session", "session"]
     assert all(not row.expanded for row in rows if row.kind == "session")
 
@@ -574,9 +758,17 @@ def test_session_browser_resume_only_on_valid_checkpoint_turn(tmp_path, monkeypa
 
     providers = collect_provider_trees(home / "sessions")
     rows = _rows_for_nodes(providers["codex"])
-    parent_turn = next(row for row in rows if row.kind == "turn" and row.node.session_id == "parent")
-    subagent_turn = next(row for row in rows if row.kind == "turn" and row.node.session_id == "parent--subagent-a1")
-    session_header = next(row for row in rows if row.kind == "session" and row.node.session_id == "parent")
+    parent_turn = next(
+        row for row in rows if row.kind == "turn" and row.node.session_id == "parent"
+    )
+    subagent_turn = next(
+        row
+        for row in rows
+        if row.kind == "turn" and row.node.session_id == "parent--subagent-a1"
+    )
+    session_header = next(
+        row for row in rows if row.kind == "session" and row.node.session_id == "parent"
+    )
 
     assert _command_action("/resume", parent_turn).session_id == "parent"
     assert _command_action("/show", subagent_turn).session_id == "parent--subagent-a1"
@@ -586,11 +778,21 @@ def test_session_browser_resume_only_on_valid_checkpoint_turn(tmp_path, monkeypa
     assert _command_action("/resume", session_header) is None
 
     parent_detail = "".join(text for _style, text in _detail_fragments(parent_turn, {}))
-    subagent_detail = "".join(text for _style, text in _detail_fragments(subagent_turn, {}))
-    session_detail = "".join(text for _style, text in _detail_fragments(session_header, {}))
+    subagent_detail = "".join(
+        text for _style, text in _detail_fragments(subagent_turn, {})
+    )
+    session_detail = "".join(
+        text for _style, text in _detail_fragments(session_header, {})
+    )
     assert "Commands: show:yes  diff:yes  resume:yes" in parent_detail
-    assert "Commands: show:yes  diff:yes  resume:no  (resume unavailable: subagent)" in subagent_detail
-    assert "Commands: show:no  diff:no  resume:no  (select a checkpoint turn)" in session_detail
+    assert (
+        "Commands: show:yes  diff:yes  resume:no  (resume unavailable: subagent)"
+        in subagent_detail
+    )
+    assert (
+        "Commands: show:no  diff:no  resume:no  (select a checkpoint turn)"
+        in session_detail
+    )
 
 
 def test_session_browser_resume_outputs_cli_command_hint_only():
@@ -657,7 +859,9 @@ def test_output_fragments_scroll_and_clamp_to_visible_page():
 def test_body_fragments_respect_tree_scroll(tmp_path, monkeypatch):
     home = tmp_path / "plugin"
     monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(home))
-    turns = [(f"2026-01-01T00:{minute:02d}:00Z", f"turn {minute}") for minute in range(20)]
+    turns = [
+        (f"2026-01-01T00:{minute:02d}:00Z", f"turn {minute}") for minute in range(20)
+    ]
     _write_session(
         home,
         "long",
@@ -674,11 +878,17 @@ def test_body_fragments_respect_tree_scroll(tmp_path, monkeypatch):
     assert "T0000" not in rendered
 
 
-def test_body_fragments_keep_selected_row_visible_when_scroll_hints_render(tmp_path, monkeypatch):
+def test_body_fragments_keep_selected_row_visible_when_scroll_hints_render(
+    tmp_path, monkeypatch
+):
     home = tmp_path / "plugin"
     monkeypatch.setenv("CHECKPOINT_PLUGIN_HOME", str(home))
-    monkeypatch.setattr(session_browser.shutil, "get_terminal_size", lambda: os.terminal_size((100, 20)))
-    turns = [(f"2026-01-01T00:{minute:02d}:00Z", f"turn {minute}") for minute in range(20)]
+    monkeypatch.setattr(
+        session_browser.shutil, "get_terminal_size", lambda: os.terminal_size((100, 20))
+    )
+    turns = [
+        (f"2026-01-01T00:{minute:02d}:00Z", f"turn {minute}") for minute in range(20)
+    ]
     _write_session(
         home,
         "long",
@@ -719,8 +929,16 @@ def test_tui_fragments_render_claude_session_and_subagent(tmp_path, monkeypatch)
     parent_transcript.write_text(
         "\n".join(
             [
-                json.dumps({"type": "user", "promptId": "p-1", "message": {"content": "ask claude"}}),
-                json.dumps({"type": "assistant", "message": {"content": "uses abc123"}}),
+                json.dumps(
+                    {
+                        "type": "user",
+                        "promptId": "p-1",
+                        "message": {"content": "ask claude"},
+                    }
+                ),
+                json.dumps(
+                    {"type": "assistant", "message": {"content": "uses abc123"}}
+                ),
                 "",
             ]
         ),
@@ -741,24 +959,39 @@ def test_tui_fragments_render_claude_session_and_subagent(tmp_path, monkeypatch)
     providers = collect_provider_trees(home / "sessions")
 
     assert list(providers) == ["claude"]
-    header = "".join(text for _style, text in _header_fragments(["claude"], providers, {"provider": 0}))
+    header = "".join(
+        text
+        for _style, text in _header_fragments(["claude"], providers, {"provider": 0})
+    )
     assert "claude" in header
     assert "(1/3)" in header
 
     rows = _rows_for_nodes(providers["claude"])
-    body = "".join(text for _style, text in _body_fragments(rows, 0, {"tree_scroll": 0, "output_visible": False}))
+    body = "".join(
+        text
+        for _style, text in _body_fragments(
+            rows, 0, {"tree_scroll": 0, "output_visible": False}
+        )
+    )
     assert "Claude parent work" in body
     assert "subagent spawned here" in body
     assert "Claude subagent work" in body
 
-    parent_row = next(row for row in rows if row.kind == "session" and row.node.session_id == "claude-parent")
+    parent_row = next(
+        row
+        for row in rows
+        if row.kind == "session" and row.node.session_id == "claude-parent"
+    )
     subagent_turn = next(
         row
         for row in rows
-        if row.kind == "turn" and row.node.session_id == "claude-parent--subagent-abc123"
+        if row.kind == "turn"
+        and row.node.session_id == "claude-parent--subagent-abc123"
     )
     parent_detail = "".join(text for _style, text in _detail_fragments(parent_row, {}))
-    subagent_detail = "".join(text for _style, text in _detail_fragments(subagent_turn, {}))
+    subagent_detail = "".join(
+        text for _style, text in _detail_fragments(subagent_turn, {})
+    )
     assert "Provider: claude" in parent_detail
     assert "Source: startup" in parent_detail
     assert "Subagent: abc123" in subagent_detail
@@ -786,7 +1019,13 @@ def test_tui_places_same_turn_subagent_before_fork_link(tmp_path, monkeypatch):
     parent_transcript.write_text(
         "\n".join(
             [
-                json.dumps({"type": "user", "promptId": "p-2", "message": {"content": "spawn abc123"}}),
+                json.dumps(
+                    {
+                        "type": "user",
+                        "promptId": "p-2",
+                        "message": {"content": "spawn abc123"},
+                    }
+                ),
                 json.dumps({"type": "assistant", "message": {"content": "abc123"}}),
                 "",
             ]
@@ -827,7 +1066,10 @@ def test_tui_places_same_turn_subagent_before_fork_link(tmp_path, monkeypatch):
     turn_index = next(
         index
         for index, row in enumerate(rows)
-        if row.kind == "turn" and row.node.session_id == "claude-parent" and row.manifest and row.manifest.turn_id == 1
+        if row.kind == "turn"
+        and row.node.session_id == "claude-parent"
+        and row.manifest
+        and row.manifest.turn_id == 1
     )
     subagent_index = labels.index("subagent spawned here")
     fork_index = labels.index("forked/resumed here")
@@ -951,7 +1193,9 @@ def test_cross_cwd_recursive_fork_resume_builds_full_chain(tmp_path, monkeypatch
     phantom_root = copy_nodes[0]
     assert phantom_root.phantom_ref == "root"
     # Root phantom has the real resumed-fork as child (fork1 not phantomed)
-    all_children = [c for children in phantom_root.fork_children.values() for c in children]
+    all_children = [
+        c for children in phantom_root.fork_children.values() for c in children
+    ]
     assert len(all_children) == 1
     assert all_children[0].session_id == "resumed-fork"
     assert all_children[0].phantom_ref is None
@@ -960,7 +1204,9 @@ def test_cross_cwd_recursive_fork_resume_builds_full_chain(tmp_path, monkeypatch
     assert "(ref)" in rendered
 
 
-def test_codex_fork_attaches_at_true_turn_despite_inlined_prefix_anchor(tmp_path, monkeypatch):
+def test_codex_fork_attaches_at_true_turn_despite_inlined_prefix_anchor(
+    tmp_path, monkeypatch
+):
     """A codex fork's forked_at_offset is in the fork's OWN file and may replay
     rolled-back turns; the attach turn must come from aligning the fork-point
     trajectory against the parent, not from comparing raw byte offsets."""
@@ -986,10 +1232,28 @@ def test_codex_fork_attaches_at_true_turn_despite_inlined_prefix_anchor(tmp_path
     # (with a re-stamped timestamp), then a replayed-but-rolled-back user message
     # from the parent's in-flight turn 1.
     blob = (
-        json.dumps({"type": "session_meta", "payload": {"forked_from_id": "parent"}}) + "\n"
-        + json.dumps({"timestamp": "2026-01-01T00:03:00Z", "turn": 0}) + "\n"
-        + json.dumps({"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "long second turn"}]}}) + "\n"
-        + json.dumps({"type": "event_msg", "payload": {"type": "thread_rolled_back", "num_turns": 1}}) + "\n"
+        json.dumps({"type": "session_meta", "payload": {"forked_from_id": "parent"}})
+        + "\n"
+        + json.dumps({"timestamp": "2026-01-01T00:03:00Z", "turn": 0})
+        + "\n"
+        + json.dumps(
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "long second turn"}],
+                },
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "event_msg",
+                "payload": {"type": "thread_rolled_back", "num_turns": 1},
+            }
+        )
+        + "\n"
     ).encode("utf-8")
     fork_session = _write_session(
         home,
@@ -1019,7 +1283,9 @@ def test_codex_fork_attaches_at_true_turn_despite_inlined_prefix_anchor(tmp_path
     assert [c.session_id for c in parent_node.fork_children[0]] == ["fork"]
 
 
-def test_cross_cwd_resume_of_fork_attaches_at_grandparent_fork_turn(tmp_path, monkeypatch):
+def test_cross_cwd_resume_of_fork_attaches_at_grandparent_fork_turn(
+    tmp_path, monkeypatch
+):
     """The child carries the direct parent's turns, so it must attach in the
     grandparent phantom at the parent's fork point — not at resumed_from_turn_id,
     which is in the direct parent's coordinates."""

@@ -55,12 +55,18 @@ def _settle_poll_s() -> float:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("event", nargs="?", choices=["session_start", "turn_end", "subagent_end"])
+    parser.add_argument(
+        "event", nargs="?", choices=["session_start", "turn_end", "subagent_end"]
+    )
     args = parser.parse_args(argv)
     payload = _read_payload()
     event = args.event or _event_from_payload(payload)
     cwd = Path(_first_string(payload, "cwd") or Path.cwd())
-    session_id = os.environ.get("CODEX_SESSION_ID") or _first_string(payload, "session_id") or "codex-session"
+    session_id = (
+        os.environ.get("CODEX_SESSION_ID")
+        or _first_string(payload, "session_id")
+        or "codex-session"
+    )
     _seed_codex_env(session_id, payload)
 
     if event == "subagent_end" or _is_subagent_stop_event(payload):
@@ -74,7 +80,9 @@ def main(argv: list[str] | None = None) -> int:
         coordinator.on_session_start(
             source=_first_string(payload, "source"),
             session_env=_session_env(payload),
-            source_transcript_path=_first_string(payload, "transcript_path", "transcriptPath"),
+            source_transcript_path=_first_string(
+                payload, "transcript_path", "transcriptPath"
+            ),
         )
         _write_ok()
         return 0
@@ -84,12 +92,17 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     turn_record = _turn_record(payload)
-    coordinator.on_turn_end(turn_record, _trajectory_ref(payload, provider="codex") or _empty_trajectory_ref("codex"))
+    coordinator.on_turn_end(
+        turn_record,
+        _trajectory_ref(payload, provider="codex") or _empty_trajectory_ref("codex"),
+    )
     _write_ok()
     return 0
 
 
-def _on_subagent_end(payload: dict[str, Any], cwd: Path, parent_session_id: str) -> None:
+def _on_subagent_end(
+    payload: dict[str, Any], cwd: Path, parent_session_id: str
+) -> None:
     """Checkpoint a finished Codex subagent as its own session (B4).
 
     Codex subagent hooks carry the parent session id; we derive a distinct
@@ -99,9 +112,9 @@ def _on_subagent_end(payload: dict[str, Any], cwd: Path, parent_session_id: str)
     agent_id = _first_string(payload, "agent_id", "agentId")
     # Codex SubagentStop carries the subagent's own rollout in `agent_transcript_path`;
     # the common `transcript_path` is the PARENT rollout. Slice the subagent file.
-    transcript_path = _first_string(payload, "agent_transcript_path", "agentTranscriptPath") or _first_string(
-        payload, "transcript_path", "transcriptPath"
-    )
+    transcript_path = _first_string(
+        payload, "agent_transcript_path", "agentTranscriptPath"
+    ) or _first_string(payload, "transcript_path", "transcriptPath")
     if agent_id is None and transcript_path is None:
         return
     suffix = agent_id or (Path(transcript_path).stem if transcript_path else "unknown")
@@ -121,7 +134,9 @@ def _on_subagent_end(payload: dict[str, Any], cwd: Path, parent_session_id: str)
     )
     if transcript_path is not None:
         _settle_subagent_rollout(Path(transcript_path))
-    ref = _subagent_trajectory_ref(payload, transcript_path) or _empty_trajectory_ref("codex")
+    ref = _subagent_trajectory_ref(payload, transcript_path) or _empty_trajectory_ref(
+        "codex"
+    )
     coordinator.on_turn_end(_turn_record(payload), ref)
 
 
@@ -199,7 +214,9 @@ def _seed_codex_env(session_id: str, payload: dict[str, Any]) -> None:
     permission_mode = _first_string(payload, "permission_mode", "permissionMode")
     if permission_mode:
         os.environ.setdefault("CODEX_PERMISSION_MODE", permission_mode)
-    mode = _first_string(payload, "collaboration_mode_kind", "collaborationModeKind", "mode")
+    mode = _first_string(
+        payload, "collaboration_mode_kind", "collaborationModeKind", "mode"
+    )
     if mode:
         os.environ.setdefault("CODEX_MODE", mode)
 
@@ -219,15 +236,21 @@ def _session_env(payload: dict[str, Any]) -> dict[str, str]:
     fields = {
         "model": _first_string(payload, "model"),
         "permission_mode": _first_string(payload, "permission_mode", "permissionMode"),
-        "mode": _first_string(payload, "collaboration_mode_kind", "collaborationModeKind", "mode"),
+        "mode": _first_string(
+            payload, "collaboration_mode_kind", "collaborationModeKind", "mode"
+        ),
         "approval_policy": _first_string(payload, "approval_policy", "approvalPolicy"),
-        "sandbox_mode": _first_string(payload, "sandbox_mode", "sandboxMode", "sandbox_policy", "sandboxPolicy"),
+        "sandbox_mode": _first_string(
+            payload, "sandbox_mode", "sandboxMode", "sandbox_policy", "sandboxPolicy"
+        ),
     }
     return {key: value for key, value in fields.items() if value}
 
 
 def _turn_record(payload: dict[str, Any]) -> TurnRecord:
-    user_message = _first_string(payload, "prompt", "user_message", "userMessage", "input")
+    user_message = _first_string(
+        payload, "prompt", "user_message", "userMessage", "input"
+    )
     assistant_text = _first_string(
         payload,
         "last_assistant_message",
@@ -262,15 +285,21 @@ def _tool_calls(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return [call]
 
 
-def _trajectory_ref(payload: dict[str, Any], provider: str) -> TrajectoryReference | None:
+def _trajectory_ref(
+    payload: dict[str, Any], provider: str
+) -> TrajectoryReference | None:
     transcript_path = _first_string(payload, "transcript_path", "transcriptPath")
     if transcript_path is None:
         return None
     turn_id = payload.get("turn_id") or payload.get("turnId")
-    return jsonl_ref_for_turn(provider, Path(transcript_path), turn_id, codex_key, claim_leading_keyless=True)
+    return jsonl_ref_for_turn(
+        provider, Path(transcript_path), turn_id, codex_key, claim_leading_keyless=True
+    )
 
 
-def _subagent_trajectory_ref(payload: dict[str, Any], transcript_path: str | None) -> TrajectoryReference | None:
+def _subagent_trajectory_ref(
+    payload: dict[str, Any], transcript_path: str | None
+) -> TrajectoryReference | None:
     if transcript_path is None:
         return None
     # H4: a subagent's dedicated rollout carries inherited ancestor session_meta

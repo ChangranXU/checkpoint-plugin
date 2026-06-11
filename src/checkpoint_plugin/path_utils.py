@@ -18,7 +18,9 @@ def path_within(path: Path, root: Path) -> bool:
     return resolved == resolved_root or resolved_root in resolved.parents
 
 
-def path_matches_root(path: Path, root: Path, *, kind: PathRootKind = "directory") -> bool:
+def path_matches_root(
+    path: Path, root: Path, *, kind: PathRootKind = "directory"
+) -> bool:
     resolved = path.resolve(strict=False)
     resolved_root = root.resolve(strict=False)
     if kind == "file":
@@ -37,7 +39,9 @@ def rewrite_path_references_bytes(data: bytes, path_map: Mapping[str, str]) -> b
 
 def rewrite_path_references_text(text: str, path_map: Mapping[str, str]) -> str:
     replacements: list[tuple[str, str]] = []
-    for source, dest in sorted(path_map.items(), key=lambda item: len(item[0]), reverse=True):
+    for source, dest in sorted(
+        path_map.items(), key=lambda item: len(item[0]), reverse=True
+    ):
         if not source or not dest or source == dest:
             continue
         source_text = source.rstrip("/") if source != "/" else source
@@ -62,13 +66,17 @@ def rewrite_path_references_text(text: str, path_map: Mapping[str, str]) -> str:
     return "".join(result)
 
 
-def _path_reference_match_at(text: str, index: int, replacements: list[tuple[str, str]]) -> tuple[str, str] | None:
+def _path_reference_match_at(
+    text: str, index: int, replacements: list[tuple[str, str]]
+) -> tuple[str, str] | None:
     before = text[index - 1 : index]
     for source, dest in replacements:
         if not text.startswith(source, index):
             continue
         after = text[index + len(source) : index + len(source) + 1]
-        if _path_reference_boundary_before(before) and _path_reference_boundary_after(after):
+        if _path_reference_boundary_before(before) and _path_reference_boundary_after(
+            after
+        ):
             return source, dest
     return None
 

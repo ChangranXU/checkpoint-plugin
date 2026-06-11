@@ -4,8 +4,6 @@ import json
 import tempfile
 from pathlib import Path
 
-import pytest
-
 
 def test_opencode_resume_generates_time_ordered_message_ids(tmp_path):
     """OpenCode requires time-ordered message IDs for continuation logic.
@@ -41,33 +39,45 @@ def test_opencode_resume_generates_time_ordered_message_ids(tmp_path):
     trajectory = []
     for i, turn in enumerate(turns):
         trajectory.append(
-            json.dumps({
-                "type": "turn",
-                "user_message": turn["user"],
-                "assistant_text": turn["assistant"],
-                "created_ts": f"2026-06-03T10:00:{i:02d}+00:00",
-                "metadata": {
-                    "hook_payload": {
-                        "finish": turn["finish"],
-                    }
+            json.dumps(
+                {
+                    "type": "turn",
+                    "user_message": turn["user"],
+                    "assistant_text": turn["assistant"],
+                    "created_ts": f"2026-06-03T10:00:{i:02d}+00:00",
+                    "metadata": {
+                        "hook_payload": {
+                            "finish": turn["finish"],
+                        }
+                    },
                 }
-            })
+            )
         )
 
     (session_dir / "trajectory.jsonl").write_text("\n".join(trajectory))
-    (session_dir / "metadata.json").write_text(json.dumps({
-        "session_id": "test_oc_session",
-        "provider": "opencode",
-        "cwd": str(tmp_path),
-        "start_ts": "2026-06-03T10:00:00+00:00"
-    }))
+    (session_dir / "metadata.json").write_text(
+        json.dumps(
+            {
+                "session_id": "test_oc_session",
+                "provider": "opencode",
+                "cwd": str(tmp_path),
+                "start_ts": "2026-06-03T10:00:00+00:00",
+            }
+        )
+    )
     (session_dir / "manifests").mkdir()
-    (session_dir / "manifests" / "index.json").write_text(json.dumps({"0": "turn_0000.json"}))
-    (session_dir / "manifests" / "turn_0000.json").write_text(json.dumps({
-        "turn": 0,
-        "trajectory_ref": None,
-        "cwd": str(tmp_path),
-    }))
+    (session_dir / "manifests" / "index.json").write_text(
+        json.dumps({"0": "turn_0000.json"})
+    )
+    (session_dir / "manifests" / "turn_0000.json").write_text(
+        json.dumps(
+            {
+                "turn": 0,
+                "trajectory_ref": None,
+                "cwd": str(tmp_path),
+            }
+        )
+    )
 
     # Resume at turn 2 (all 3 turns should be in the import file)
     opencode_home = tmp_path / ".config" / "opencode"
@@ -153,8 +163,22 @@ def test_opencode_resume_preserves_parent_id_chain():
     # Create trajectory with raw_messages that have parentID references
     raw_messages = [
         {
-            "info": {"id": "msg_orig_001", "sessionID": "ses_orig", "role": "user", "time": {"created": 1000}, "agent": "build"},
-            "parts": [{"id": "prt_001", "type": "text", "text": "hello", "messageID": "msg_orig_001", "sessionID": "ses_orig"}]
+            "info": {
+                "id": "msg_orig_001",
+                "sessionID": "ses_orig",
+                "role": "user",
+                "time": {"created": 1000},
+                "agent": "build",
+            },
+            "parts": [
+                {
+                    "id": "prt_001",
+                    "type": "text",
+                    "text": "hello",
+                    "messageID": "msg_orig_001",
+                    "sessionID": "ses_orig",
+                }
+            ],
         },
         {
             "info": {
@@ -170,23 +194,42 @@ def test_opencode_resume_preserves_parent_id_chain():
                 "providerID": "opencode",
                 "path": {"cwd": "/test", "root": "/"},
                 "cost": 0,
-                "tokens": {"input": 10, "output": 5, "reasoning": 2, "cache": {"read": 0, "write": 0}}
+                "tokens": {
+                    "input": 10,
+                    "output": 5,
+                    "reasoning": 2,
+                    "cache": {"read": 0, "write": 0},
+                },
             },
-            "parts": [{"id": "prt_002", "type": "text", "text": "Hi!", "messageID": "msg_orig_002", "sessionID": "ses_orig"}]
-        }
+            "parts": [
+                {
+                    "id": "prt_002",
+                    "type": "text",
+                    "text": "Hi!",
+                    "messageID": "msg_orig_002",
+                    "sessionID": "ses_orig",
+                }
+            ],
+        },
     ]
 
-    trajectory = json.dumps({
-        "type": "turn",
-        "user_message": "hello",
-        "assistant_text": "Hi!",
-        "metadata": {
-            "hook_payload": {
-                "raw_messages": raw_messages,
-                "session_info": {"id": "ses_orig", "slug": "test", "projectID": "global"}
-            }
+    trajectory = json.dumps(
+        {
+            "type": "turn",
+            "user_message": "hello",
+            "assistant_text": "Hi!",
+            "metadata": {
+                "hook_payload": {
+                    "raw_messages": raw_messages,
+                    "session_info": {
+                        "id": "ses_orig",
+                        "slug": "test",
+                        "projectID": "global",
+                    },
+                }
+            },
         }
-    }).encode()
+    ).encode()
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmppath = Path(tmpdir)
@@ -292,7 +335,9 @@ def test_opencode_resume_preserves_session_info_fields(tmp_path):
 
     opencode_home = tmp_path / ".config" / "opencode"
     opencode_home.mkdir(parents=True)
-    import_path = _write_opencode_session(opencode_home, tmp_path, "ses_resumed", trajectory)
+    import_path = _write_opencode_session(
+        opencode_home, tmp_path, "ses_resumed", trajectory
+    )
 
     assert import_path is not None
     import_data = json.loads(import_path.read_text())
@@ -302,7 +347,9 @@ def test_opencode_resume_preserves_session_info_fields(tmp_path):
     assert info["directory"] == str(tmp_path)
     assert info["agent"] == "build"
     assert info["model"] == {"id": "big-pickle", "providerID": "opencode"}
-    assert info["permission"] == [{"permission": "task", "action": "deny", "pattern": "*"}]
+    assert info["permission"] == [
+        {"permission": "task", "action": "deny", "pattern": "*"}
+    ]
     assert info["metadata"] == {"runtime": "kept"}
     assert info["workspaceID"] == "workspace-1"
     assert info["share"] == {"url": "https://example.com/share"}
@@ -316,14 +363,38 @@ def test_opencode_resume_preserves_session_info_fields(tmp_path):
     )
 
 
+def test_opencode_resume_defaults_non_finite_integer_fields():
+    from checkpoint_plugin.resume import _int_or_default
+
+    assert _int_or_default(float("inf"), 1234) == 1234
+    assert _int_or_default(float("-inf"), 1234) == 1234
+    assert _int_or_default(float("nan"), 1234) == 1234
+
+
 def test_opencode_resume_restores_session_messages_and_todos(tmp_path, monkeypatch):
     import sqlite3
-    from checkpoint_plugin.resume import _write_opencode_session, restore_opencode_metadata
+    from checkpoint_plugin.resume import (
+        _write_opencode_session,
+        restore_opencode_metadata,
+    )
 
     raw_messages = [
         {
-            "info": {"id": "msg_user", "sessionID": "ses_orig", "role": "user", "time": {"created": 1000}},
-            "parts": [{"id": "prt_user", "type": "text", "text": "hello", "messageID": "msg_user", "sessionID": "ses_orig"}],
+            "info": {
+                "id": "msg_user",
+                "sessionID": "ses_orig",
+                "role": "user",
+                "time": {"created": 1000},
+            },
+            "parts": [
+                {
+                    "id": "prt_user",
+                    "type": "text",
+                    "text": "hello",
+                    "messageID": "msg_user",
+                    "sessionID": "ses_orig",
+                }
+            ],
         },
         {
             "info": {
@@ -334,7 +405,15 @@ def test_opencode_resume_restores_session_messages_and_todos(tmp_path, monkeypat
                 "time": {"created": 2000, "completed": 3000},
                 "finish": "stop",
             },
-            "parts": [{"id": "prt_assistant", "type": "text", "text": "Hi!", "messageID": "msg_assistant", "sessionID": "ses_orig"}],
+            "parts": [
+                {
+                    "id": "prt_assistant",
+                    "type": "text",
+                    "text": "Hi!",
+                    "messageID": "msg_assistant",
+                    "sessionID": "ses_orig",
+                }
+            ],
         },
     ]
     trajectory = (
@@ -346,14 +425,20 @@ def test_opencode_resume_restores_session_messages_and_todos(tmp_path, monkeypat
                 "metadata": {
                     "hook_payload": {
                         "raw_messages": raw_messages,
-                        "session_info": {"id": "ses_orig", "slug": "test", "projectID": "global"},
+                        "session_info": {
+                            "id": "ses_orig",
+                            "slug": "test",
+                            "projectID": "global",
+                        },
                         "session_messages": [
                             {
                                 "id": "evt_orig",
                                 "sessionID": "ses_orig",
                                 "type": "model-switched",
                                 "time": {"created": 111, "updated": 112},
-                                "data": {"model": {"id": "big-pickle", "variant": "default"}},
+                                "data": {
+                                    "model": {"id": "big-pickle", "variant": "default"}
+                                },
                             }
                         ],
                         "todos": [
@@ -375,7 +460,9 @@ def test_opencode_resume_restores_session_messages_and_todos(tmp_path, monkeypat
 
     opencode_home = tmp_path / ".config" / "opencode"
     opencode_home.mkdir(parents=True)
-    import_path = _write_opencode_session(opencode_home, tmp_path, "ses_resumed", trajectory)
+    import_path = _write_opencode_session(
+        opencode_home, tmp_path, "ses_resumed", trajectory
+    )
     assert import_path is not None
 
     import_data = json.loads(import_path.read_text(encoding="utf-8"))
@@ -424,12 +511,19 @@ def test_opencode_resume_restores_session_messages_and_todos(tmp_path, monkeypat
 
 
 def test_opencode_runtime_config_carries_mcp_overlay_without_secrets(tmp_path):
-    from checkpoint_plugin.resume import _materialize_runtime_config, _runtime_process_env
+    from checkpoint_plugin.resume import (
+        _materialize_runtime_config,
+        _runtime_process_env,
+    )
     from checkpoint_plugin.types import EnvironmentState
 
     target_env = EnvironmentState(
         provider="opencode",
-        mcp_servers={"context7": "inactive", "filesystem": "active", "failed_server": "failed"},
+        mcp_servers={
+            "context7": "inactive",
+            "filesystem": "active",
+            "failed_server": "failed",
+        },
         extra={
             "opencode_config_content": json.dumps(
                 {
@@ -477,7 +571,11 @@ def test_opencode_runtime_config_carries_mcp_overlay_without_secrets(tmp_path):
 
 
 def test_opencode_runtime_config_rewrites_path_values(tmp_path, monkeypatch):
-    from checkpoint_plugin.resume import _environment_for_runtime, _materialize_runtime_config, _runtime_path_map
+    from checkpoint_plugin.resume import (
+        _environment_for_runtime,
+        _materialize_runtime_config,
+        _runtime_path_map,
+    )
     from checkpoint_plugin.env.providers import opencode_layout
     from checkpoint_plugin.types import EnvironmentState
 
@@ -539,7 +637,10 @@ def test_opencode_runtime_config_skips_redacted_only_config(tmp_path):
 
     _materialize_runtime_config("opencode", runtime_home, target_env)
 
-    assert json.loads((runtime_home / "opencode.json").read_text(encoding="utf-8")) == existing
+    assert (
+        json.loads((runtime_home / "opencode.json").read_text(encoding="utf-8"))
+        == existing
+    )
 
 
 def test_opencode_runtime_config_preserves_empty_container_overrides(tmp_path):
@@ -549,7 +650,9 @@ def test_opencode_runtime_config_preserves_empty_container_overrides(tmp_path):
     runtime_home = tmp_path / "opencode"
     runtime_home.mkdir()
     (runtime_home / "opencode.json").write_text(
-        json.dumps({"plugin": [{"path": "current.ts"}], "mcp": {"old": {"enabled": True}}}),
+        json.dumps(
+            {"plugin": [{"path": "current.ts"}], "mcp": {"old": {"enabled": True}}}
+        ),
         encoding="utf-8",
     )
     target_env = EnvironmentState(
@@ -559,13 +662,19 @@ def test_opencode_runtime_config_preserves_empty_container_overrides(tmp_path):
 
     _materialize_runtime_config("opencode", runtime_home, target_env)
 
-    assert json.loads((runtime_home / "opencode.json").read_text(encoding="utf-8")) == {"mcp": {}, "plugin": []}
+    assert json.loads((runtime_home / "opencode.json").read_text(encoding="utf-8")) == {
+        "mcp": {},
+        "plugin": [],
+    }
 
 
 def test_opencode_resume_command_is_simple_resume_open():
     from checkpoint_plugin.resume import _resume_command
 
-    assert _resume_command("opencode", "ses_resumed", None) == "checkpoint resume-open ses_resumed"
+    assert (
+        _resume_command("opencode", "ses_resumed", None)
+        == "checkpoint resume-open ses_resumed"
+    )
 
 
 def test_opencode_resume_open_spec_imports_metadata_then_opens(tmp_path):
@@ -589,7 +698,14 @@ def test_opencode_resume_open_spec_imports_metadata_then_opens(tmp_path):
     assert spec.env == runtime_env
     assert spec.preflight == [
         ["opencode", "import", str(import_path)],
-        [sys.executable, "-m", "checkpoint_plugin.cli", "opencode-restore-metadata", str(import_path), "ses_resumed"],
+        [
+            sys.executable,
+            "-m",
+            "checkpoint_plugin.cli",
+            "opencode-restore-metadata",
+            str(import_path),
+            "ses_resumed",
+        ],
     ]
     assert spec.command == ["opencode", "--session", "ses_resumed"]
 
@@ -609,7 +725,12 @@ def test_opencode_resume_of_resume_uses_checkpoint_jsonl(tmp_path, monkeypatch):
     monkeypatch.setenv("CHECKPOINT_PROVIDER", "opencode")
 
     def msg(message_id, role, text, parent_id=None):
-        info = {"id": message_id, "sessionID": "ses_orig", "role": role, "time": {"created": 1000}}
+        info = {
+            "id": message_id,
+            "sessionID": "ses_orig",
+            "role": role,
+            "time": {"created": 1000},
+        }
         if parent_id is not None:
             info["parentID"] = parent_id
         if role == "assistant":
@@ -634,7 +755,12 @@ def test_opencode_resume_of_resume_uses_checkpoint_jsonl(tmp_path, monkeypatch):
         msg("msg_user_2", "user", "second", "msg_assistant_1"),
         msg("msg_assistant_2", "assistant", "two", "msg_user_2"),
     ]
-    session_info = {"id": "ses_orig", "slug": "test", "projectID": "global", "title": "Test"}
+    session_info = {
+        "id": "ses_orig",
+        "slug": "test",
+        "projectID": "global",
+        "title": "Test",
+    }
 
     coordinator = CheckpointCoordinator(session_id="s1", cwd=cwd)
     coordinator.on_session_start()
@@ -642,14 +768,21 @@ def test_opencode_resume_of_resume_uses_checkpoint_jsonl(tmp_path, monkeypatch):
         TurnRecord(
             user_message="first",
             assistant_text="one",
-            metadata={"hook_payload": {"raw_messages": messages[:2], "session_info": session_info}},
+            metadata={
+                "hook_payload": {
+                    "raw_messages": messages[:2],
+                    "session_info": session_info,
+                }
+            },
         )
     )
     coordinator.on_turn_end(
         TurnRecord(
             user_message="second",
             assistant_text="two",
-            metadata={"hook_payload": {"raw_messages": messages, "session_info": session_info}},
+            metadata={
+                "hook_payload": {"raw_messages": messages, "session_info": session_info}
+            },
         )
     )
 
@@ -663,12 +796,18 @@ def test_opencode_resume_of_resume_uses_checkpoint_jsonl(tmp_path, monkeypatch):
     for turn_id in (0, 1):
         manifest = gen1_store.read_manifest(turn_id)
         assert manifest.trajectory_ref is not None
-        assert manifest.trajectory_ref.transcript_path == str(gen1_store.trajectory_path)
+        assert manifest.trajectory_ref.transcript_path == str(
+            gen1_store.trajectory_path
+        )
 
     gen2_orchestrator = ResumeOrchestrator(cwd=cwd)
-    gen2 = gen2_orchestrator.execute(gen2_orchestrator.plan(gen1.new_session_id, 1), lambda _text: True)
+    gen2 = gen2_orchestrator.execute(
+        gen2_orchestrator.plan(gen1.new_session_id, 1), lambda _text: True
+    )
 
     assert gen2.provider_session_path is not None
-    import_data = json.loads(Path(gen2.provider_session_path).read_text(encoding="utf-8"))
+    import_data = json.loads(
+        Path(gen2.provider_session_path).read_text(encoding="utf-8")
+    )
     assert import_data["info"]["id"] == gen2.new_session_id
     assert len(import_data["messages"]) == 4
